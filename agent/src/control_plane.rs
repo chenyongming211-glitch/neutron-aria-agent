@@ -12395,6 +12395,414 @@ mod tests {
         }
     }
 
+    fn local_projection_qos_both_fixture() -> FirewallState {
+        let mut state = FirewallState::default();
+        state.qos_rules = vec![
+            QosRuleInfo {
+                group_name: "web".to_string(),
+                group_id: 7,
+                direction: 0,
+                rate_bps: 1_000_000,
+                burst_bytes: 64_000,
+                priority: 1,
+                mode: 0,
+            },
+            QosRuleInfo {
+                group_name: "web".to_string(),
+                group_id: 7,
+                direction: 1,
+                rate_bps: 2_000_000,
+                burst_bytes: 128_000,
+                priority: 2,
+                mode: 1,
+            },
+        ];
+        state
+    }
+
+    fn local_projection_mirror_both_fixture() -> FirewallState {
+        let mut state = FirewallState::default();
+        state.mirror_rules = vec![
+            MirrorRuleInfo {
+                src_group_name: "src".to_string(),
+                src_group_id: 8,
+                dst_group_name: "dst".to_string(),
+                dst_group_id: 9,
+                proto: libc::IPPROTO_TCP as u8,
+                direction: 0,
+                target_iface: "mirror-old-ingress".to_string(),
+                target_ifindex: 42,
+                is_global: false,
+            },
+            MirrorRuleInfo {
+                src_group_name: "src".to_string(),
+                src_group_id: 8,
+                dst_group_name: "dst".to_string(),
+                dst_group_id: 9,
+                proto: libc::IPPROTO_TCP as u8,
+                direction: 1,
+                target_iface: "mirror-old-egress".to_string(),
+                target_ifindex: 43,
+                is_global: false,
+            },
+        ];
+        state
+    }
+
+    fn assert_same_qos_rule(actual: &QosRuleInfo, expected: &QosRuleInfo) {
+        assert_eq!(actual.group_name, expected.group_name);
+        assert_eq!(actual.group_id, expected.group_id);
+        assert_eq!(actual.direction, expected.direction);
+        assert_eq!(actual.rate_bps, expected.rate_bps);
+        assert_eq!(actual.burst_bytes, expected.burst_bytes);
+        assert_eq!(actual.priority, expected.priority);
+        assert_eq!(actual.mode, expected.mode);
+    }
+
+    fn assert_same_mirror_rule(actual: &MirrorRuleInfo, expected: &MirrorRuleInfo) {
+        assert_eq!(actual.src_group_name, expected.src_group_name);
+        assert_eq!(actual.src_group_id, expected.src_group_id);
+        assert_eq!(actual.dst_group_name, expected.dst_group_name);
+        assert_eq!(actual.dst_group_id, expected.dst_group_id);
+        assert_eq!(actual.proto, expected.proto);
+        assert_eq!(actual.direction, expected.direction);
+        assert_eq!(actual.target_iface, expected.target_iface);
+        assert_eq!(actual.target_ifindex, expected.target_ifindex);
+        assert_eq!(actual.is_global, expected.is_global);
+    }
+
+    fn assert_qos_rule(
+        state: &FirewallState,
+        group_id: u32,
+        direction: u8,
+        rate_bps: u64,
+        burst_bytes: u64,
+        priority: u8,
+        mode: u8,
+    ) {
+        let rule = state
+            .qos_rules
+            .iter()
+            .find(|rule| rule.group_id == group_id && rule.direction == direction)
+            .expect("expected QoS direction in final state");
+        assert_eq!(rule.rate_bps, rate_bps);
+        assert_eq!(rule.burst_bytes, burst_bytes);
+        assert_eq!(rule.priority, priority);
+        assert_eq!(rule.mode, mode);
+    }
+
+    fn assert_mirror_targets(
+        state: &FirewallState,
+        src_group_id: u32,
+        dst_group_id: u32,
+        proto: u8,
+        expected: &[(u8, u32)],
+    ) {
+        for (direction, target_ifindex) in expected {
+            let rule = state
+                .mirror_rules
+                .iter()
+                .find(|rule| {
+                    rule.src_group_id == src_group_id
+                        && rule.dst_group_id == dst_group_id
+                        && rule.proto == proto
+                        && rule.direction == *direction
+                })
+                .expect("expected Mirror direction in final state");
+            assert_eq!(rule.target_ifindex, *target_ifindex);
+        }
+    }
+
+    fn assert_receipts_restore_complete_qos_preimages(
+        old_state: &FirewallState,
+        operations: &[ManagedLocalDomainOperation],
+    ) {
+        for operation in operations {
+            let (group_id, direction) = match operation {
+                ManagedLocalDomainOperation::QosUpsert(rule) => (rule.group_id, rule.direction),
+                ManagedLocalDomainOperation::QosDelete {
+                    group_id,
+                    direction,
+                } => (*group_id, *direction),
+                _ => continue,
+            };
+            let expected = old_state
+                .qos_rules
+                .iter()
+                .find(|rule| rule.group_id == group_id && rule.direction == direction)
+                .expect("fixture must contain an exact QoS preimage");
+            let receipt = build_managed_local_domain_receipt(operation, old_state)
+                .expect("QoS receipt must capture its preimage");
+            let compensation = managed_local_domain_compensation_operations(&receipt);
+            let restored = compensation
+                .iter()
+                .find_map(|operation| match operation {
+                    ManagedLocalDomainOperation::QosUpsert(rule) => Some(rule),
+                    _ => None,
+                })
+                .expect("QoS compensation must restore the old rule");
+            assert_same_qos_rule(restored, expected);
+        }
+    }
+
+    fn assert_receipts_restore_complete_mirror_preimages(
+        old_state: &FirewallState,
+        operations: &[ManagedLocalDomainOperation],
+    ) {
+        for operation in operations {
+            let (src_group_id, dst_group_id, proto, direction, is_global) = match operation {
+                ManagedLocalDomainOperation::MirrorUpsert(rule) => (
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    rule.is_global,
+                ),
+                ManagedLocalDomainOperation::MirrorDelete {
+                    src_group_id,
+                    dst_group_id,
+                    proto,
+                    direction,
+                    is_global,
+                } => (*src_group_id, *dst_group_id, *proto, *direction, *is_global),
+                _ => continue,
+            };
+            let expected = old_state
+                .mirror_rules
+                .iter()
+                .find(|rule| {
+                    rule.direction == direction
+                        && if is_global {
+                            rule.is_global
+                        } else {
+                            !rule.is_global
+                                && rule.src_group_id == src_group_id
+                                && rule.dst_group_id == dst_group_id
+                                && rule.proto == proto
+                        }
+                })
+                .expect("fixture must contain an exact Mirror preimage");
+            let receipt = build_managed_local_domain_receipt(operation, old_state)
+                .expect("Mirror receipt must capture its preimage");
+            let compensation = managed_local_domain_compensation_operations(&receipt);
+            let restored = compensation
+                .iter()
+                .find_map(|operation| match operation {
+                    ManagedLocalDomainOperation::MirrorUpsert(rule) => Some(rule),
+                    _ => None,
+                })
+                .expect("Mirror compensation must restore the old rule");
+            assert_same_mirror_rule(restored, expected);
+        }
+    }
+
+    fn actual_qos(group_id: u32, direction: u8, rate_bps: u64) -> QosRuleInfo {
+        QosRuleInfo {
+            group_name: format!("actual-{group_id}"),
+            group_id,
+            direction,
+            rate_bps,
+            burst_bytes: 1,
+            priority: 1,
+            mode: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_projection_clean_compensation_restores_verified_health() {
+        let health = std::cell::RefCell::new(Vec::new());
+        let failure = execute_managed_local_projection_transaction(
+            &["ingress", "egress"],
+            |next| health.borrow_mut().push(next),
+            |direction| {
+                if *direction == "egress" {
+                    std::future::ready(Err(ManagedLocalApplyFailure::clean(
+                        "forced egress failure",
+                    )))
+                } else {
+                    std::future::ready(Ok(*direction))
+                }
+            },
+            || std::future::ready(Ok::<(), String>(())),
+            |_receipt| std::future::ready(Ok::<(), String>(())),
+            || std::future::ready(Ok::<(), String>(())),
+        )
+        .await
+        .expect_err("later direction must fail");
+
+        assert!(!failure.recovery_required());
+        assert!(failure.contains("forced egress failure"));
+        assert_eq!(
+            health.into_inner(),
+            vec![
+                ManagedProjectionHealth::Unverified,
+                ManagedProjectionHealth::Verified,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn local_projection_compensation_failure_is_attempt_all_and_recovery_required() {
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let failure = execute_managed_local_projection_transaction(
+            &["first", "second", "third"],
+            |_health| {},
+            |operation| {
+                if *operation == "third" {
+                    std::future::ready(Err(ManagedLocalApplyFailure::recovery_required(
+                        "third write failed",
+                        "third self-compensation failed",
+                    )))
+                } else {
+                    std::future::ready(Ok(*operation))
+                }
+            },
+            || std::future::ready(Ok::<(), String>(())),
+            |receipt| {
+                attempts.borrow_mut().push(*receipt);
+                std::future::ready(if *receipt == "second" {
+                    Err("second compensation failed".to_string())
+                } else {
+                    Ok(())
+                })
+            },
+            || std::future::ready(Ok::<(), String>(())),
+        )
+        .await
+        .expect_err("compensation failure must remain visible");
+
+        assert!(failure.recovery_required());
+        assert!(failure.contains("third write failed"));
+        assert!(failure.contains("third self-compensation failed"));
+        assert!(failure.contains("second compensation failed"));
+        assert_eq!(attempts.into_inner(), vec!["second", "first"]);
+    }
+
+    #[test]
+    fn standalone_qos_both_plan_is_one_final_state_with_exact_preimages() {
+        let old = local_projection_qos_both_fixture();
+        let plans = managed_qos_direction_plans(2, 1).unwrap();
+        let operations = plan_managed_local_qos_upserts(
+            &old,
+            "web",
+            7,
+            8_000_000,
+            256_000,
+            4,
+            &plans,
+        )
+        .unwrap();
+        let final_state = managed_local_state_after_domain_operations(&old, &operations).unwrap();
+
+        assert_eq!(final_state.qos_rules.len(), old.qos_rules.len());
+        assert_qos_rule(&final_state, 7, 0, 8_000_000, 256_000, 4, 0);
+        assert_qos_rule(&final_state, 7, 1, 8_000_000, 256_000, 4, 1);
+        assert_receipts_restore_complete_qos_preimages(&old, &operations);
+    }
+
+    #[test]
+    fn standalone_mirror_both_plan_is_one_final_state_with_exact_preimages() {
+        let old = local_projection_mirror_both_fixture();
+        let operations = plan_managed_local_mirror_upserts(
+            &old,
+            "src",
+            8,
+            "dst",
+            9,
+            libc::IPPROTO_TCP as u8,
+            "mirror-new",
+            84,
+            &[0, 1],
+        )
+        .unwrap();
+        let final_state = managed_local_state_after_domain_operations(&old, &operations).unwrap();
+
+        assert_mirror_targets(
+            &final_state,
+            8,
+            9,
+            libc::IPPROTO_TCP as u8,
+            &[(0, 84), (1, 84)],
+        );
+        assert_receipts_restore_complete_mirror_preimages(&old, &operations);
+    }
+
+    #[test]
+    fn standalone_qos_both_delete_receipts_restore_exact_rules() {
+        let old = local_projection_qos_both_fixture();
+        let operations = plan_managed_local_qos_delete(&old, 7, &[0, 1]).unwrap();
+        let final_state = managed_local_state_after_domain_operations(&old, &operations).unwrap();
+
+        assert!(!final_state
+            .qos_rules
+            .iter()
+            .any(|rule| rule.group_id == 7));
+        assert_receipts_restore_complete_qos_preimages(&old, &operations);
+    }
+
+    #[test]
+    fn standalone_mirror_both_delete_receipts_restore_exact_rules() {
+        let old = local_projection_mirror_both_fixture();
+        let operations = plan_managed_local_mirror_delete(
+            &old,
+            8,
+            9,
+            libc::IPPROTO_TCP as u8,
+            &[0, 1],
+        )
+        .unwrap();
+        let final_state = managed_local_state_after_domain_operations(&old, &operations).unwrap();
+
+        assert!(!final_state.mirror_rules.iter().any(|rule| {
+            rule.src_group_id == 8
+                && rule.dst_group_id == 9
+                && rule.proto == libc::IPPROTO_TCP as u8
+        }));
+        assert_receipts_restore_complete_mirror_preimages(&old, &operations);
+    }
+
+    #[test]
+    fn local_projection_recovery_admission_is_domain_scoped() {
+        let mut state = FirewallState::default();
+        state.mark_local_projection_recovery(
+            "qos",
+            LocalProjectionRecovery::new("forced rollback failure"),
+        );
+
+        assert!(local_projection_recovery_admission(&state, LocalWriteDomain::Qos).is_err());
+        assert!(local_projection_recovery_admission(&state, LocalWriteDomain::Mirror).is_ok());
+    }
+
+    #[test]
+    fn local_projection_recovery_is_the_stable_maintenance_reason() {
+        let mut state = FirewallState::default();
+        state.mark_local_projection_recovery(
+            "mirror",
+            LocalProjectionRecovery::new("forced rollback failure"),
+        );
+
+        assert_eq!(
+            local_projection_maintenance_reason(&state, 3).as_deref(),
+            Some("local_projection_recovery_required:mirror")
+        );
+    }
+
+    #[test]
+    fn managed_startup_recovery_plan_repairs_expected_before_deleting_extra() {
+        let desired = local_projection_qos_both_fixture();
+        let actual = vec![actual_qos(7, 0, 99), actual_qos(100, 1, 1)];
+        let operations = plan_local_projection_runtime_repair(&desired, &actual, &[], &[]).unwrap();
+
+        assert!(matches!(
+            operations[0],
+            ManagedLocalDomainOperation::QosUpsert(_)
+        ));
+        assert!(matches!(
+            operations.last().unwrap(),
+            ManagedLocalDomainOperation::QosDelete { .. }
+        ));
+    }
+
     fn managed_cross_domain_projection(
         state: &FirewallState,
     ) -> aria_core::ebpf_ops::ManagedGroupProjection {

@@ -1197,6 +1197,23 @@ mod tests {
     }
 
     #[test]
+    fn standalone_start_clears_recovery_only_after_replay_and_registration() {
+        let source = include_str!("system_manager.rs");
+        let start = source
+            .split("pub async fn system_start(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn system_stop(")
+            .next()
+            .unwrap();
+        let replay = start.find("replay_state_from_snapshot").unwrap();
+        let register = start.find("register_system_instance").unwrap();
+
+        assert!(replay < register);
+        assert!(!start[..register].contains("clear_local_projection_recoveries"));
+    }
+
+    #[test]
     fn standalone_review_preexisting_pin_dir_cleans_only_transaction_pins() {
         let pin_path = std::env::temp_dir().join(format!(
             "aria-standalone-individual-pin-cleanup-{}",

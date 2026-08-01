@@ -1083,6 +1083,45 @@ mod tests {
     }
 
     #[test]
+    fn local_projection_recovery_defaults_empty_and_round_trips_both_domains() {
+        let mut legacy_json = serde_json::to_value(FirewallState::default()).unwrap();
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("local_projection_recoveries");
+        let legacy: FirewallState = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.local_projection_recoveries.is_empty());
+
+        let mut state = FirewallState::default();
+        state.mark_local_projection_recovery(
+            "qos",
+            LocalProjectionRecovery::new("qos compensation failed"),
+        );
+        state.mark_local_projection_recovery(
+            "mirror",
+            LocalProjectionRecovery::new("mirror compensation failed"),
+        );
+        let decoded: FirewallState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(decoded.local_projection_recoveries.len(), 2);
+        assert_eq!(decoded.local_projection_recoveries["qos"].version, 1);
+        assert_eq!(
+            decoded.local_projection_recoveries["mirror"].reason,
+            "mirror compensation failed"
+        );
+    }
+
+    #[test]
+    fn local_projection_recovery_clear_is_domain_scoped() {
+        let mut state = FirewallState::default();
+        state.mark_local_projection_recovery("qos", LocalProjectionRecovery::new("q"));
+        state.mark_local_projection_recovery("mirror", LocalProjectionRecovery::new("m"));
+        state.clear_local_projection_recovery("qos");
+        assert!(!state.local_projection_recovery_required("qos"));
+        assert!(state.local_projection_recovery_required("mirror"));
+    }
+
+    #[test]
     fn quarantined_fresh_bitmap_advances_next_cursor_across_restart() {
         let mut state = FirewallState::default();
         state
