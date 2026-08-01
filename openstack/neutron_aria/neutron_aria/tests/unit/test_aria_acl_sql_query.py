@@ -1,6 +1,9 @@
 from __future__ import absolute_import
 
 import inspect
+import os
+import tempfile
+import threading
 import unittest
 
 try:
@@ -205,6 +208,105 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             ),
         )
         self.assertEqual(3, len(null_policy))
+
+    def test_concurrent_port_status_upserts_converge_without_conflict(self):
+        from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
+
+        barrier = threading.Barrier(2)
+
+        class CoordinatedRepository(NeutronDbAriaAclRepository):
+            def get_port_status(self, port_id, host=None):
+                current = super(CoordinatedRepository, self).get_port_status(
+                    port_id,
+                    host=host,
+                )
+                if host is not None and current is None:
+                    barrier.wait(timeout=5)
+                return current
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        engine = sa.create_engine(
+            "sqlite:///%s" % path,
+            connect_args={"check_same_thread": False, "timeout": 5},
+        )
+        session_factory = sessionmaker(bind=engine)
+        bootstrap_session = session_factory()
+        context = type("Context", (object,), {"session": bootstrap_session})()
+        NeutronDbAriaAclRepository(context, auto_create=True)
+        bootstrap_session.close()
+        errors = []
+
+        def write_status(generation):
+            session = session_factory()
+            context = type("Context", (object,), {"session": session})()
+            repository = CoordinatedRepository(context, auto_create=False)
+            try:
+                repository.upsert_port_status({
+                    "port_id": "port-1",
+                    "host": "ostack2",
+                    "status": "ready",
+                    "generation": generation,
+                })
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                session.close()
+
+        threads = [
+            threading.Thread(target=write_status, args=(generation,))
+            for generation in (1, 2)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual([], errors)
+
+            verify_session = session_factory()
+            verify_context = type(
+                "Context",
+                (object,),
+                {"session": verify_session},
+            )()
+            repository = NeutronDbAriaAclRepository(
+                verify_context,
+                auto_create=False,
+            )
+            status = repository.get_port_status("port-1", host="ostack2")
+            self.assertIsNotNone(status)
+            self.assertIn(status["generation"], (1, 2))
+            verify_session.close()
+        finally:
+            engine.dispose()
+            os.unlink(path)
+
+    def test_address_set_delete_failure_restores_members_and_parent(self):
+        self.repository.create_address_set({
+            "id": "set-rollback",
+            "project_id": "project-1",
+            "members": [{"address": "10.0.0.0/24"}],
+        })
+        self.session.commit()
+        original_delete = self.repository._delete
+
+        def fail_parent_delete(*_args, **_kwargs):
+            raise RuntimeError("injected parent delete failure")
+
+        self.repository._delete = fail_parent_delete
+        try:
+            with self.assertRaises(RuntimeError):
+                self.repository.delete_address_set("set-rollback")
+        finally:
+            self.repository._delete = original_delete
+
+        restored = self.repository.get_address_set("set-rollback")
+        self.assertEqual(
+            [{"address": "10.0.0.0/24"}],
+            restored["members"],
+        )
 
 
 if __name__ == "__main__":

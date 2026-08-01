@@ -47,6 +47,47 @@ class NeutronClientTestCase(unittest.TestCase):
         self.assertEqual(1, client.calls[0]["limit"])
         self.assertEqual("p1", client.calls[1]["marker"])
 
+    def test_port_source_rejects_repeated_pagination_marker(self):
+        client = FakeNeutronClient([
+            {
+                "ports": [{"id": "p1"}],
+                "ports_links": [{"rel": "next", "href": "?marker=p1"}],
+            },
+            {
+                "ports": [{"id": "p1"}],
+                "ports_links": [{"rel": "next", "href": "?marker=p1"}],
+            },
+            {"ports": [{"id": "unexpected"}], "ports_links": []},
+        ])
+        source = NeutronPortSource(client, "ostack2", page_size=1)
+
+        with self.assertRaises(PortSourceUnavailable) as context:
+            source.list_ports_for_host()
+
+        self.assertIn("repeated pagination marker p1", str(context.exception))
+        self.assertEqual(2, len(client.calls))
+
+    def test_port_source_rejects_page_count_beyond_bound(self):
+        client = FakeNeutronClient([
+            {
+                "ports": [{"id": "p1"}],
+                "ports_links": [{"rel": "next", "href": "?marker=p1"}],
+            },
+            {
+                "ports": [{"id": "p2"}],
+                "ports_links": [{"rel": "next", "href": "?marker=p2"}],
+            },
+            {"ports": [{"id": "unexpected"}], "ports_links": []},
+        ])
+        source = NeutronPortSource(client, "ostack2", page_size=1)
+        source.max_pages = 2
+
+        with self.assertRaises(PortSourceUnavailable) as context:
+            source.list_ports_for_host()
+
+        self.assertIn("pagination exceeded 2 pages", str(context.exception))
+        self.assertEqual(2, len(client.calls))
+
     def test_full_resync_client_delegates_to_port_source(self):
         source = NeutronPortSource(
             FakeNeutronClient([{"ports": [{"id": "p1"}], "ports_links": []}]),

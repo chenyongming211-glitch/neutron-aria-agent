@@ -244,6 +244,28 @@ class AriaAclCliTest(unittest.TestCase):
             command.args2body(args),
         )
 
+    def test_address_set_update_requires_explicit_member_replacement(self):
+        command = aria_acl.AriaAclAddressSetUpdate(None, None)
+        parser = argparse.ArgumentParser()
+        command.add_known_arguments(parser)
+        option_strings = set(
+            option
+            for action in parser._actions
+            for option in action.option_strings
+        )
+        self.assertNotIn("--member", option_strings)
+        self.assertIn("--replace-member", option_strings)
+
+        args = parser.parse_args([
+            "--replace-member", "10.0.0.0/24",
+            "--replace-member", "10.0.1.1/32",
+        ])
+        body = command.args2body(args)["aria_acl_address_set"]
+        self.assertEqual(
+            ["10.0.0.0/24", "10.0.1.1/32"],
+            body["members"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
