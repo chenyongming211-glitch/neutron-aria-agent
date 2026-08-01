@@ -457,7 +457,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-017 | P3 | Legacy CLI package smoke | fixed | The legacy neutronclient installer now accepts `ADMIN_RC_FILE`, retains `/etc/kolla/.adminrc` as its default, validates that the selected host file is readable before container work, and forwards that exact path to Docker command discovery. A caller-provided credentials path is no longer ignored, and a missing path fails with an actionable error. | RED commit `1224129` and Build [30699715441](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30699715441) proved that the old public `smoke` entrypoint ignored a valid custom path; the run was cancelled after fast-contracts captured RED. GREEN commit `bffd831` passed custom-path and missing-path contracts, all fast/database contracts, Rust behaviors, and warning-denied eBPF/userspace/agent builds in exact-head Build [30699749054](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30699749054). This closes the shell routing defect without claiming a new privileged OpenStack-client field run. |
 | REVIEW-ACL-018 | P2 | Root install script | fixed | Earlier review found CRLF line endings that broke `bash -n install.sh` on Linux. Current tracked `install.sh` is LF-only and `bash -n install.sh` passes. | Keep the implementation item closed. Track the missing root-installer regression gate under CI verification debt. |
 | REVIEW-OPS-019 | P1 | Neutron WAL lifecycle | fixed | RED commit `5c79a28` and Build [`30601218345`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601218345) proved the missing lifecycle interface. GREEN commit `c3d8238` adds synchronous canonical checkpointing at 16 MiB soft, retains the last valid commit plus at most one unresolved intent, refuses uncertain/corrupt replay, installs with file-fsync/rename/directory-fsync ordering, and rejects pre-write when neither current nor compacted state can fit below 64 MiB. Exact-head Build [`30601633217`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217) passed 47 focused WAL behaviors and warning-denied Rust/eBPF/static builds. | Fixed. No privileged field evidence is applicable to this filesystem-only lifecycle repair. |
-| REVIEW-DOC-020 | P3 | Domain status documentation | open | `docs/openstack-neutron-aria-details/05-domain-status-heartbeat.md` lists rich Rust fields including `effective_action` as still planned, but `agent/src/neutron_api.rs` already emits `effective_action` and `agent/status.py` projects it into heartbeat summaries. | Refresh the detail document to distinguish implemented fields from remaining status work, and add a lightweight documentation/contract check for the current status DTO fields. |
+| REVIEW-DOC-020 | P3 | Domain status documentation | fixed | The former detail plan described `effective_action`, `support_disposition`, and the richer Rust domain DTO as future work even though Status V1, strict Python decoding, heartbeat aggregation, and ACL port-status projection were already implemented. Commit `b470f2f` replaces that stale plan with the current versioned contract, distinguishes legacy adaptation and `REVIEW-ACL-013` port-show work, and updates the detail index. | RED `0cf0835` / Build [30702240495](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30702240495) made `fast-contracts` reject the obsolete planned-contract claims. GREEN `b470f2f` / exact-head Build [30702418132](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30702418132) passed the complete fast-contract and Neutron DB lanes; Rust jobs correctly skipped for the documentation-only implementation commit. No privileged field evidence applies. |
 | REVIEW-TXN-021 | P1 | Snapshot accept before WAL | fixed | Historical finding: snapshot admission returned accepted semantics before durable intent. Admission now fsyncs intent while holding the apply lock, returns `pending`, and leaves accepted/applied on the committed baseline. | Fixed with durable-intent and WAL-intent-failure Rust regression tests plus the permanent `neutron_snapshot*` CI test gate. |
 | REVIEW-TXN-022 | P1 | Apply/commit metadata split | fixed | Historical finding: datapath could mutate before a failed commit while RAM/WAL retained the old classification. Commit failure now restores attach where possible, scrubs ACL to bypass, retains the failed pending generation, and enters blocked recovery. | Fixed with blocked-runtime/background-preservation tests and shared pre-commit/commit-failure recovery. |
 | REVIEW-ACL-023 | P2 | Detach/delete ignores ACL purge failure | implementation and hosted CI complete; privileged field evidence deferred | Historical finding: snapshot detach and direct port delete could continue after owned-ACL purge failure. Commit `49081c6` routes both through the transactional quiesce/purge boundary: snapshot detach records the port error and does not call `registry.detach`, while direct delete returns `detached=false`. Ordered behavior `neutron_acl_purge_failure_aborts_detach_without_partial_owned_state` proves detach is never attempted after the failed atomic purge. | Source behavior passed `fast-contracts`, `rust-behavior`, and `rust-build` in Build [29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181) at `ad30cad`; manually dispatched exact-head closure Build [30610771022](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30610771022) passed the same three jobs at `98034c1`. Keep real pinned-map purge evidence deferred with `REVIEW-ACL-065`; no additional production implementation is pending for this symptom and no field execution is claimed. |
@@ -574,9 +574,10 @@ verification-only, risk-classified, or closed.
 - `agent/src/main.rs` requires root, defaults HTTP to `127.0.0.1:8080`, and has
   no non-loopback validation or HTTP authentication layer; recorded as the
   bounded deployment risk `RISK-SEC-002`.
-- Current code contains Rust and Python `effective_action` projection while
-  `05-domain-status-heartbeat.md` still calls the rich Rust field planned,
-  confirming `REVIEW-DOC-020`.
+- At this refresh, Rust and Python already contained `effective_action`
+  projection while `05-domain-status-heartbeat.md` still called the rich Rust
+  field planned, confirming `REVIEW-DOC-020`; commit `b470f2f` later fixed the
+  documentation mismatch.
 - No local `cargo build`, `cargo check`, or `cargo test` was run, preserving the
   checkout policy.
 
@@ -929,6 +930,15 @@ verification before the next batch started.
     exposed the premature stop; exact-head implementation Build
     [30701829923](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30701829923)
     passed all selected WAL behaviors and warning-denied builds.
+    `REVIEW-DOC-020` is fixed by `b470f2f`: the former future-looking detail
+    plan is now an implementation-backed Status V1 reference covering typed
+    Rust evidence, strict Python/legacy compatibility, heartbeat aggregation,
+    and product status projection. RED Build
+    [30702240495](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30702240495)
+    rejected the stale claims; exact-head GREEN Build
+    [30702418132](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30702418132)
+    passed the fast-contract and Neutron DB lanes. Legacy Neutron port-show
+    population remains separately tracked as `REVIEW-ACL-013`.
     Also close
     `REVIEW-ACL-055` only after the three privileged summaries pass; retain
     `REVIEW-OPS-036` for XDP hook identity before advertising DDoS. Then handle
