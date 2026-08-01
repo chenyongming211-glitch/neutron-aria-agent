@@ -90,6 +90,9 @@ RUST_TESTS = [
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 STATUS_FIXTURE_PATH = os.path.join("docs", "neutron-status-contract-v1-scenarios.json")
+DOMAIN_STATUS_DOC_PATH = os.path.join(
+    "docs", "openstack-neutron-aria-details", "05-domain-status-heartbeat.md"
+)
 RUST_API_PATH = os.path.join("api", "src", "lib.rs")
 RUST_NEUTRON_API_PATH = os.path.join("agent", "src", "neutron_api.rs")
 RUST_MAIN_PATH = os.path.join("agent", "src", "main.rs")
@@ -474,6 +477,26 @@ def check_documented_ini_contract():
             raise SystemExit("ERROR: obsolete public configuration contract in %s" % path)
 
 
+def check_documented_status_contract():
+    print("==> checking documented Status V1 contract")
+    contents = read_text(DOMAIN_STATUS_DOC_PATH)
+    obsolete = (
+        "Status: partial implementation; richer Rust/domain DTO remains planned.",
+        "Current Rust `NeutronDomainStatus` is still mostly:",
+        "Rich Rust per-domain DTO fields such as `effective_action` and",
+    )
+    required = (
+        "## Implemented Status V1 Contract",
+        "`NeutronStatusV1Response`",
+        "`NeutronStatusDomainEvidence`",
+        "`docs/neutron-status-contract-v1-scenarios.json`",
+    )
+    if any(term in contents for term in obsolete):
+        raise SystemExit("ERROR: obsolete planned Status V1 claim remains documented")
+    if any(term not in contents for term in required):
+        raise SystemExit("ERROR: implemented Status V1 public contract is undocumented")
+
+
 def check_ebpf_abi_contract():
     print("==> checking public eBPF ACL ABI")
     abi = read_text(EBPF_ABI_PATH)
@@ -560,6 +583,7 @@ def run_fast_contracts():
     run_neutronclient_extension_tests()
     check_packaged_ini_contract()
     check_documented_ini_contract()
+    check_documented_status_contract()
     check_uds_contract_artifact()
     check_public_smoke_entrypoints()
     run_smoke_syntax()
