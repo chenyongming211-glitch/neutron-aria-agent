@@ -52,6 +52,19 @@ table_field() {
         }'
 }
 
+table_has_field() {
+    local field="$1"
+    awk -F'|' -v field="${field}" '
+        NF >= 4 {
+            key=$2
+            gsub(/^ +| +$/, "", key)
+            if (key == field) {
+                found=1
+            }
+        }
+        END { exit found ? 0 : 1 }'
+}
+
 api_json() {
     local method="$1"
     local path="$2"
@@ -194,8 +207,51 @@ if [ -n "${port_id}" ]; then
     neutron_cli aria-acl-binding-show "${api_binding_id}" | grep -q "${port_id}" || \
         die "CLI could not read API-created binding"
     log "cli_reads_api_binding=pass"
+
+    port_projection_payload="$(api_json GET "ports/${port_id}")"
+    printf '%s' "${port_projection_payload}" | "${PYTHON_BIN}" -c '
+from __future__ import print_function
+import json
+import sys
+
+port = (json.load(sys.stdin).get("port") or {})
+expected_fields = (
+    "aria_acl_enabled",
+    "aria_acl_effective_policy_id",
+    "aria_acl_effective_policy_name",
+    "aria_acl_effective_source",
+    "aria_acl_binding_id",
+    "aria_acl_effective_revision",
+    "aria_acl_runtime_status",
+    "aria_acl_runtime_host",
+    "aria_acl_runtime_reason",
+)
+missing = [field for field in expected_fields if field not in port]
+if missing:
+    raise SystemExit("port projection fields missing: %s" % ",".join(missing))
+if port.get("aria_acl_enabled") is not False:
+    raise SystemExit("disabled bindings must project aria_acl_enabled=false")
+if port.get("aria_acl_runtime_status") != "not_requested":
+    raise SystemExit("disabled bindings must project runtime_status=not_requested")
+'
+    port_show="$(neutron_cli port-show "${port_id}")"
+    for field in \
+        aria_acl_enabled \
+        aria_acl_effective_policy_id \
+        aria_acl_effective_policy_name \
+        aria_acl_effective_source \
+        aria_acl_binding_id \
+        aria_acl_effective_revision \
+        aria_acl_runtime_status \
+        aria_acl_runtime_host \
+        aria_acl_runtime_reason; do
+        printf '%s\n' "${port_show}" | table_has_field "${field}" || \
+            die "neutron port-show omitted ${field}: ${port_show}"
+    done
+    log "port_show_projection=pass"
 else
     log "binding_cross_check=skipped reason=no-port"
+    log "port_show_projection=skipped reason=no-port"
 fi
 
 neutron_cli aria-acl-port-status-list >/dev/null
