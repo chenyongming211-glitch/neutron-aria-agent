@@ -874,23 +874,30 @@ class NeutronDbAriaAclRepository(object):
     def delete_binding(self, binding_id):
         self._delete("bindings", binding_id, "aria_acl_binding")
 
+    @_neutron_write()
     def upsert_port_status(self, values):
         values = _clone(values)
         _require(values, ("port_id", "host"), "aria_acl_port_status")
         _stamp_status(values)
         table = self.tables["port_statuses"]
-        existing = self.get_port_status(values["port_id"], host=values["host"])
         db_values = self._db_values("port_statuses", values)
-        with self._write_transaction():
-            if existing:
-                self.session.execute(
-                    table.update().where(
-                        (table.c.port_id == values["port_id"]) &
-                        (table.c.host == values["host"])
-                    ).values(**db_values)
-                )
-            else:
-                self.session.execute(table.insert().values(**db_values))
+        row_identity = (
+            (table.c.port_id == values["port_id"]) &
+            (table.c.host == values["host"])
+        )
+        update = table.update().where(row_identity).values(**db_values)
+        result = self.session.execute(update)
+        if result.rowcount == 0:
+            insert_error = None
+            try:
+                with self.session.begin_nested():
+                    self.session.execute(table.insert().values(**db_values))
+            except self.sa.exc.IntegrityError as exc:
+                insert_error = exc
+            if insert_error is not None:
+                result = self.session.execute(update)
+                if result.rowcount == 0:
+                    raise insert_error
         return _clone(values)
 
     def get_port_status(self, port_id, host=None):
