@@ -12,6 +12,7 @@ STATE_DIR="${ROOT}/state"
 SITE_PACKAGES="/site-packages"
 EGG_NAME="neutron_aria-0.1.0-py2.7.egg"
 EGG_PATH="${ROOT}/${EGG_NAME}"
+ENTRYPOINT_PATH="/usr/local/bin/neutron-aria-agent"
 mkdir -p "${FAKE_BIN}" "${CONTAINER_ROOT}${SITE_PACKAGES}"
 printf 'new-agent-egg\n' >"${EGG_PATH}"
 
@@ -70,7 +71,7 @@ case "${command_name}" in
                 rm "$1" "${FAKE_CONTAINER_ROOT}$2"
                 ;;
             chmod)
-                exit 0
+                command chmod "$2" "${FAKE_CONTAINER_ROOT}$3"
                 ;;
             python)
                 cat >/dev/null
@@ -87,8 +88,13 @@ case "${command_name}" in
                 grep -Fv "${EGG_NAME}" "${pth}" >"${pth}.tmp" 2>/dev/null || true
                 mv "${pth}.tmp" "${pth}"
                 ;;
+            sh)
+                target="${FAKE_CONTAINER_ROOT}${!#}"
+                mkdir -p "$(dirname "${target}")"
+                cat >"${target}"
+                ;;
             neutron-aria-agent)
-                exit 0
+                test -x "${FAKE_CONTAINER_ROOT}${ENTRYPOINT_PATH}"
                 ;;
             *)
                 echo "unsupported fake docker exec: $*" >&2
@@ -104,7 +110,7 @@ esac
 EOF
 chmod +x "${FAKE_BIN}/id" "${FAKE_BIN}/date" "${FAKE_BIN}/docker"
 
-export EGG_NAME EGG_PATH SITE_PACKAGES STATE_DIR
+export EGG_NAME EGG_PATH ENTRYPOINT_PATH SITE_PACKAGES STATE_DIR
 export FAKE_CONTAINER_ROOT="${CONTAINER_ROOT}"
 export PATH="${FAKE_BIN}:${PATH}"
 
@@ -123,15 +129,37 @@ case "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${LATE
 esac
 
 test -f "${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+test -x "${CONTAINER_ROOT}${ENTRYPOINT_PATH}"
 grep -Fqx "./${EGG_NAME}" \
     "${CONTAINER_ROOT}${SITE_PACKAGES}/easy-install.pth"
 
 bash "${INSTALLER}" rollback >"${ROOT}/rollback.log"
 test ! -e "${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+test ! -e "${CONTAINER_ROOT}${ENTRYPOINT_PATH}"
 if grep -Fq "${EGG_NAME}" \
     "${CONTAINER_ROOT}${SITE_PACKAGES}/easy-install.pth"; then
     echo "first-install rollback left an easy-install.pth entry" >&2
     exit 1
 fi
+
+printf 'old-agent-egg\n' >"${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+mkdir -p "$(dirname "${CONTAINER_ROOT}${ENTRYPOINT_PATH}")"
+cat >"${CONTAINER_ROOT}${ENTRYPOINT_PATH}" <<'EOF'
+#!/usr/bin/env bash
+printf 'old-agent-entrypoint\n'
+EOF
+chmod 0755 "${CONTAINER_ROOT}${ENTRYPOINT_PATH}"
+
+bash "${INSTALLER}" install >"${ROOT}/upgrade.log"
+grep -Fqx 'new-agent-egg' \
+    "${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+grep -Fq 'from neutron_aria.agent.main import main' \
+    "${CONTAINER_ROOT}${ENTRYPOINT_PATH}"
+
+bash "${INSTALLER}" rollback >"${ROOT}/upgrade-rollback.log"
+grep -Fqx 'old-agent-egg' \
+    "${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+grep -Fq 'old-agent-entrypoint' \
+    "${CONTAINER_ROOT}${ENTRYPOINT_PATH}"
 
 printf 'agent_first_install_rollback=pass\n'

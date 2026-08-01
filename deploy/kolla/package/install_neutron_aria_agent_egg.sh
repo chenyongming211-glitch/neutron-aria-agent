@@ -5,6 +5,7 @@ SERVICE_NAME="${SERVICE_NAME:-neutron_aria_agent}"
 EGG_PATH="${EGG_PATH:-}"
 SITE_PACKAGES="${SITE_PACKAGES:-/usr/lib/python2.7/site-packages}"
 EGG_NAME="${EGG_NAME:-neutron_aria-0.1.0-py2.7.egg}"
+ENTRYPOINT_PATH="${ENTRYPOINT_PATH:-/usr/local/bin/neutron-aria-agent}"
 STATE_DIR="${STATE_DIR:-/var/tmp/neutron-aria-agent-package}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 RESTART_AGENT_AFTER_INSTALL="${RESTART_AGENT_AFTER_INSTALL:-false}"
@@ -73,9 +74,9 @@ resolve_egg() {
     printf '%s\n' "${REPO_ROOT}/dist/kolla/${EGG_NAME}"
 }
 
-backup_current_egg() {
+backup_current_package() {
     mkdir -p "${STATE_DIR}"
-    local ts backup marker
+    local ts backup marker entrypoint_backup entrypoint_marker
     ts="$(timestamp)"
     marker="${STATE_DIR}/${EGG_NAME}.${ts}.none"
     backup="${STATE_DIR}/${EGG_NAME}.${ts}.bak"
@@ -87,6 +88,20 @@ backup_current_egg() {
         : > "${marker}"
         ln -sfn "${marker}" "${STATE_DIR}/${EGG_NAME}.latest.bak"
         log "No existing agent egg found; rollback will remove the installation"
+    fi
+
+    entrypoint_marker="${STATE_DIR}/${EGG_NAME}.${ts}.entrypoint.none"
+    entrypoint_backup="${STATE_DIR}/${EGG_NAME}.${ts}.entrypoint.bak"
+    if docker exec -u 0 "${SERVICE_NAME}" test -f "${ENTRYPOINT_PATH}"; then
+        docker cp "${SERVICE_NAME}:${ENTRYPOINT_PATH}" "${entrypoint_backup}"
+        ln -sfn "${entrypoint_backup}" \
+            "${STATE_DIR}/${EGG_NAME}.entrypoint.latest.bak"
+        log "Backed up current agent entrypoint to ${entrypoint_backup}"
+    else
+        : > "${entrypoint_marker}"
+        ln -sfn "${entrypoint_marker}" \
+            "${STATE_DIR}/${EGG_NAME}.entrypoint.latest.bak"
+        log "No existing agent entrypoint found; rollback will remove it"
     fi
 }
 
@@ -131,17 +146,60 @@ with open(pth, "w") as fh:
 PY
 }
 
+install_entrypoint() {
+    docker exec -i -u 0 "${SERVICE_NAME}" sh -c \
+        'set -e; mkdir -p "$(dirname "$1")"; cat > "$1"' \
+        sh "${ENTRYPOINT_PATH}" <<'PY'
+#!/usr/bin/env python
+from __future__ import absolute_import
+
+from neutron_aria.agent.main import main
+
+
+if __name__ == "__main__":
+    main()
+PY
+    docker exec -u 0 "${SERVICE_NAME}" chmod 0755 "${ENTRYPOINT_PATH}"
+}
+
+restore_entrypoint() {
+    local backup="${STATE_DIR}/${EGG_NAME}.entrypoint.latest.bak"
+    if [ ! -e "${backup}" ]; then
+        log "No entrypoint backup marker found; preserving the current entrypoint"
+        return 0
+    fi
+
+    local target
+    target="$(readlink -f "${backup}")"
+    case "${target}" in
+        *.entrypoint.bak)
+            docker cp "${target}" "${SERVICE_NAME}:${ENTRYPOINT_PATH}"
+            docker exec -u 0 "${SERVICE_NAME}" chmod 0755 "${ENTRYPOINT_PATH}"
+            log "Restored agent entrypoint from ${backup}"
+            ;;
+        *.entrypoint.none)
+            docker exec -u 0 "${SERVICE_NAME}" rm -f "${ENTRYPOINT_PATH}"
+            log "Removed first-install agent entrypoint"
+            ;;
+        *)
+            echo "Invalid agent entrypoint backup marker: ${backup}" >&2
+            exit 1
+            ;;
+    esac
+}
+
 install_egg() {
     require_root_host
     docker inspect "${SERVICE_NAME}" >/dev/null
     local egg
     egg="$(resolve_egg)"
-    backup_current_egg
+    backup_current_package
     log "Installing ${egg} into ${SERVICE_NAME}:$(container_egg_path)"
     docker exec -u 0 "${SERVICE_NAME}" rm -rf "$(container_egg_path)"
     docker cp "${egg}" "${SERVICE_NAME}:$(container_egg_path)"
     docker exec -u 0 "${SERVICE_NAME}" chmod 0644 "$(container_egg_path)"
     refresh_easy_install_pth
+    install_entrypoint
     restart_agent_if_requested "${RESTART_AGENT_AFTER_INSTALL}"
     smoke
 }
@@ -174,6 +232,7 @@ rollback() {
         log "Restoring agent egg from ${backup}"
         docker cp "${target}" "${SERVICE_NAME}:$(container_egg_path)"
         docker exec -u 0 "${SERVICE_NAME}" chmod 0644 "$(container_egg_path)"
+        restore_entrypoint
         restart_agent_if_requested "${RESTART_AGENT_AFTER_ROLLBACK}"
         smoke
     else
@@ -181,6 +240,7 @@ rollback() {
         docker exec -u 0 "${SERVICE_NAME}" rm -f "$(container_egg_path)"
         docker exec -u 0 "${SERVICE_NAME}" \
             sed -i "\\|${EGG_NAME}|d" "${SITE_PACKAGES}/easy-install.pth" || true
+        restore_entrypoint
         restart_agent_if_requested "${RESTART_AGENT_AFTER_ROLLBACK}"
     fi
     log "agent egg rollback complete"

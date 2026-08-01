@@ -413,7 +413,6 @@ def check_production_acl_smoke():
     for term in (
         "build_neutron_aria_egg.sh",
         "neutron_aria-0.1.0-py2.7.egg",
-        "backup_current_egg",
         "rollback",
         "neutron-aria-agent --help",
         "chmod 0644",
