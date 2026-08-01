@@ -12,7 +12,7 @@ STATE_DIR="${STATE_DIR:-/var/lib/neutron-aria-agent/state}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/snapshot-state.json}"
 EXEC_USER="${EXEC_USER:-neutron}"
 ROLLBACK="${ROLLBACK:-true}"
-MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-0}"
+MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-1}"
 REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-3.0}"
 
 die() {
@@ -22,6 +22,16 @@ die() {
 
 need_command() {
     command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+require_positive_min_managed_ports() {
+    case "${MIN_MANAGED_PORTS}" in
+        ''|*[!0-9]*)
+            die "MIN_MANAGED_PORTS must be an integer greater than or equal to 1"
+            ;;
+    esac
+    [ "${MIN_MANAGED_PORTS}" -ge 1 ] || \
+        die "MIN_MANAGED_PORTS must be an integer greater than or equal to 1"
 }
 
 source_adminrc() {
@@ -322,6 +332,7 @@ if state.get("last_deleted_port_id") != sys.argv[2]:
 PY
 }
 
+require_positive_min_managed_ports
 need_command docker
 source_adminrc
 require_openstack_env
@@ -356,24 +367,24 @@ run_agent_once
 assert_no_pending_snapshot
 
 port_id="$(first_managed_port)"
-if [ -z "${port_id}" ]; then
-    echo "No managed port on ${HOST_FQDN}; skipping pending delete and migration-source cleanup checks"
-else
-    echo "Testing pending delete restart recovery for ${port_id}"
-    inject_pending_delete_after_datapath_delete "${port_id}"
-    docker restart "${SERVICE_NAME}" >/dev/null
-    sleep "${SMOKE_WAIT_SECONDS:-6}"
-    run_agent_once
-    assert_no_pending_delete
+[ -n "${port_id}" ] || \
+    die "no managed port with port_id available for pending delete recovery"
 
-    port_id="$(first_managed_port)"
-    if [ -n "${port_id}" ]; then
-        echo "Testing migration-source cleanup delete transaction for ${port_id}"
-        run_migration_source_cleanup_delete "${port_id}"
-        assert_last_deleted_port "${port_id}"
-        run_agent_once
-    fi
-fi
+echo "Testing pending delete restart recovery for ${port_id}"
+inject_pending_delete_after_datapath_delete "${port_id}"
+docker restart "${SERVICE_NAME}" >/dev/null
+sleep "${SMOKE_WAIT_SECONDS:-6}"
+run_agent_once
+assert_no_pending_delete
+
+port_id="$(first_managed_port)"
+[ -n "${port_id}" ] || \
+    die "no managed port with port_id available for migration-source cleanup"
+
+echo "Testing migration-source cleanup delete transaction for ${port_id}"
+run_migration_source_cleanup_delete "${port_id}"
+assert_last_deleted_port "${port_id}"
+run_agent_once
 
 if [ "${ROLLBACK}" = "true" ]; then
     echo "Rolling back transaction smoke managed ports"

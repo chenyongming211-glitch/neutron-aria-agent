@@ -67,23 +67,29 @@ chmod +x "${ROOT}/bin/docker"
 run_case() {
     local scenario="$1"
     local expected="$2"
+    local minimum="${3:-unset}"
+    local -a smoke_env=(
+        "PATH=${ROOT}/bin:${PATH}"
+        "REPO_ROOT=${REPO_ROOT}"
+        "HOST_FQDN=test-host"
+        "ADMINRC=${ROOT}/missing-adminrc"
+        "OS_AUTH_URL=http://keystone.invalid"
+        "OS_USERNAME=test"
+        "OS_PASSWORD=test"
+        "OS_PROJECT_NAME=test"
+        "ROLLBACK=false"
+        "SMOKE_WAIT_SECONDS=0"
+        "FAKE_SCENARIO=${scenario}"
+        "FAKE_STATE_DIR=${ROOT}/state"
+    )
     local output rc
     rm -f "${ROOT}/state/first-port-count"
     set +e
-    output="$(env -u MIN_MANAGED_PORTS \
-        PATH="${ROOT}/bin:${PATH}" \
-        REPO_ROOT="${REPO_ROOT}" \
-        HOST_FQDN="test-host" \
-        ADMINRC="${ROOT}/missing-adminrc" \
-        OS_AUTH_URL="http://keystone.invalid" \
-        OS_USERNAME="test" \
-        OS_PASSWORD="test" \
-        OS_PROJECT_NAME="test" \
-        ROLLBACK=false \
-        SMOKE_WAIT_SECONDS=0 \
-        FAKE_SCENARIO="${scenario}" \
-        FAKE_STATE_DIR="${ROOT}/state" \
-        bash "${SMOKE}" 2>&1)"
+    if [ "${minimum}" = "unset" ]; then
+        output="$(env -u MIN_MANAGED_PORTS "${smoke_env[@]}" bash "${SMOKE}" 2>&1)"
+    else
+        output="$(env "${smoke_env[@]}" MIN_MANAGED_PORTS="${minimum}" bash "${SMOKE}" 2>&1)"
+    fi
     rc=$?
     set -e
     if [ "${rc}" -eq 0 ]; then
@@ -104,6 +110,8 @@ run_case missing-first-id \
     'no managed port with port_id available for pending delete recovery' || failures=$((failures + 1))
 run_case missing-second-id \
     'no managed port with port_id available for migration-source cleanup' || failures=$((failures + 1))
+run_case explicit-zero \
+    'MIN_MANAGED_PORTS must be an integer greater than or equal to 1' 0 || failures=$((failures + 1))
 
 [ "${failures}" -eq 0 ] || exit 1
 printf 'transaction_state_port_coverage=pass\n'
