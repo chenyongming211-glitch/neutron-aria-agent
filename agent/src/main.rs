@@ -1092,6 +1092,85 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn management_listener_config(listen_addr: &str, allow_non_loopback: bool) -> Config {
+        toml::from_str(&format!(
+            "listen_addr = {:?}\nallow_unauthenticated_non_loopback = {}\n",
+            listen_addr, allow_non_loopback
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn management_listener_default_is_loopback_and_unsafe_override_is_off() {
+        let config = Config::default();
+
+        assert!(!config.allow_unauthenticated_non_loopback);
+        assert_eq!(
+            config.management_listen_addr().unwrap(),
+            "127.0.0.1:8080"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn management_listener_accepts_explicit_ipv4_and_ipv6_loopback() {
+        for value in ["127.4.3.2:8080", "[::1]:8080"] {
+            let config = management_listener_config(value, false);
+            assert_eq!(
+                config.management_listen_addr().unwrap(),
+                value.parse::<std::net::SocketAddr>().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn management_listener_rejects_non_loopback_without_explicit_override() {
+        for value in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "10.0.0.8:8080",
+            "198.51.100.8:8080",
+            "[fe80::1]:8080",
+            "[ff02::1]:8080",
+            "[::ffff:127.0.0.1]:8080",
+        ] {
+            let error = management_listener_config(value, false)
+                .management_listen_addr()
+                .unwrap_err();
+            assert!(error.contains(value));
+            assert!(error.contains("allow_unauthenticated_non_loopback = true"));
+        }
+    }
+
+    #[test]
+    fn management_listener_rejects_hostname_and_malformed_values_without_resolution() {
+        for value in ["localhost:8080", "127.0.0.1", "not-an-address"] {
+            let error = management_listener_config(value, false)
+                .management_listen_addr()
+                .unwrap_err();
+            assert!(error.contains(value));
+            assert!(error.contains("explicit IP socket"));
+        }
+    }
+
+    #[test]
+    fn management_listener_explicit_override_allows_only_valid_non_loopback_socket() {
+        let config = management_listener_config("192.0.2.20:8080", true);
+        assert!(config.allow_unauthenticated_non_loopback);
+        assert_eq!(
+            config.management_listen_addr().unwrap(),
+            "192.0.2.20:8080"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+        );
+
+        let error = management_listener_config("external.example:8080", true)
+            .management_listen_addr()
+            .unwrap_err();
+        assert!(error.contains("explicit IP socket"));
+    }
+
     #[test]
     fn startup_mode_defaults_to_standalone_auto_attach() {
         let config = Config::default();
