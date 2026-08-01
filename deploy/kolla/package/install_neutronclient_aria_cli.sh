@@ -7,6 +7,7 @@ SOURCE_DIR="${SOURCE_DIR:-${REPO_ROOT}/openstack/neutronclient_aria}"
 STATE_DIR="${STATE_DIR:-/var/tmp/neutronclient-aria-package}"
 SITE_PACKAGES="${SITE_PACKAGES:-/usr/lib/python2.7/site-packages}"
 EGG_NAME="${EGG_NAME:-neutronclient_aria-0.1.0-py2.7.egg}"
+ADMIN_RC_FILE="${ADMIN_RC_FILE:-/etc/kolla/.adminrc}"
 
 usage() {
     cat <<EOF
@@ -74,6 +75,10 @@ install_cli() {
 
 smoke() {
     require_root_host
+    [ -r "${ADMIN_RC_FILE}" ] || {
+        echo "Kolla credentials file is not readable: ${ADMIN_RC_FILE}" >&2
+        exit 1
+    }
     docker exec -i -u 0 "${SERVICE_NAME}" python - <<'PY'
 from __future__ import print_function
 
@@ -84,7 +89,7 @@ assert hasattr(aria_acl, "AriaAclBindingCreate")
 print("neutronclient_aria_imports=ok")
 PY
     local help_output
-    help_output="$(docker exec -u 0 --env-file /etc/kolla/.adminrc \
+    help_output="$(docker exec -u 0 --env-file "${ADMIN_RC_FILE}" \
         "${SERVICE_NAME}" neutron help 2>&1)"
     printf '%s\n' "${help_output}" | grep -q 'aria-acl-policy-create' || {
         printf '%s\n' "${help_output}" >&2
