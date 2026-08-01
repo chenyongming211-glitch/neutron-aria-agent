@@ -976,6 +976,13 @@ class LocalClient(object):
             self._status_contract_fresh_handshake = False
         return decoded
 
+    def readiness(self):
+        return self._request(
+            "GET",
+            "/readyz",
+            contract_response=True,
+        )
+
     def put_snapshot(self, snapshot):
         self._require_status_contract_write_allowed()
         return self._request("PUT", "/api/v1/neutron/snapshot", snapshot)

@@ -82,6 +82,24 @@
   "routes": [
     {
       "method": "GET",
+      "path": "/readyz",
+      "success_schema": {
+        "http_status": 200,
+        "body": "NeutronStatusV1Response",
+        "overall_readiness": "ready"
+      },
+      "unready_schema": {
+        "http_status": 503,
+        "body": "NeutronStatusV1Response",
+        "overall_readiness": [
+          "unknown",
+          "degraded",
+          "blocked"
+        ]
+      }
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/neutron/capabilities"
     },
     {

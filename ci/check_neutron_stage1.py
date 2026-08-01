@@ -165,6 +165,7 @@ STATUS_SCENARIOS = (
 )
 STATUS_PRODUCER_SCENARIOS = STATUS_SCENARIOS[:9] + ("restart-classified-routing",)
 PUBLIC_UDS_ROUTES = (
+    ("GET", "/readyz", "get", "/readyz"),
     ("GET", "/api/v1/neutron/capabilities", "get", "/api/v1/neutron/capabilities"),
     ("GET", "/api/v1/neutron/status", "get", "/api/v1/neutron/status"),
     (

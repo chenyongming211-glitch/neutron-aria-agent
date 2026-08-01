@@ -1184,6 +1184,7 @@ pub(crate) fn build_router(
         }
     });
     let router = Router::new()
+        .route("/readyz", get(get_neutron_readiness))
         .route(
             "/api/v1/neutron/capabilities",
             get(get_neutron_capabilities),
@@ -2062,7 +2063,7 @@ fn project_neutron_status_v1(runtime: &NeutronRuntimeState) -> NeutronStatusV1Pr
     }
 }
 
-async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {
+async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatusV1Response {
     let runtime = state.runtime.read().await;
     let projection = project_neutron_status_v1(&runtime);
     let managed_ports = runtime.ports.values().cloned().collect();
@@ -2081,7 +2082,7 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
     };
     drop(runtime);
 
-    Json(NeutronStatusV1Response {
+    NeutronStatusV1Response {
         status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
         status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
         transaction_state: projection.transaction_state,
@@ -2101,7 +2102,21 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
         managed_ports,
         port_statuses: projection.port_statuses,
         active_instances: state.registry.list().await,
-    })
+    }
+}
+
+async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {
+    Json(build_neutron_status_response(&state).await)
+}
+
+async fn get_neutron_readiness(State(state): State<NeutronApiState>) -> impl IntoResponse {
+    let response = build_neutron_status_response(&state).await;
+    let status = if response.overall_readiness == NeutronStatusOverallReadiness::Ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(response))
 }
 
 async fn put_neutron_snapshot(
