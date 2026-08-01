@@ -10318,6 +10318,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_snapshot_apply_serializes_startup_runtime_reconcile() {
+        let root = temp_root("submit-serializes-startup-reconcile");
+        let state = test_neutron_state(&root);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 131,
+            desired_hash: Some("hash-131".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let decision = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect("snapshot admission should prepare an apply");
+        let prepared = decision
+            .prepared
+            .expect("new snapshot must retain the apply barrier");
+        assert!(
+            state.apply_lock.try_lock().is_err(),
+            "prepared apply must retain the shared startup recovery barrier"
+        );
+
+        let reconcile_state = state.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut reconcile = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            reconcile_state.reconcile_committed_runtime().await;
+        });
+        started_rx
+            .await
+            .expect("startup reconcile task should begin polling the barrier");
+        tokio::task::yield_now().await;
+        assert!(
+            !reconcile.is_finished(),
+            "startup reconcile must not overwrite an admitted snapshot"
+        );
+
+        drop(prepared);
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut reconcile)
+            .await
+            .expect("startup reconcile should resume after snapshot apply releases the barrier")
+            .expect("startup reconcile task should not panic");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_inventory_unavailable_intent_has_no_datapath_recovery_scope() {
         let root = temp_root("inventory-unavailable-intent-recovery-scope");
         let mut state = test_neutron_state(&root);
