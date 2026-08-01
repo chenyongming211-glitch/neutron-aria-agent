@@ -613,6 +613,7 @@ PUT    /api/v1/neutron/snapshot
 DELETE /api/v1/neutron/ports/{port_id}
 GET    /api/v1/neutron/status
 GET    /api/v1/neutron/capabilities
+GET    /readyz
 ```
 
 约束：
@@ -636,6 +637,7 @@ Neutron snapshot API 不进入现有 TCP OpenAPI paths，但仍必须有稳定�
   - `PUT /api/v1/neutron/snapshot`
   - `GET /api/v1/neutron/status`
   - `GET /api/v1/neutron/capabilities`
+  - `GET /readyz`
   - `DELETE /api/v1/neutron/ports/{port_id}`
 - request/response schema 使用 `api` crate 中的 Neutron DTO，不能由 Python agent 另写一套私有字段。
 - 错误响应必须包含稳定 `error_code`、`message`、`domain`、`local_generation` 和可选 `affected_ports`。
@@ -657,7 +659,29 @@ Neutron snapshot API 不进入现有 TCP OpenAPI paths，但仍必须有稳定�
 | --- | --- | --- | --- |
 | DTO schema | `api/src/lib.rs` | OpenAPI components、UDS contract schema refs | serde roundtrip、component name stability |
 | TCP path 排除 | `agent/src/openapi.rs` | TCP OpenAPI paths | Neutron UDS paths 不出现在 TCP OpenAPI paths |
-| UDS path 列表 | `docs/neutron-uds-contract.json` + `ci/check_neutron_stage1.py` | `neutron-uds-contract.json` | snapshot/status/capabilities/delete 四个 path 全量存在 |
+| UDS path 列表 | `docs/neutron-uds-contract.json` + `ci/check_neutron_stage1.py` | `neutron-uds-contract.json` | 公开 route 清单与 Rust router、Python client 完全一致 |
+
+#### 5.1.2 Liveness 与 Neutron Readiness
+
+三个本机观测面不能互相替代：
+
+- TCP `GET /api/v1/health` 是进程 liveness；只表示 `aria-agent` 能响应，
+  不能证明 Neutron generation 或 ACL domain 已收敛。
+- UDS `GET /api/v1/neutron/status` 是 Status V1 状态检查；只要响应可读就
+  返回 HTTP 200，调用方必须检查 `overall_readiness`、`required_action`、
+  generation 和 per-domain evidence。
+- UDS `GET /readyz` 是严格的 Aria Neutron datapath readiness；它返回同一
+  份完整 `NeutronStatusV1Response`，但仅当 `overall_readiness=ready` 时返回
+  HTTP 200。`unknown`、`degraded`、`blocked` 均返回 HTTP 503。
+
+`degraded + effective_action=bypass` 表示 Aria enhancement 未 ready，但 OVS
+仍按可用性优先边界继续转发。`/readyz` 的 503 不能解释成 OVS forwarding
+down，也不能作为重启 datapath 进程的默认理由。
+
+该 UDS probe 证明 Rust datapath 当前可响应且 Status V1 已收敛，不证明独立
+Python `neutron-aria-agent` 最近一次向 Neutron server 的 RPC heartbeat 已
+成功。部署层最终启用 health-check 前必须组合这两个信号，并在目标环境
+验证 pending、degraded、blocked 和 recovery 的处理策略。
 | 错误码集合 | `api/src/lib.rs` / `docs/neutron-uds-contract.json` | `error_codes_hash` | Python/Rust hash 一致，不一致停止写路径 |
 | capabilities response | `api/src/lib.rs` / `agent/src/neutron_api.rs` | `GET /api/v1/neutron/capabilities` | contract version、schema range、body/timeout、peer auth policy 与 artifact 一致 |
 | Python 校验入口 | `neutron-aria-agent/neutron_aria_agent/local_client.py` | client startup/reconnect 检查 | request/response 校验、capability hash 变化触发 full resync |

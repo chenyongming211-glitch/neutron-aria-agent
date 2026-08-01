@@ -1,9 +1,10 @@
 # RISK-READY-001 Neutron Readiness Probe Design
 
-**Status:** approved for implementation on 2026-08-01. Production code and
-hosted CI evidence are not yet present. Deployment health-check wiring and
+**Status:** source implementation and hosted CI complete at `9060a77` / Build
+[30707571086](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707571086).
+Deployment health-check wiring, Neutron RPC heartbeat composition, and
 privileged field evidence remain deferred until a target OpenStack environment
-is available.
+is available. The risk therefore remains open rather than fixed.
 
 ## Problem
 
@@ -194,6 +195,28 @@ blocked, and recovery states. Until then the accurate state is:
 ```text
 source implementation and hosted CI complete; deployment/field wiring deferred
 ```
+
+## Execution Evidence
+
+- RED `7447e4e` added two Rust behavior tests using the existing Status V1
+  scenario fixtures. Build
+  [30707303054](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707303054)
+  failed at the intentionally absent `get_neutron_readiness` handler; fast,
+  database, and clean-install contracts passed. Remaining expensive build work
+  was cancelled after the exact RED cause was captured.
+- GREEN `9060a77` extracted one shared response constructor, registered the
+  UDS-only route, derived only the HTTP status from `overall_readiness`, and
+  synchronized the public UDS contract plus thin Python client method. Exact
+  Build
+  [30707571086](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707571086)
+  ran both `neutron_readiness_` tests successfully. The full selected Rust
+  behavior lane passed in 2m56s and the warning-denied eBPF/userspace/static
+  build passed in 5m20s.
+- Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
+  tests, shell syntax, installer, route-contract, and CI lane checks.
+- No Kolla/systemd/Docker readiness wiring, Neutron server heartbeat result,
+  recovery timing, OVS availability decision, or privileged field PASS is
+  inferred from hosted evidence.
 
 ## Closure Criteria
 

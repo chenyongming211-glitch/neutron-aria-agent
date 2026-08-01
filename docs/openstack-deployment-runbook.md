@@ -196,12 +196,35 @@ Enable in this order:
    ```text
    GET /api/v1/neutron/capabilities
    GET /api/v1/neutron/status
+   GET /readyz
    PUT /api/v1/neutron/snapshot
    DELETE /api/v1/neutron/ports/{port_id}
    ```
 
    Snapshot timeout must be recovered through status/full resync, not by assuming
    the request failed.
+
+   Keep process liveness, Status V1 inspection, and strict readiness separate:
+
+   ```bash
+   # TCP process liveness; this does not prove Neutron convergence.
+   curl --fail --silent --show-error http://127.0.0.1:8080/api/v1/health
+
+   # Inspect Status V1 even while pending/degraded/blocked.
+   curl --fail --silent --show-error \
+     --unix-socket /run/aria/aria-agent.sock \
+     http://localhost/api/v1/neutron/status
+
+   # Strict Aria Neutron datapath readiness; non-ready returns HTTP 503.
+   curl --fail --silent --show-error \
+     --unix-socket /run/aria/aria-agent.sock \
+     http://localhost/readyz
+   ```
+
+   A `/readyz` failure means the Aria enhancement is not ready; it does not
+   prove OVS forwarding is down. Do not wire this probe to restart or remove a
+   container until the target environment has validated startup/recovery
+   timing and combined it with the separate Neutron agent RPC heartbeat.
 
 4. **Domain authority smoke**
 

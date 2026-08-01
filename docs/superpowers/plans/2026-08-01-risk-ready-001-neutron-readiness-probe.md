@@ -31,6 +31,21 @@ lane inventory, Markdown.
 - Do not wire Kolla/systemd/Docker health checks or claim Neutron RPC heartbeat
   and privileged field evidence in this batch.
 
+## Execution Evidence
+
+- RED `7447e4e` / Build
+  [30707303054](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707303054)
+  failed only because `get_neutron_readiness` did not exist; fast, database,
+  and clean-install contracts passed before remaining build work was cancelled.
+- GREEN `9060a77` / exact-head Build
+  [30707571086](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707571086)
+  passed both `neutron_readiness_` tests, the selected Rust behavior lane in
+  2m56s, and warning-denied eBPF/userspace/static builds in 5m20s.
+- Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
+  tests, shell syntax, installer, UDS route-contract, and CI lane checks.
+- Deployment probe wiring, Neutron RPC heartbeat composition, recovery timing,
+  rollback behavior, and privileged field evidence remain deferred.
+
 ---
 
 ### Task 1: Establish the RED readiness behavior
@@ -45,12 +60,12 @@ lane inventory, Markdown.
 - Produces: intentionally missing `get_neutron_readiness` handler and hosted
   test prefix `neutron_readiness_`.
 
-- [ ] **Step 1: Add a response helper for test assertions**
+- [x] **Step 1: Add a response helper for test assertions**
 
 Reuse the existing `test_neutron_state`, runtime seeds, and response-body
 decoder. Do not create pinned maps or require privileges.
 
-- [ ] **Step 2: Add strict readiness tests**
+- [x] **Step 2: Add strict readiness tests**
 
 Add tests with the stable `neutron_readiness_` prefix that prove:
 
@@ -66,7 +81,7 @@ Add tests with the stable `neutron_readiness_` prefix that prove:
 The RED tests may call the intended handler directly. They must fail to compile
 or fail behaviorally only because the readiness handler/route is absent.
 
-- [ ] **Step 3: Add one hosted Rust behavior filter**
+- [x] **Step 3: Add one hosted Rust behavior filter**
 
 Add this Cargo-discovered filter to `ci/check_neutron_stage1.py::RUST_TESTS`:
 
@@ -78,7 +93,7 @@ Keep the existing zero-test guard. Add `("GET", "/readyz", ...)` to the UDS
 route inventory only after the production route exists in GREEN, so the RED
 failure remains the missing behavior rather than a static source marker.
 
-- [ ] **Step 4: Run local non-Cargo verification**
+- [x] **Step 4: Run local non-Cargo verification**
 
 ```bash
 git diff --check
@@ -86,7 +101,7 @@ python3 -m unittest ci.test_ci_lane_contract ci.test_ci001_trusted_gates
 python3 ci/check_neutron_stage1.py --fast-contracts
 ```
 
-- [ ] **Step 5: Commit, push, and capture exact RED**
+- [x] **Step 5: Commit, push, and capture exact RED**
 
 Commit only the Rust tests and hosted filter. The exact-head `rust-behavior`
 lane must fail on the intentionally absent readiness boundary while fast
@@ -106,19 +121,19 @@ cause is captured.
   `NeutronStatusV1Response`.
 - Produces: shared status response construction and UDS `GET /readyz`.
 
-- [ ] **Step 1: Extract shared Status V1 response construction**
+- [x] **Step 1: Extract shared Status V1 response construction**
 
 Move the current `get_neutron_status` body into one asynchronous read-only
 function receiving `&NeutronApiState` and returning
 `NeutronStatusV1Response`. Preserve field values, lock lifetime, registry
 lookup, schema version, and contract hash exactly.
 
-- [ ] **Step 2: Keep status inspection behavior unchanged**
+- [x] **Step 2: Keep status inspection behavior unchanged**
 
 `get_neutron_status` calls the shared constructor and returns `Json(response)`.
 Non-ready states must continue to return HTTP 200.
 
-- [ ] **Step 3: Add the readiness handler**
+- [x] **Step 3: Add the readiness handler**
 
 `get_neutron_readiness` calls the same constructor. It selects:
 
@@ -134,17 +149,17 @@ let status = if response.overall_readiness
 
 Return `(status, Json(response))`. Do not add another classification rule.
 
-- [ ] **Step 4: Register only the UDS route**
+- [x] **Step 4: Register only the UDS route**
 
 Add `.route("/readyz", get(get_neutron_readiness))` to
 `neutron_api::build_router`. Add the structural route to `PUBLIC_UDS_ROUTES`.
 Do not modify `api_routes.rs` or TCP OpenAPI paths.
 
-- [ ] **Step 5: Run local non-Cargo verification**
+- [x] **Step 5: Run local non-Cargo verification**
 
 Run `git diff --check` and the fast Python contracts. Do not invoke Cargo.
 
-- [ ] **Step 6: Commit, push, and require exact-head GREEN**
+- [x] **Step 6: Commit, push, and require exact-head GREEN**
 
 The implementation-head Build must execute all `neutron_readiness_` tests and
 pass selected Rust behavior plus warning-denied userspace/eBPF/static builds.
@@ -165,7 +180,7 @@ weakening the readiness contract.
 - Modify:
   `docs/openstack-neutron-aria-details/12-review-bug-backlog.md`
 
-- [ ] **Step 1: Add maintained operator documentation**
+- [x] **Step 1: Add maintained operator documentation**
 
 Document the three distinct surfaces and a UDS `curl --fail` example:
 
@@ -176,12 +191,12 @@ Document the three distinct surfaces and a UDS `curl --fail` example:
 State that 503 means Aria enhancement is not ready, not that OVS forwarding is
 down.
 
-- [ ] **Step 2: Record exact RED/GREEN evidence**
+- [x] **Step 2: Record exact RED/GREEN evidence**
 
 Add commit SHAs, Build URLs, executed test count, and warning-denied build
 results to the design and plan.
 
-- [ ] **Step 3: Preserve the deferred boundary in the backlog**
+- [x] **Step 3: Preserve the deferred boundary in the backlog**
 
 Update `RISK-READY-001` to:
 
