@@ -3,6 +3,7 @@ set -euo pipefail
 
 CONTAINER="${CONTAINER:-neutron_server}"
 LOCAL_NEUTRON_URL="${LOCAL_NEUTRON_URL:-http://127.0.0.1:9696/v2.0}"
+ADMIN_RC_FILE="${ADMIN_RC_FILE:-}"
 
 log() {
     printf '[neutron-aria-acl-db-crud-smoke] %s\n' "$*"
@@ -13,16 +14,19 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
-if [ -f /root/adminrc ]; then
-    # shellcheck disable=SC1091
-    . /root/adminrc
-elif [ -f /etc/kolla/.adminrc ]; then
-    # shellcheck disable=SC1091
-    . /etc/kolla/.adminrc
-else
-    echo "No adminrc found for Neutron API smoke." >&2
-    exit 1
+if [ -z "${ADMIN_RC_FILE}" ]; then
+    if [ -r /root/adminrc ]; then
+        ADMIN_RC_FILE=/root/adminrc
+    elif [ -r /etc/kolla/.adminrc ]; then
+        ADMIN_RC_FILE=/etc/kolla/.adminrc
+    fi
 fi
+[ -n "${ADMIN_RC_FILE}" ] && [ -r "${ADMIN_RC_FILE}" ] || {
+    echo "No readable adminrc found for Neutron API smoke." >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+. "${ADMIN_RC_FILE}"
 
 log "Checking plugin-level DB CRUD in ${CONTAINER}"
 docker exec -i "${CONTAINER}" python <<'PY'

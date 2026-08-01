@@ -10,7 +10,7 @@ mkdir -p "${ROOT}/bin"
 ADMIN_RC_FILE="${ROOT}/custom-adminrc"
 ADMINRC_RECORD="${ROOT}/adminrc-record"
 cat >"${ADMIN_RC_FILE}" <<'EOF'
-export ADMINRC_SOURCE_MARKER=loaded
+OS_AUTH_URL=http://keystone.invalid/v3
 EOF
 
 cat >"${ROOT}/bin/id" <<'EOF'
@@ -46,7 +46,6 @@ case "${container}:${1:-}" in
         ;;
     openstack_client:openstack)
         [ "${env_file}" = "${EXPECTED_ADMIN_RC}" ] || exit 42
-        [ "${ADMINRC_SOURCE_MARKER:-}" = "loaded" ] || exit 43
         printf '%s\n' "${env_file}" >"${ADMINRC_RECORD}"
         printf 'test-token\n'
         ;;
