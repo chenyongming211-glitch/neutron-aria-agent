@@ -79,6 +79,7 @@ jobs:
       - name: Check repository text policy and workflow contracts
         run: |
           python3 ci/check_blocked_terms.py
+          python3 -m unittest ci.test_public_release_hygiene
           python3 ci/check_build_workflow_contract.py
           python3 -m unittest ci.test_ci_lane_contract
           python3 -m unittest ci.test_ci001_trusted_gates

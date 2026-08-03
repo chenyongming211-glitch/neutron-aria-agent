@@ -48,7 +48,7 @@
 - Consumes: current `ci/check_blocked_terms.py` and `ci/check_payload_terms.py` CLI behavior.
 - Produces: required public interfaces `public_release_policy.find_rule_ids(data, allow_provenance=True)`, `public_release_policy.scan_path(label)`, `public_release_policy.scan_payload(label, data, depth=0)`, `check_blocked_terms.collect_blocked(paths)`, and `check_payload_terms.collect_payload_hits(args)`.
 
-- [ ] **Step 1: Add the failing unit-test module**
+- [x] **Step 1: Add the failing unit-test module**
 
 Create `ci/test_public_release_hygiene.py` with fixtures built from hex rather than plain prohibited values:
 
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Wire the new behavior into the required fast lane**
+- [x] **Step 2: Wire the new behavior into the required fast lane**
 
 Add this command immediately after `python3 ci/check_blocked_terms.py` in `.github/workflows/build.yml`:
 
@@ -181,7 +181,7 @@ self.assertIn(
 )
 ```
 
-- [ ] **Step 3: Run the focused test and verify RED**
+- [x] **Step 3: Run the focused test and verify RED**
 
 Run:
 
@@ -200,7 +200,7 @@ git diff --check
 
 Expected: lane contract PASS; diff check PASS.
 
-- [ ] **Step 4: Commit and push RED**
+- [x] **Step 4: Commit and push RED**
 
 ```bash
 git add ci/test_public_release_hygiene.py ci/test_ci_lane_contract.py .github/workflows/build.yml
