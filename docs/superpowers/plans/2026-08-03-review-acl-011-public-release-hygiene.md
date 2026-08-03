@@ -458,7 +458,7 @@ git commit -m "fix: anonymize public release identifiers"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 9: Require exact-head hosted GREEN**
+- [x] **Step 9: Require exact-head hosted GREEN**
 
 Run:
 
@@ -473,6 +473,9 @@ test "$(gh run view "$green_run_id" --json headSha --jq .headSha)" = "$head_sha"
 
 Expected: exact-head Build passes `fast-contracts`, database/clean-install lanes, selected Rust behavior, and warning-denied eBPF/userspace/static-agent builds. No field PASS is claimed.
 
+Execution evidence: implementation commit `af6accb` passed exact-head Build
+[`30811728869`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30811728869).
+
 ---
 
 ### Task 3: Delivery record and final exact-head closure
@@ -486,7 +489,7 @@ Expected: exact-head Build passes `fast-contracts`, database/clean-install lanes
 - Consumes: RED commit/run and GREEN commit/run from Tasks 1–2.
 - Produces: authoritative fixed status with current-tree/future-payload scope and explicit historical-object exclusion.
 
-- [ ] **Step 1: Update design status and acceptance evidence**
+- [x] **Step 1: Update design status and acceptance evidence**
 
 Collect the concrete evidence first:
 
@@ -512,7 +515,7 @@ were deliberately not rewritten.
 
 Append RED and GREEN evidence under acceptance without claiming field execution.
 
-- [ ] **Step 2: Update the authoritative backlog row**
+- [x] **Step 2: Update the authoritative backlog row**
 
 Set `REVIEW-ACL-011` to `fixed` and record:
 
@@ -527,7 +530,7 @@ run applies, and DEBT-REPO-001 remains separate.
 
 Do not place decoded prohibited values in the backlog.
 
-- [ ] **Step 3: Mark every completed plan checkbox and run documentation checks**
+- [x] **Step 3: Mark every completed plan checkbox and run documentation checks**
 
 Run:
 
@@ -539,7 +542,7 @@ git diff --check
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit and push delivery documentation**
+- [x] **Step 4: Commit and push delivery documentation**
 
 ```bash
 git add docs/superpowers/specs/2026-08-03-review-acl-011-public-release-hygiene-design.md \
@@ -549,7 +552,7 @@ git commit -m "docs: close public release hygiene review"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Verify final branch and exact-head CI**
+- [x] **Step 5: Verify final branch and exact-head CI**
 
 Run:
 

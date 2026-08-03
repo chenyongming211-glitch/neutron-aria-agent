@@ -1,8 +1,9 @@
 # REVIEW-ACL-011 Public Release Hygiene Design
 
-**Status:** design direction approved on 2026-08-03; written specification
-awaiting final review. No implementation or current-tree anonymization has been
-committed yet.
+**Status:** implemented in `af6accb`. Exact implementation-head Build
+[`30811728869`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30811728869)
+passed every required hosted lane. Current tracked paths/content and future
+payloads are covered; historical Git objects were deliberately not rewritten.
 
 ## Problem
 
@@ -245,6 +246,18 @@ separate policy/checker changes from mechanical replacements.
    passes every required lane;
 6. the backlog states that only current HEAD and future payloads are clean and
    that historical Git objects were deliberately not rewritten.
+
+Executed evidence:
+
+- RED commit `6ed8abc` / Build
+  [`30811086605`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30811086605)
+  failed `fast-contracts` at the intentionally missing shared policy boundary.
+- GREEN commit `af6accb` / exact-head Build
+  [`30811728869`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30811728869)
+  passed fast contracts, database contracts, clean installation, selected Rust
+  behavior, and warning-denied eBPF/userspace/static-agent builds.
+- No privileged field execution applies to this repository/payload hygiene
+  repair, and none is claimed.
 
 ## Design self-review
 
