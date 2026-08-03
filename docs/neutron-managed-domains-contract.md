@@ -30,7 +30,7 @@ or explicitly approved later-stage plan.
 | `aria_acl` Neutron service plugin/API/DB | partial | Minimal stdlib-only repository/plugin contract, API extension descriptor, persistent DB contract, Alembic table creation, CRUD/revision behavior, and RBAC contract exist; `neutron-db-manage` and server startup validation remain target-environment gates. |
 | Rich domain status | planned | Current `NeutronDomainStatus` is still `domain/status/reason`; target also includes `effective_action` and `support_disposition`. |
 | UDS contract JSON | implemented | `docs/neutron-uds-contract.json` is checked by `ci/check_neutron_stage1.py`. |
-| UDS peer credential enforcement/audit | implemented and rolled out | Socket mode validation, socket group alignment, and connection-level `SO_PEERCRED` audit/enforcement hooks exist. `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` have persistent hardened rollout evidence with `REQUIRE_HARDENED=true`. |
+| UDS peer credential enforcement/audit | implemented and rolled out | Socket mode validation, socket group alignment, and connection-level `SO_PEERCRED` audit/enforcement hooks exist. `compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test` have persistent hardened rollout evidence with `REQUIRE_HARDENED=true`. |
 | Unified `neutron-aria-agent.ini` target layout | partial | Target layout, packaged safe defaults, config validation, and documentation checks exist; production enablement still depends on N0.5/runbook gates. |
 
 ## INI Contract Convergence

@@ -10,7 +10,7 @@ enabling port-scoped incremental apply.
 
 | Host | Result | Notes |
 | --- | --- | --- |
-| `ostack2.bj159.net` | pass | Installed the current `neutron_aria` egg into the running `neutron_aria_agent` container, restarted only that container, passed the package RPC-event smoke, and confirmed the new heartbeat fields through `neutron agent-show`. |
+| `compute-1.example.test` | pass | Installed the current `neutron_aria` egg into the running `neutron_aria_agent` container, restarted only that container, passed the package RPC-event smoke, and confirmed the new heartbeat fields through `neutron agent-show`. |
 
 ## Observed Signals
 
@@ -22,8 +22,8 @@ enabling port-scoped incremental apply.
   - `REQUIRE_HEARTBEAT_SUMMARY_FIELDS=true`
   - `REQUIRE_P3_PROJECTION_FIELDS=true`
 - The heartbeat smoke confirmed:
-  - `heartbeat_summary_fields=ok host=ostack2.bj159.net`
-  - `p3_projection_fields=ok host=ostack2.bj159.net`
+  - `heartbeat_summary_fields=ok host=compute-1.example.test`
+  - `p3_projection_fields=ok host=compute-1.example.test`
 
 ## Boundary
 

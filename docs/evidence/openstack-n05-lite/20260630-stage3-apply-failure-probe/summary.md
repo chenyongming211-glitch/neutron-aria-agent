@@ -1,7 +1,7 @@
 # Stage-Three N3 Apply-Failure Probe
 
 Date: 2026-06-30
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -18,7 +18,7 @@ target ACL, and could recover through a second full-resync plus rollback.
   - peercred enforcement: enabled
   - allowed uid/gid: `42435`
 - Test VM reachability was healthy before the probe:
-  - target IP: `10.58.159.28`
+  - target IP: `192.0.2.28`
   - target port: `39adf570-1acb-4e81-9215-96744a6bf627`
   - target tap: `tap39adf570-1a`
 - Datapath status before the probe:

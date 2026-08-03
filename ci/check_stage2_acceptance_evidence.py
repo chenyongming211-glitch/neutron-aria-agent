@@ -17,17 +17,17 @@ FILES = {
     "active": os.path.join(EVIDENCE_ROOT, "2026-06-30-active-direction-summary.md"),
     "guest": os.path.join(
         EVIDENCE_ROOT,
-        "20260630155334-ostack2.bj159.net-guest-bypass-probe",
+        "20260630155334-compute-1.example.test-guest-bypass-probe",
         "summary.md",
     ),
     "guest_logs": os.path.join(
         EVIDENCE_ROOT,
-        "20260630155334-ostack2.bj159.net-guest-bypass-probe",
+        "20260630155334-compute-1.example.test-guest-bypass-probe",
         "service-logs.txt",
     ),
     "guest_cleanup": os.path.join(
         EVIDENCE_ROOT,
-        "20260630155334-ostack2.bj159.net-guest-bypass-probe",
+        "20260630155334-compute-1.example.test-guest-bypass-probe",
         "cleanup-final.txt",
     ),
     "uds": os.path.join(EVIDENCE_ROOT, "2026-06-30-uds-hardening-summary.md"),
@@ -46,8 +46,8 @@ REQUIRED_MARKERS = {
         "aria_acl_source policies=1 rules=1 bindings=1",
         "MANAGED_COUNT=5",
         "MANAGED_COUNT=0",
-        "heartbeat_summary_fields=ok host=ostack2.bj159.net",
-        "heartbeat_summary_fields=ok host=ostack3.bj159.net",
+        "heartbeat_summary_fields=ok host=compute-1.example.test",
+        "heartbeat_summary_fields=ok host=compute-2.example.test",
         "does not enable QoS/Mirror",
     ],
     "discovery": [
@@ -59,7 +59,7 @@ REQUIRED_MARKERS = {
         "IPv6 ND is `not_applicable`",
     ],
     "g7": [
-        "ICMP from `10.58.159.2/32`",
+        "ICMP from `192.0.2.2/32`",
         "was blocked by the smoke ACL",
         "Post-rollback status",
         "`managed_ports=[]`",
@@ -85,7 +85,7 @@ REQUIRED_MARKERS = {
         "DHCPOFFER",
         "DHCPREQUEST",
         "DHCPACK",
-        "accepted ('10.58.159.40'",
+        "accepted ('192.0.2.40'",
         "error: [Errno 2] ENOENT",
     ],
     "guest_cleanup": [
@@ -97,9 +97,9 @@ REQUIRED_MARKERS = {
     ],
     "uds": [
         "Site enforcement gate: accepted for three-node reversible proof",
-        "ostack2.bj159.net",
-        "ostack3.bj159.net",
-        "ostack4.bj159.net",
+        "compute-1.example.test",
+        "compute-2.example.test",
+        "compute-3.example.test",
         "REQUIRE_HARDENED=true",
         "root:42435 0660",
         "peercred_allow_list_match",
@@ -183,7 +183,7 @@ def _check_no_partial_guest_probe_dirs():
     for name in os.listdir(EVIDENCE_ROOT):
         if re.search(r"guest-bypass-probe-partial|bounded-bypass-probe-failed", name):
             bad.append(name)
-        if name == "20260630155013-ostack2.bj159.net-guest-bypass-probe":
+        if name == "20260630155013-compute-1.example.test-guest-bypass-probe":
             bad.append(name)
     if bad:
         raise SystemExit("ERROR: stale partial guest evidence directories: %s" % (

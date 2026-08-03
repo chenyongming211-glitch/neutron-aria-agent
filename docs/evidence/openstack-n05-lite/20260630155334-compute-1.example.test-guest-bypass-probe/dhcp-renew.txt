@@ -1,0 +1,28 @@
+# guest command: set -x; before=$(ip -4 -o addr show dev eth0); echo BEFORE="$before"; sudo udhcpc -n -q -i eth0 -s /sbin/cirros-dhcpc; rc=$?; echo DHCP_RC=$rc; ip -4 addr show dev eth0; ip route show; ping -c 2 -W 2 192.0.2.2; exit $rc
+Warning: Permanently added '192.0.2.40' (ED25519) to the list of known hosts.
++ ip -4 -o addr show dev eth0
+BEFORE=2: eth0    inet 192.0.2.40/25 brd 192.0.2.127 scope global dynamic noprefixroute eth0\       valid_lft 259196sec preferred_lft 226796sec
++ before='2: eth0    inet 192.0.2.40/25 brd 192.0.2.127 scope global dynamic noprefixroute eth0\       valid_lft 259196sec preferred_lft 226796sec'
++ echo 'BEFORE=2: eth0    inet 192.0.2.40/25 brd 192.0.2.127 scope global dynamic noprefixroute eth0\       valid_lft 259196sec preferred_lft 226796sec'
++ sudo udhcpc -n -q -i eth0 -s /sbin/cirros-dhcpc
+sudo: udhcpc: command not found
+DHCP_RC=1
++ rc=1
++ echo 'DHCP_RC=1'
++ ip -4 addr show dev eth0
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast qlen 1000
+    inet 192.0.2.40/25 brd 192.0.2.127 scope global dynamic noprefixroute eth0
+       valid_lft 259196sec preferred_lft 226796sec
++ ip route show
+192.0.2.0/25 dev eth0 scope link  src 192.0.2.40  metric 1002
+169.254.169.254 via 192.0.2.24 dev eth0  src 192.0.2.40  metric 1002
++ ping -c 2 -W 2 192.0.2.2
+PING 192.0.2.2 (192.0.2.2) 56(84) bytes of data.
+64 bytes from 192.0.2.2: icmp_seq=1 ttl=64 time=0.064 ms
+64 bytes from 192.0.2.2: icmp_seq=2 ttl=64 time=0.110 ms
+
+--- 192.0.2.2 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1000ms
+rtt min/avg/max/mdev = 0.064/0.087/0.110/0.023 ms
++ exit 1
+# exit=1

@@ -1,7 +1,7 @@
 # Stage-Three N3 OVS Restart ACL-Focused Probe
 
 Date: 2026-07-01
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -19,7 +19,7 @@ must not trigger OVS or OVS agent restart.
 - Script: `deploy/kolla/smoke/neutron_aria_ovs_restart_smoke.sh`
 - Remote evidence root:
   `/tmp/aria-stage3-ovs-restart-acl-focused-20260701130722`
-- Target VM IP: `10.58.159.28`
+- Target VM IP: `192.0.2.28`
 - Target port: `39adf570-1acb-4e81-9215-96744a6bf627`
 - Target tap: `tap39adf570-1a`
 - Test action: `TEST_TRIGGER_OVS_RESTART=true`

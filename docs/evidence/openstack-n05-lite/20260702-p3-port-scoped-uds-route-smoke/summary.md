@@ -2,7 +2,7 @@
 
 Date: 2026-07-02
 
-Host: `ostack2.bj159.net`
+Host: `compute-1.example.test`
 
 Commit: `70075b0a9b9e635856720fe5f32daf145b80ca90`
 

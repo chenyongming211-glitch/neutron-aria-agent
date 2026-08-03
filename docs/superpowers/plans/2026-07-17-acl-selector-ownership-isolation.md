@@ -63,7 +63,7 @@ git add docs/openstack-neutron-aria-details/17-acl-selector-ownership-isolation.
   docs/superpowers/plans/2026-07-17-acl-selector-ownership-isolation.md \
   docs/openstack-neutron-aria-details/12-review-bug-backlog.md \
   docs/openstack-neutron-aria-details/README.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "docs: design ACL selector ownership isolation"
 git push -u origin codex/review-acl-046-selector-isolation-design
 ```
@@ -125,7 +125,7 @@ command inventory in `ci/check_neutron_stage1.py`.
 
 ```bash
 git add core/tests/acl_projection_contract.rs ci/check_neutron_stage1.py
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "test: define ACL selector projection contract"
 git push origin codex/review-acl-046-selector-isolation-design
 ```
@@ -170,7 +170,7 @@ Re-export the contract from `core/src/ebpf_ops.rs`.
 ```bash
 git add core/src/ebpf_ops/projection.rs core/src/ebpf_ops.rs \
   core/src/ebpf_ops/network.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "feat: compile managed ACL group projections"
 git push origin codex/review-acl-046-selector-isolation-design
 ```

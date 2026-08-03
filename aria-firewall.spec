@@ -50,5 +50,5 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 
 %changelog
-* Wed Mar 11 2026 Aria Firewall <chenyongming211@gmail.com> - 0.1.0-1
+* Wed Mar 11 2026 Aria Firewall <maintainers@example.invalid> - 0.1.0-1
 - Initial RPM package

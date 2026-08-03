@@ -15,7 +15,7 @@ implemented, and it does not open QoS or Mirror.
 
 | Area | Evidence | Disposition |
 | --- | --- | --- |
-| P3-1 projection observability | `docs/evidence/openstack-n05-lite/20260702-p3-projection-heartbeat-3node/summary.md` | pass on `ostack2/3/4`; read-only projection and decision heartbeat fields accepted. |
+| P3-1 projection observability | `docs/evidence/openstack-n05-lite/20260702-p3-projection-heartbeat-3node/summary.md` | pass on `compute-1/3/4`; read-only projection and decision heartbeat fields accepted. |
 | P3-2 Python builder and dry-run | Unit tests covered by stage checks and CI | pass; no production behavior change outside config gates. |
 | P3-3 Rust port-scoped UDS route | `docs/evidence/openstack-n05-lite/20260702-p3-port-scoped-uds-route-smoke/summary.md` | pass; route/capability and mismatch guard accepted while runtime remained gated. |
 | P3-4 failure semantics | Commit `9901c1f`; CI run `28577963141` | pass; scoped errors or unsafe candidates fall back to full-resync, invalid ACL remains degraded/bypass. |
@@ -60,7 +60,7 @@ implemented, and it does not open QoS or Mirror.
 
 ## Field Result
 
-The final P3-5 smoke on `ostack2.bj159.net` showed:
+The final P3-5 smoke on `compute-1.example.test` showed:
 
 - package RPC event smoke passed;
 - P2 RPC full-resync A/B passed;

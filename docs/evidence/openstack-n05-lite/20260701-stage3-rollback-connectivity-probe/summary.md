@@ -1,7 +1,7 @@
 # Stage-Three N3 Rollback Connectivity Probe
 
 Date: 2026-07-01
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -18,8 +18,8 @@ consumption.
 
 - Script: `deploy/kolla/smoke/neutron_aria_rollback_connectivity_smoke.sh`
 - Remote evidence root:
-  `/tmp/aria-stage3-rollback-connectivity-20260701094955/evidence/20260701094952-ostack2.bj159.net`
-- VM IP: `10.58.159.28`
+  `/tmp/aria-stage3-rollback-connectivity-20260701094955/evidence/20260701094952-compute-1.example.test`
+- VM IP: `192.0.2.28`
 - Port: `39adf570-1acb-4e81-9215-96744a6bf627`
 - Tap: `tap39adf570-1a`
 - `CHECK_AGENT_STOP=true`

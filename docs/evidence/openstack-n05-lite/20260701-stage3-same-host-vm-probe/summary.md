@@ -1,7 +1,7 @@
 # Stage-Three N3 Same-Host VM Probe
 
 Date: 2026-07-01
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -14,20 +14,20 @@ scope to QoS, Mirror, or event-driven incremental sync.
 
 - Remote evidence root:
   `/tmp/aria-stage3-same-host-vm-20260701110327/evidence`
-- Temporary guest IP: `10.58.159.43`
-- Target guest IP: `10.58.159.28`
+- Temporary guest IP: `192.0.2.43`
+- Target guest IP: `192.0.2.28`
 - Temporary port: `ae8cc2b6-cc0c-431f-92bb-83d158c8c9e6`
 - Temporary tap: `tapae8cc2b6-cc`
 - ACL fixture:
-  - src CIDR: `10.58.159.43/32`
-  - dst CIDR: `10.58.159.28/32`
+  - src CIDR: `192.0.2.43/32`
+  - dst CIDR: `192.0.2.28/32`
   - protocol: `icmp`
 - `ROLLBACK=true`
 - `WAL_REPLAY_FAILURE_MAX_DELTA=0`
 
 ## Preconditions
 
-- The target VM was active on `ostack2.bj159.net`.
+- The target VM was active on `compute-1.example.test`.
 - A temporary CirrOS VM was created on the same host for guest-originated
   traffic.
 - The temporary guest was reachable through SSH for the traffic checks.
@@ -43,7 +43,7 @@ This probe required no increase.
 
 ## Observed Flow
 
-- Baseline guest-originated ping from `10.58.159.43` to `10.58.159.28`
+- Baseline guest-originated ping from `192.0.2.43` to `192.0.2.28`
   succeeded before ACL was applied.
 - ACL full-resync submitted snapshot generation 144.
 - The temporary port was managed by the datapath:

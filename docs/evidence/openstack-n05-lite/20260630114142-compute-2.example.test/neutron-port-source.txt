@@ -1,0 +1,1 @@
+host=compute-2.example.test ports=3 compute_ports=0

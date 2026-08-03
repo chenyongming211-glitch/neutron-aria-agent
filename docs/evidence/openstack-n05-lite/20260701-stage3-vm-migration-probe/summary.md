@@ -1,7 +1,7 @@
 # Stage-Three N3 VM Migration Probe
 
 Date: 2026-07-01
-Targets: ostack2.bj159.net, ostack3.bj159.net
+Targets: compute-1.example.test, compute-2.example.test
 
 ## Purpose
 
@@ -18,13 +18,13 @@ Mirror, or RabbitMQ event consumption.
 - Script: `deploy/kolla/smoke/neutron_aria_vm_migration_smoke.sh`
 - Remote evidence root:
   `/tmp/aria-stage3-vm-migration-20260701102811`
-- VM IP: `10.58.159.28`
+- VM IP: `192.0.2.28`
 - Server: `68fa335c-8c4d-451c-9685-ca9f21de79cc`
 - Port: `39adf570-1acb-4e81-9215-96744a6bf627`
 - Tap: `tap39adf570-1a`
 - Source/destination sequence:
-  - `ostack2.bj159.net -> ostack3.bj159.net`
-  - `ostack3.bj159.net -> ostack2.bj159.net`
+  - `compute-1.example.test -> compute-2.example.test`
+  - `compute-2.example.test -> compute-1.example.test`
 - `ALLOW_VM_MIGRATE=true`
 - `ROLLBACK=true`
 - `WAL_REPLAY_FAILURE_MAX_DELTA=0`
@@ -33,16 +33,16 @@ Mirror, or RabbitMQ event consumption.
 
 - `nova live-migration` command was available.
 - Nova compute services were `enabled/up` on:
-  - `ostack2.bj159.net`
-  - `ostack3.bj159.net`
-  - `ostack4.bj159.net`
+  - `compute-1.example.test`
+  - `compute-2.example.test`
+  - `compute-3.example.test`
 - Nova hypervisors were `enabled/up` on the same three hosts.
-- The server was initially `ACTIVE` on `ostack2.bj159.net`.
-- The target Neutron port was initially bound to `ostack2.bj159.net`.
+- The server was initially `ACTIVE` on `compute-1.example.test`.
+- The target Neutron port was initially bound to `compute-1.example.test`.
 
 ## Observed Flow
 
-### Source: ostack2 -> ostack3
+### Source: compute-1 -> compute-2
 
 - WAL replay failure baseline: 219
 - Cleaned existing managed ports:
@@ -51,13 +51,13 @@ Mirror, or RabbitMQ event consumption.
 - Target port was managed on source:
   - ifname: `tap39adf570-1a`
   - ifindex: 69
-- Nova live migration to `ostack3.bj159.net` was accepted.
+- Nova live migration to `compute-2.example.test` was accepted.
 - Source cleanup full-resync submitted generation 142.
 - Source status confirmed the target port was no longer managed.
 - Source rollback left:
   - `rollback_remaining_managed_ports=0`
 
-### Destination: ostack3
+### Destination: compute-2
 
 - WAL replay failure baseline: 0
 - Destination full-resync submitted generation 16.
@@ -67,20 +67,20 @@ Mirror, or RabbitMQ event consumption.
 - Destination rollback removed managed ACL ports and left:
   - `rollback_remaining_managed_ports=0`
 
-### Source: ostack3 -> ostack2
+### Source: compute-2 -> compute-1
 
 - WAL replay failure baseline: 0
 - Baseline source full-resync submitted generation 18.
 - Target port was managed on source:
   - ifname: `tap39adf570-1a`
   - ifindex: 27
-- Nova live migration back to `ostack2.bj159.net` was accepted.
+- Nova live migration back to `compute-1.example.test` was accepted.
 - Source cleanup full-resync submitted generation 19.
 - Source status confirmed the target port was no longer managed.
 - Source rollback left:
   - `rollback_remaining_managed_ports=0`
 
-### Destination: ostack2
+### Destination: compute-1
 
 - WAL replay failure baseline: 219
 - Destination full-resync submitted generation 143.
@@ -94,7 +94,7 @@ Each phase included VM reachability checks through the smoke script.
 
 ## Final State
 
-Final status on `ostack2.bj159.net`:
+Final status on `compute-1.example.test`:
 
 - generation: 143
 - accepted_generation: 143
@@ -106,7 +106,7 @@ Final status on `ostack2.bj159.net`:
 - wal_replay_failures: 219
 - target tap exists with ifindex 71
 
-Final status on `ostack3.bj159.net`:
+Final status on `compute-2.example.test`:
 
 - generation: 19
 - accepted_generation: 19

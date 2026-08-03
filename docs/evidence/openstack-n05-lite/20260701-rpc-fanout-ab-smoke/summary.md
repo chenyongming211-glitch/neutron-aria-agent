@@ -9,7 +9,7 @@ without restarting OVS, OVS agent, Neutron server, or aria-datapath.
 
 | Host | Result | Notes |
 | --- | --- | --- |
-| `ostack2.bj159.net` | pass | `rpc_events_enabled=false` ignored a real fanout cast; `rpc_events_enabled=true` consumed the fanout and drained one port update event. |
+| `compute-1.example.test` | pass | `rpc_events_enabled=false` ignored a real fanout cast; `rpc_events_enabled=true` consumed the fanout and drained one port update event. |
 
 Smoke script:
 

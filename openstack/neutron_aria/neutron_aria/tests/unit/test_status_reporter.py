@@ -55,7 +55,7 @@ class StatusReporterTestCase(unittest.TestCase):
 
     def test_report_builds_neutron_agent_state(self):
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(generation=12, snapshot_ports=5, managed_ports=2)
         runtime_status.update_projection_summary({
             "projected_ports": 2,
@@ -71,7 +71,7 @@ class StatusReporterTestCase(unittest.TestCase):
         reporter = NeutronStatusReporter(
             api,
             context="ctx",
-            host="ostack2",
+            host="compute-1",
             configurations={
                 "managed_domains": ["acl"],
                 "ovs_bridge": "br-int",
@@ -86,7 +86,7 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual(agent_state, api.calls[0][1])
         self.assertFalse(api.calls[0][2])
         self.assertEqual("neutron-aria-agent", agent_state["binary"])
-        self.assertEqual("ostack2", agent_state["host"])
+        self.assertEqual("compute-1", agent_state["host"])
         self.assertEqual("N/A", agent_state["topic"])
         self.assertEqual(ARIA_AGENT_TYPE, agent_state["agent_type"])
         self.assertTrue(agent_state["start_flag"])
@@ -118,7 +118,7 @@ class StatusReporterTestCase(unittest.TestCase):
 
     def test_build_reporter_includes_rpc_sync_mode_configuration(self):
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(generation=1, snapshot_ports=0, managed_ports=0)
         config = AgentConfig(
             full_resync_enabled=True,
@@ -129,7 +129,7 @@ class StatusReporterTestCase(unittest.TestCase):
             event_merge_interval=0.4,
         )
         reporter = build_neutron_status_reporter(
-            "ostack2",
+            "compute-1",
             config,
             report_state_api=api,
             context="ctx",
@@ -147,7 +147,7 @@ class StatusReporterTestCase(unittest.TestCase):
 
     def test_report_projects_domain_counts_and_degraded_reasons(self):
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=12,
             snapshot_ports=2,
@@ -169,7 +169,7 @@ class StatusReporterTestCase(unittest.TestCase):
             accepted_generation=12,
             applied_generation=11,
         )
-        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+        reporter = NeutronStatusReporter(api, context="ctx", host="compute-1")
 
         agent_state = reporter.report(runtime_status)
         configurations = agent_state["configurations"]
@@ -200,7 +200,7 @@ class StatusReporterTestCase(unittest.TestCase):
 
     def test_report_compacts_large_heartbeat_configurations(self):
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         managed_ports = []
         port_statuses = []
         for i in range(20):
@@ -232,7 +232,7 @@ class StatusReporterTestCase(unittest.TestCase):
             managed_ports_detail=managed_ports,
             port_statuses=port_statuses,
         )
-        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+        reporter = NeutronStatusReporter(api, context="ctx", host="compute-1")
 
         agent_state = reporter.report(runtime_status)
         configurations = agent_state["configurations"]
@@ -246,9 +246,9 @@ class StatusReporterTestCase(unittest.TestCase):
 
     def test_second_report_clears_start_flag(self):
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(generation=1, snapshot_ports=0, managed_ports=0)
-        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+        reporter = NeutronStatusReporter(api, context="ctx", host="compute-1")
 
         first = reporter.report(runtime_status)
         second = reporter.report(runtime_status)
@@ -259,9 +259,9 @@ class StatusReporterTestCase(unittest.TestCase):
 
     def test_report_includes_degraded_status(self):
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_degraded("local_api_degraded", "socket unavailable")
-        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+        reporter = NeutronStatusReporter(api, context="ctx", host="compute-1")
 
         agent_state = reporter.report(runtime_status)
 
@@ -271,7 +271,7 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertIn("socket unavailable", agent_state["configurations"]["last_error"])
 
     def test_global_degraded_rewrites_cached_acl_rows_to_bypass(self):
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=12,
             snapshot_ports=1,
@@ -317,18 +317,18 @@ class StatusReporterTestCase(unittest.TestCase):
         )
 
     def test_report_failure_is_explicit(self):
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         reporter = NeutronStatusReporter(
             FailingReportStateApi(),
             context="ctx",
-            host="ostack2",
+            host="compute-1",
         )
 
         with self.assertRaises(StatusReportError):
             reporter.report(runtime_status)
 
     def test_port_status_reporter_writes_aria_acl_status_rows(self):
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=12,
             snapshot_ports=1,
@@ -347,7 +347,7 @@ class StatusReporterTestCase(unittest.TestCase):
             }],
         )
         api = FakeAriaAclApi()
-        reporter = AriaAclPortStatusReporter(api, context="ctx", host="ostack2")
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="compute-1")
 
         result = reporter.report(runtime_status)
 
@@ -355,7 +355,7 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual("ctx", api.statuses[0][0])
         payload = api.statuses[0][1]["aria_acl_port_status"]
         self.assertEqual("port-1", payload["port_id"])
-        self.assertEqual("ostack2", payload["host"])
+        self.assertEqual("compute-1", payload["host"])
         self.assertEqual(12, payload["generation"])
         self.assertEqual("ready", payload["status"])
         self.assertEqual("policy-1", payload["effective_policy_id"])
@@ -369,7 +369,7 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertNotIn("managed_domains", payload)
 
     def test_port_status_reporter_projects_ready_acl_to_enforce(self):
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=12,
             snapshot_ports=1,
@@ -387,7 +387,7 @@ class StatusReporterTestCase(unittest.TestCase):
             }],
         )
         api = FakeAriaAclApi()
-        reporter = AriaAclPortStatusReporter(api, context="ctx", host="ostack2")
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="compute-1")
 
         reporter.report(runtime_status)
 
@@ -401,7 +401,7 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertNotIn("domains", payload)
 
     def test_composite_reporter_preserves_heartbeat_and_port_status(self):
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=3,
             snapshot_ports=1,
@@ -411,8 +411,8 @@ class StatusReporterTestCase(unittest.TestCase):
         report_state = FakeReportStateApi()
         aria_acl_api = FakeAriaAclApi()
         reporter = CompositeStatusReporter(
-            NeutronStatusReporter(report_state, context="ctx", host="ostack2"),
-            AriaAclPortStatusReporter(aria_acl_api, context="ctx", host="ostack2"),
+            NeutronStatusReporter(report_state, context="ctx", host="compute-1"),
+            AriaAclPortStatusReporter(aria_acl_api, context="ctx", host="compute-1"),
         )
 
         result = reporter.report(runtime_status)
@@ -443,7 +443,7 @@ class StatusReporterTestCase(unittest.TestCase):
                     body,
                 )
 
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=3,
             snapshot_ports=1,
@@ -454,12 +454,12 @@ class StatusReporterTestCase(unittest.TestCase):
             NeutronStatusReporter(
                 OrderedReportStateApi(),
                 context="ctx",
-                host="ostack2",
+                host="compute-1",
             ),
             AriaAclPortStatusReporter(
                 OrderedAriaAclApi(),
                 context="ctx",
-                host="ostack2",
+                host="compute-1",
             ),
         )
 
@@ -474,7 +474,7 @@ class StatusReporterTestCase(unittest.TestCase):
             def report_aria_acl_port_status(self, context, body):
                 raise RuntimeError("status database unavailable")
 
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=3,
             snapshot_ports=1,
@@ -485,12 +485,12 @@ class StatusReporterTestCase(unittest.TestCase):
             NeutronStatusReporter(
                 report_state,
                 context="ctx",
-                host="ostack2",
+                host="compute-1",
             ),
             AriaAclPortStatusReporter(
                 FailingAriaAclApi(),
                 context="ctx",
-                host="ostack2",
+                host="compute-1",
             ),
         )
 
@@ -521,7 +521,7 @@ class StatusReporterTestCase(unittest.TestCase):
                     body,
                 )
 
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=3,
             snapshot_ports=1,
@@ -533,12 +533,12 @@ class StatusReporterTestCase(unittest.TestCase):
             NeutronStatusReporter(
                 OrderedReportStateApi(),
                 context="ctx",
-                host="ostack2",
+                host="compute-1",
             ),
             AriaAclPortStatusReporter(
                 OrderedAriaAclApi(),
                 context="ctx",
-                host="ostack2",
+                host="compute-1",
             ),
         )
 
@@ -550,13 +550,13 @@ class StatusReporterTestCase(unittest.TestCase):
         report_state = FakeReportStateApi()
         aria_acl_api = FakeAriaAclApi()
         reporter = build_neutron_status_reporter(
-            "ostack2",
+            "compute-1",
             AgentConfig(acl_source="neutron"),
             report_state_api=report_state,
             context="ctx",
             aria_acl_api=aria_acl_api,
         )
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
             generation=4,
             snapshot_ports=1,
@@ -577,7 +577,7 @@ class StatusContractStatusReporterRedTestCase(unittest.TestCase):
             "last_feature_ready_generation_by_domain"
         ]
         api = FakeReportStateApi()
-        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status = AgentRuntimeStatus("compute-1")
         try:
             runtime_status.mark_ready(
                 generation=scenario["durable_state"]["last_feature_ready_generation"],
@@ -596,7 +596,7 @@ class StatusContractStatusReporterRedTestCase(unittest.TestCase):
             "classified_degraded",
             "acl_not_supported",
         )
-        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+        reporter = NeutronStatusReporter(api, context="ctx", host="compute-1")
 
         agent_state = reporter.report(runtime_status)
         configurations = agent_state["configurations"]

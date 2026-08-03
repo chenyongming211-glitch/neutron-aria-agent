@@ -146,7 +146,7 @@ class FakeAriaAclClient(object):
                 "protocol": "tcp",
                 "dst_port_min": 22,
                 "dst_port_max": 22,
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             }],
             "address_sets": [],
             "bindings": [{
@@ -277,14 +277,14 @@ rpc_events_enabled = true
             agent_main.build_neutron_status_reporter = fake_build
 
             reporter = agent_main.build_once_status_reporter(
-                AgentConfig(host="ostack2", acl_source="neutron"),
+                AgentConfig(host="compute-1", acl_source="neutron"),
                 neutron_config_files=["/etc/neutron/neutron.conf"],
             )
 
             self.assertIsInstance(reporter, CompositeStatusReporter)
             self.assertEqual([
                 ("initialize", ["/etc/neutron/neutron.conf"]),
-                ("build", "ostack2", "neutron"),
+                ("build", "compute-1", "neutron"),
             ], calls)
         finally:
             agent_main.initialize_neutron_runtime = original_init
@@ -296,7 +296,7 @@ rpc_events_enabled = true
             local_client = FakeLocalClient()
             acl_client = FakeAriaAclClient()
             config = AgentConfig(
-                host="ostack2",
+                host="compute-1",
                 managed_domains=["acl"],
                 acl_source="neutron",
                 state_dir=state_dir,
@@ -305,7 +305,7 @@ rpc_events_enabled = true
                 "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "network_id": "net-prod",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])

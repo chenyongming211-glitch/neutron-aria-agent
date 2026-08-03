@@ -10,9 +10,9 @@ qdisc state, and did not enable QoS/Mirror datapath behavior.
 
 | Host | Evidence Directory | Notes |
 | --- | --- | --- |
-| `ostack2.bj159.net` | `ostack2.bj159.net/` | Has local VM tap samples; container `tc` can read tap qdisc. |
-| `ostack3.bj159.net` | `ostack3.bj159.net/` | No local VM tap at collection time; container `tc` can read global qdisc. |
-| `ostack4.bj159.net` | `ostack4.bj159.net/` | No local VM tap at collection time; container `tc` can read global qdisc. |
+| `compute-1.example.test` | `compute-1.example.test/` | Has local VM tap samples; container `tc` can read tap qdisc. |
+| `compute-2.example.test` | `compute-2.example.test/` | No local VM tap at collection time; container `tc` can read global qdisc. |
+| `compute-3.example.test` | `compute-3.example.test/` | No local VM tap at collection time; container `tc` can read global qdisc. |
 
 Per-host files:
 
@@ -32,9 +32,9 @@ Per-host files:
 | OVS agent extension | OVS agent config still shows `extensions = mirror`; no standard OVS QoS agent extension is enabled. | `no_double_enforcement` |
 | Neutron QoS code | The old Neutron image contains QoS extension/plugin/ML2/agent code paths. | `available_but_disabled` |
 | Aria QoS translator code | `neutron_aria.agent.effective_qos` imports inside `neutron_aria_agent`. | `available_but_not_product_enabled` |
-| Host `tc` binary | Host shell does not have `tc` on `ostack2/3/4`. | `host_tc_missing` |
+| Host `tc` binary | Host shell does not have `tc` on `compute-1/3/4`. | `host_tc_missing` |
 | Container `tc` binary | `neutron_openvswitch_agent`, `neutron_aria_agent`, and `aria_datapath` containers have `/usr/sbin/tc`. | `candidate_runtime_tooling` |
-| Container qdisc visibility | On `ostack2`, the containers can see VM tap links and `tc qdisc show dev tap86b83885-67` succeeds. On `ostack3/4`, no VM tap was present, but global qdisc is readable from containers. | `read_only_supported` |
+| Container qdisc visibility | On `compute-1`, the containers can see VM tap links and `tc qdisc show dev tap86b83885-67` succeeds. On `compute-2/4`, no VM tap was present, but global qdisc is readable from containers. | `read_only_supported` |
 
 ## Decision
 

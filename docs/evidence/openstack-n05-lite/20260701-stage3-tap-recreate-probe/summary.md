@@ -1,7 +1,7 @@
 # Stage-Three N3 Tap Recreate Probe
 
 Date: 2026-07-01
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -15,7 +15,7 @@ expanding scope to QoS or Mirror.
 - Script: `deploy/kolla/smoke/neutron_aria_tap_recreate_smoke.sh`
 - Remote log:
   `/tmp/aria-stage3-tap-recreate-20260701100003/tap-recreate.log`
-- VM IP: `10.58.159.28`
+- VM IP: `192.0.2.28`
 - Port: `39adf570-1acb-4e81-9215-96744a6bf627`
 - Tap: `tap39adf570-1a`
 - `ALLOW_VM_REBOOT=true`
@@ -25,7 +25,7 @@ expanding scope to QoS or Mirror.
 
 ## Preconditions
 
-- The target port was bound to `ostack2.bj159.net`.
+- The target port was bound to `compute-1.example.test`.
 - The UDS status path was read through the authorized agent container user,
   matching the hardened peercred/socket-permission model.
 - The probe captured the pre-existing WAL replay failure baseline:

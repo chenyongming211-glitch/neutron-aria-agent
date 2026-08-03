@@ -11,9 +11,9 @@ The package-level smoke passed on all three target hosts:
 
 | Host | Result | Notes |
 | --- | --- | --- |
-| `ostack2.bj159.net` | pass | Updated the `neutron_aria_agent` container egg, confirmed `validate_config`, and passed `rpc_event_package_smoke=pass`. |
-| `ostack3.bj159.net` | pass | Updated the `neutron_aria_agent` container egg, confirmed `validate_config`, and passed `rpc_event_package_smoke=pass`. |
-| `ostack4.bj159.net` | pass | Updated the `neutron_aria_agent` container egg, confirmed `validate_config`, and passed `rpc_event_package_smoke=pass`. |
+| `compute-1.example.test` | pass | Updated the `neutron_aria_agent` container egg, confirmed `validate_config`, and passed `rpc_event_package_smoke=pass`. |
+| `compute-2.example.test` | pass | Updated the `neutron_aria_agent` container egg, confirmed `validate_config`, and passed `rpc_event_package_smoke=pass`. |
+| `compute-3.example.test` | pass | Updated the `neutron_aria_agent` container egg, confirmed `validate_config`, and passed `rpc_event_package_smoke=pass`. |
 
 Backups of the previous container egg were written under:
 
@@ -24,9 +24,9 @@ Backups of the previous container egg were written under:
 Observed backup files:
 
 ```text
-ostack2.bj159.net: neutron_aria-0.1.0-py2.7.egg.20260701142902.bak
-ostack3.bj159.net: neutron_aria-0.1.0-py2.7.egg.20260701142931.bak
-ostack4.bj159.net: neutron_aria-0.1.0-py2.7.egg.20260701142932.bak
+compute-1.example.test: neutron_aria-0.1.0-py2.7.egg.20260701142902.bak
+compute-2.example.test: neutron_aria-0.1.0-py2.7.egg.20260701142931.bak
+compute-3.example.test: neutron_aria-0.1.0-py2.7.egg.20260701142932.bak
 ```
 
 ## What The Smoke Proved

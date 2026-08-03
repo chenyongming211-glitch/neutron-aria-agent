@@ -273,7 +273,7 @@ Ready 不接管 OVS L2 转发状态：
 
 本分支协作规则：
 
-- 正确工作目录是 `/Users/chen/code/aria-firewall-v0.9-neutron-agent`
+- 在仓库根目录执行开发和验证命令
 - 正确分支是 `v0.9-neutron-agent`
 - 不在本机运行 `cargo build`、`cargo check`、`cargo test`
 - 修改完成后提交到 GitHub，由 GitHub Actions 编译验证

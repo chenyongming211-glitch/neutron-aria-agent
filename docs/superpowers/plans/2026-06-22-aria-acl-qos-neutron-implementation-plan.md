@@ -544,7 +544,7 @@ The default product-safe startup mode is heartbeat-only:
 
 ```ini
 [agent]
-host = ostack2.bj159.net
+host = compute-1.example.test
 managed_domains = acl
 report_interval = 30
 resync_interval = 60
@@ -580,7 +580,7 @@ neutron-aria-agent \
   --heartbeat-only
 ```
 
-The host value must match the existing Neutron agent host convention, for example `ostack2.bj159.net`, not merely `ostack2`.
+The host value must match the existing Neutron agent host convention, for example `compute-1.example.test`, not merely `compute-1`.
 
 **Real environment heartbeat-only service smoke, 2026-06-24:**
 
@@ -594,18 +594,18 @@ The host value must match the existing Neutron agent host convention, for exampl
     - `/etc/neutron/plugins/ml2/openvswitch_agent.ini`
   - `--heartbeat-only` used, so no snapshot was submitted and no tap datapath was touched.
 - Host values:
-  - `ostack2.bj159.net`
-  - `ostack3.bj159.net`
-  - `ostack4.bj159.net`
+  - `compute-1.example.test`
+  - `compute-2.example.test`
+  - `compute-3.example.test`
 - Observed `neutron agent-list` result:
 
 ```text
-Aria ACL agent | ostack2.bj159.net | :-) | True | neutron-aria-agent
-Aria ACL agent | ostack3.bj159.net | :-) | True | neutron-aria-agent
-Aria ACL agent | ostack4.bj159.net | :-) | True | neutron-aria-agent
+Aria ACL agent | compute-1.example.test | :-) | True | neutron-aria-agent
+Aria ACL agent | compute-2.example.test | :-) | True | neutron-aria-agent
+Aria ACL agent | compute-3.example.test | :-) | True | neutron-aria-agent
 ```
 
-- Observed `neutron agent-show` configuration on `ostack2.bj159.net`:
+- Observed `neutron agent-show` configuration on `compute-1.example.test`:
 
 ```json
 {
@@ -646,7 +646,7 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
 **Implementation checkpoint, 2026-06-24 independent Kolla container smoke:**
 
 - Built `neutron-aria-agent:smoke-e68e1aa` from the onsite OVS agent image family on the target compute hosts.
-- Started an independent `neutron_aria_agent` container on `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`.
+- Started an independent `neutron_aria_agent` container on `compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test`.
 - Stopped the previous temporary embedded `neutron-aria-agent` process inside `neutron_openvswitch_agent` on all three hosts.
 - Verified `/var/log/kolla/neutron/neutron-aria-agent.log` contains `agent_start`, `service_initialize`, `heartbeat_reported`, and `service_result`.
 - Verified `neutron agent-list` shows alive `Aria ACL agent` entries for all three hosts.
@@ -658,12 +658,12 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
 
 **Implementation checkpoint, 2026-06-24 full-resync smoke gate:**
 
-- Host: `ostack2.bj159.net`.
+- Host: `compute-1.example.test`.
 - Started temporary Rust `aria-agent` in `neutron_managed` mode with `auto_attach=false` and UDS at `/run/aria/aria-agent.sock`.
 - Restarted `neutron_aria_agent` with `/run/aria` mounted.
 - Rebuilt the smoke image so the container process runs as root. This was required because the target OVSDB socket is `root:root 0750`; the `neutron` user cannot run `ovs-vsctl br-exists br-int`.
 - UDS capabilities passed for `api_version=v1`, `attach_authority=neutron_snapshot`, `supports_full_snapshot=true`, `supports_port_delete=true`, and `acl` domain support.
-- Legacy neutronclient listed 5 local ports for `ostack2.bj159.net`, including 2 compute ports.
+- Legacy neutronclient listed 5 local ports for `compute-1.example.test`, including 2 compute ports.
 - One `neutron-aria-agent --once --enable-full-resync` submitted a snapshot and UDS status showed 2 managed ACL ports:
   - `86b83885-671f-474c-9556-8af98cf1cdc8` -> `tap86b83885-67`, ifindex `26`.
   - `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` -> `tape607e86b-9e`, ifindex `27`.
@@ -709,14 +709,14 @@ The implemented full-resync source is legacy `python-neutronclient` with OS_* cr
 
 **Real environment smoke, 2026-06-24:**
 
-- Host: `ostack2.bj159.net`.
+- Host: `compute-1.example.test`.
 - Git commit: `f9e90ab`.
 - GitHub Actions run: `28072633145`.
 - Artifact: `firewall-binaries-f9e90abbe1a95b91190cb328b496b2e4fe170de8`.
 - Evidence retained on the host: `/tmp/aria-smoke-f9e90ab/python-snapshot-uds-smoke.txt`.
 - Discovery:
   - Neutron ports visible through `adminrc`: 8.
-  - Ports bound to `ostack2` and included in snapshot: 5.
+  - Ports bound to `compute-1` and included in snapshot: 5.
   - Eligible compute OVS tap ports: 2.
     - `86b83885-671f-474c-9556-8af98cf1cdc8` -> `tap86b83885-67`, ifindex `26`.
     - `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` -> `tape607e86b-9e`, ifindex `27`.
@@ -745,7 +745,7 @@ The implemented full-resync source is legacy `python-neutronclient` with OS_* cr
 - Observed result: all three containers can import `neutron_aria.agent.effective_acl` and `neutron_aria.agent.effective_qos`.
 - Observed result: all three hosts run `python -m neutron_aria.agent.main ... --heartbeat-only` as a temporary test process.
 - Observed result: temporary test process stdout/stderr is written to `/var/log/kolla/neutron/neutron-aria-agent.log`.
-- Observed result: `neutron agent-list` shows alive `Aria ACL agent` entries for `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`.
+- Observed result: `neutron agent-list` shows alive `Aria ACL agent` entries for `compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test`.
 - Boundary: this proves package layout and heartbeat compatibility with the target legacy Neutron runtime. It does not enable RPC event consumption, full-resync, snapshot submission, or datapath apply.
 - `effective_acl.py` now computes per-port effective Aria ACL from product ACL policies, rules, address sets, and port/network bindings.
 - `effective_qos.py` now computes per-port Aria QoS from native Neutron QoS policy semantics, with port policy taking precedence over network policy.
@@ -814,7 +814,7 @@ Starting product-mode `aria-agent` on a host with existing `tap*` interfaces but
 
 **Implementation checkpoint, 2026-06-24:**
 
-The Rust-side startup boundary and Neutron attach authority are implemented and smoke tested on `ostack2.bj159.net` with CI artifact `7d9e38d`. In `neutron_managed` mode, `aria-agent` no longer auto-attaches every `tap*`; attach/detach authority is driven by the Neutron UDS snapshot. This checkpoint intentionally does not mean ACL/QoS/Mirror northbound business APIs are complete.
+The Rust-side startup boundary and Neutron attach authority are implemented and smoke tested on `compute-1.example.test` with CI artifact `7d9e38d`. In `neutron_managed` mode, `aria-agent` no longer auto-attaches every `tap*`; attach/detach authority is driven by the Neutron UDS snapshot. This checkpoint intentionally does not mean ACL/QoS/Mirror northbound business APIs are complete.
 
 ### 5.1 Snapshot DTO
 
@@ -952,7 +952,7 @@ If `managed_domains=["acl"]`, local `ariactl policy add/delete` is rejected whil
 
 **Real environment smoke, 2026-06-24:**
 
-- Host: `ostack2.bj159.net`.
+- Host: `compute-1.example.test`.
 - Test interface: `tape607e86b-9e`.
 - Neutron port: `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`.
 - Artifact commit: `7d9e38d`.
@@ -1162,7 +1162,7 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
 - [x] Write product logs to `/var/log/kolla/neutron/neutron-aria-agent.log`.
 - [x] Run independent `neutron_aria_agent` Kolla container smoke on each compute host.
-- [x] Run one-host full-resync gate smoke with UDS rollback on `ostack2.bj159.net`.
+- [x] Run one-host full-resync gate smoke with UDS rollback on `compute-1.example.test`.
 
 ### 8.3 Aria-Agent Image
 
@@ -1210,17 +1210,17 @@ Aria Mirror is a second-phase feature. Phase one delivers independent `aria_acl`
 
 The reason is semantic: the current `networking_mirror` code treats `port_id` as the destination analyzer VM port and receives source traffic from `[mirror] interface` through `br-mirror`; Aria-agent mirror treats the managed source interface/tap as the clone point and sends a copy to a target ifindex. Reusing the same API would make `port_id` ambiguous.
 
-### 9.0 2026-06-23 Ostack2 Mirror Validation Baseline
+### 9.0 2026-06-23 compute-1 Mirror Validation Baseline
 
-This baseline was captured on the deployed product environment `ostack2.bj159.net` before productizing the Neutron API layer. It validates that the current Aria-agent/eBPF mirror datapath can support the second-phase `aria_mirror` semantics.
+This baseline was captured on the deployed product environment `compute-1.example.test` before productizing the Neutron API layer. It validates that the current Aria-agent/eBPF mirror datapath can support the second-phase `aria_mirror` semantics.
 
 Environment facts:
 
-- Compute host: `ostack2.bj159.net`, kernel `4.18.0-553.5.1.el8_10.x86_64`.
+- Compute host: `compute-1.example.test`, kernel `4.18.0-553.5.1.el8_10.x86_64`.
 - ML2 agents include Open vSwitch, LinuxBridge, SR-IOV NIC, DHCP, and metadata agents.
 - The VM ports used for live validation were normal OVS ports:
-  - `wp-test`: Neutron port `86b83885-671f-474c-9556-8af98cf1cdc8`, tap `tap86b83885-67`, fixed IP `10.58.159.26`.
-  - `test1111`: Neutron port `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`, tap `tape607e86b-9e`, fixed IP `10.58.159.27`.
+  - `wp-test`: Neutron port `86b83885-671f-474c-9556-8af98cf1cdc8`, tap `tap86b83885-67`, fixed IP `192.0.2.26`.
+  - `test1111`: Neutron port `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`, tap `tape607e86b-9e`, fixed IP `192.0.2.27`.
 - Both VM ports reported `binding:vif_type=ovs`, `binding:vnic_type=normal`, `binding:vif_details.port_filter=false`, and `binding:vif_details.ovs_hybrid_plug=false`.
 - The live VM tap validation used `test1111` / `tape607e86b-9e` and a temporary local veth target. The temporary agent process, veth pair, BPF pins, and `/tmp/aria-verify` payload were removed after validation.
 
@@ -1371,7 +1371,7 @@ neutron aria-mirror-session-create \
 ```bash
 neutron aria-mirror-session-create \
   --name span-by-prefix \
-  --source-host ostack2 \
+  --source-host compute-1 \
   --source-interface ensXfY \
   --direction ingress \
   --mirror-mode policy
@@ -1392,7 +1392,7 @@ neutron aria-mirror-rule-create $SESSION_ID \
 ```bash
 neutron aria-mirror-session-create \
   --name span-uplink-to-analyzer \
-  --source-host ostack2 \
+  --source-host compute-1 \
   --source-interface ensXfY \
   --target-port $ANALYZER_PORT_ID \
   --direction ingress
@@ -1548,7 +1548,7 @@ Aria-agent applies mirror entries using existing TC/eBPF clone behavior and repo
 - [ ] Create a cross-host target and verify `CROSS_HOST_UNSUPPORTED`.
 - [ ] Try SR-IOV/LinuxBridge ports and verify explicit unsupported status.
 - [ ] Configure a physical capture NIC source in a lab and verify SPAN traffic can be cloned to a local analyzer VM.
-- [ ] Repeat the 2026-06-23 ostack2 live OVS tap scenario in product smoke:
+- [ ] Repeat the 2026-06-23 compute-1 live OVS tap scenario in product smoke:
   - source VM `test1111`-like normal OVS tap.
   - temporary local analyzer interface or analyzer VM port.
   - global mirror to target.
@@ -1641,7 +1641,7 @@ Current implemented and validated state:
 - UDS timeout convergence is implemented in Python for snapshot and port delete:
   a timed-out mutation is treated as successful only after `GET /status` proves
   the desired state converged.
-- ACL fixture smoke on `ostack2.bj159.net` proved:
+- ACL fixture smoke on `compute-1.example.test` proved:
   - full resync discovers the real OVS VM tap.
   - ACL fixture translates into datapath groups/policies.
   - ICMP can be blocked and rollback restores traffic.
@@ -2140,15 +2140,15 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 
 **Live smoke record, 2026-06-25:**
 
-- Deployed `aria-datapath:5613d26` to `ostack2`, `ostack3`, and `ostack4`.
+- Deployed `aria-datapath:5613d26` to `compute-1`, `compute-2`, and `compute-3`.
   All three nodes reported `authority_state=ready`, `wal_status=commit_written`,
   `pending_generation=null`, `wal_replay_failures=0`, and no managed ports after
   smoke rollback.
 - `neutron agent-list` showed all three `Aria ACL agent` entries alive.
-- Baseline ACL full-resync on `ostack2` used VM port
+- Baseline ACL full-resync on `compute-1` used VM port
   `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` / `tape607e86b-9e` and VM IP
-  `10.58.159.27`. The test attached 4 local OVS tap ports, wrote an ICMP drop
-  ACL for source `10.58.159.2/32`, confirmed ping was blocked, then rollback
+  `192.0.2.27`. The test attached 4 local OVS tap ports, wrote an ICMP drop
+  ACL for source `192.0.2.2/32`, confirmed ping was blocked, then rollback
   detached all managed ports and ping recovered.
 - Process-level datapath fault injection was run with:
   `ARIA_FAULT_POINT=neutron.acl.after_policy_write`,
@@ -2163,7 +2163,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   the marker, converged to `authority_state=ready`,
   `wal_status=commit_written`, applied the ACL, verified ping block, and
   rollback returned the node to no managed ports.
-- Added and ran `neutron_aria_acl_fault_injection_smoke.sh` on `ostack2`.
+- Added and ran `neutron_aria_acl_fault_injection_smoke.sh` on `compute-1`.
   The automated smoke loop covered `neutron.acl.after_purge`,
   `neutron.acl.after_group_write`, `neutron.acl.after_policy_write`, and
   `neutron.acl.before_enable`. For each point, the first run failed with the
@@ -2171,7 +2171,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   `authority_state=wal_intent_without_commit`, no managed ports, and reachable
   VM traffic; the second run recovered, verified ACL block, and rollback
   returned `managed_ports=[]`.
-- Added and ran `neutron_aria_delete_fault_injection_smoke.sh` on `ostack2`.
+- Added and ran `neutron_aria_delete_fault_injection_smoke.sh` on `compute-1`.
   The automated smoke uses the real VM port
   `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` / `tape607e86b-9e`, applies an ACL
   snapshot without rollback, triggers
@@ -2193,7 +2193,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - Added and ran `neutron_aria_tap_recreate_smoke.sh` with test VM
   `de981869-29c2-4465-8804-e293fed53184`, port
   `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`, tap `tape607e86b-9e`, and VM IP
-  `10.58.159.27`.
+  `192.0.2.27`.
 - The first tap recreate run exposed a Python control-plane transaction gap:
   same `generation` / `desired_hash` full-resync was incorrectly treated as
   already converged and skipped the UDS PUT. This prevented the datapath from
@@ -2205,13 +2205,13 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   changed ifindex was treated as an `update`, so status moved to the new ifindex
   but XDP was not reattached. The fix treats same-port/same-ifname/different
   ifindex as binding drift and plans `detach + attach`.
-- Final tap recreate smoke passed on `ostack2.bj159.net`: baseline attach used
+- Final tap recreate smoke passed on `compute-1.example.test`: baseline attach used
   ifindex `53`, hard reboot recreated the tap as ifindex `54`, full-resync
   reused generation `53`, reattached the port, confirmed XDP, kept VM
   connectivity, and rollback returned `managed_ports=[]`.
 - Added and ran `neutron_aria_vm_migration_smoke.sh` in both directions:
-  `ostack2.bj159.net -> ostack3.bj159.net` and
-  `ostack3.bj159.net -> ostack2.bj159.net`.
+  `compute-1.example.test -> compute-2.example.test` and
+  `compute-2.example.test -> compute-1.example.test`.
 - Migration source phase attaches the source tap, triggers Nova live migration,
   waits for server and Neutron port binding to move, waits for source tap
   absence, then full-resyncs the old host and requires the target port to be
@@ -2220,7 +2220,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   port to become managed with the local ifindex, verifies XDP attachment and VM
   reachability, then rolls back.
 - Final state after the bidirectional migration smoke: VM and Neutron port are
-  back on `ostack2.bj159.net`; `ostack2` and `ostack3` both report
+  back on `compute-1.example.test`; `compute-1` and `compute-2` both report
   `authority_state=ready`, `pending_generation=null`, `wal_replay_failures=0`,
   and `managed_ports=[]`.
 

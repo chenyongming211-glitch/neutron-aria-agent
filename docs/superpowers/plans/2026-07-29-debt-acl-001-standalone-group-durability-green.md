@@ -188,7 +188,7 @@ Expected: all commands exit zero. Do not run Cargo locally.
 git add agent/src/control_plane.rs agent/src/control_plane/standalone_group.rs \
   core/src/ebpf_ops.rs core/src/ebpf_ops/inventory.rs \
   docs/superpowers/plans/2026-07-29-debt-acl-001-standalone-group-durability-green.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "fix: make standalone groups strictly durable"
 git push origin v0.9-neutron-agent
 ```

@@ -1,7 +1,7 @@
 # Stage-Three N3 OVS Restart Probe
 
 Date: 2026-07-01
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -13,7 +13,7 @@ enable QoS, Mirror, RabbitMQ event consumption, or a new recovery feature.
 
 - Remote evidence root:
   `/tmp/aria-stage3-ovs-restart-20260701110556/evidence`
-- Target VM IP: `10.58.159.28`
+- Target VM IP: `192.0.2.28`
 - Target port: `39adf570-1acb-4e81-9215-96744a6bf627`
 - Target tap: `tap39adf570-1a`
 - OVS action: restart `ovs-vswitchd.service`

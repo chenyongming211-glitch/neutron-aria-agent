@@ -14,17 +14,17 @@ class ProjectedStateIndexTestCase(unittest.TestCase):
         neutron_ports = [{
             "id": "p1",
             "network_id": "net-a",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "revision_number": 7,
         }, {
             "id": "p2",
             "network_id": "net-b",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "revision_number": 3,
         }, {
             "id": "p3",
             "network_id": "net-a",
-            "binding:host_id": "ostack3",
+            "binding:host_id": "compute-2",
             "revision_number": 9,
         }]
         snapshot = {
@@ -72,7 +72,7 @@ class ProjectedStateIndexTestCase(unittest.TestCase):
             {
                 "id": "p1",
                 "network_id": "net-c",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "revision_number": 8,
             },
             {
@@ -112,20 +112,20 @@ class ProjectedStateIndexTestCase(unittest.TestCase):
 
         newer = index.decide_port_update(
             "p1",
-            "ostack2",
-            binding_host="ostack2",
+            "compute-1",
+            binding_host="compute-1",
             revision_number=8,
         ).to_dict()
         same = index.decide_port_update(
             "p1",
-            "ostack2",
-            binding_host="ostack2",
+            "compute-1",
+            binding_host="compute-1",
             revision_number=7,
         ).to_dict()
         older = index.decide_port_update(
             "p1",
-            "ostack2",
-            binding_host="ostack2",
+            "compute-1",
+            binding_host="compute-1",
             revision_number=6,
         ).to_dict()
 
@@ -139,14 +139,14 @@ class ProjectedStateIndexTestCase(unittest.TestCase):
 
         projected = index.decide_port_update(
             "p1",
-            "ostack2",
-            binding_host="ostack3",
+            "compute-1",
+            binding_host="compute-2",
             revision_number=8,
         ).to_dict()
         unknown = index.decide_port_update(
             "p9",
-            "ostack2",
-            binding_host="ostack3",
+            "compute-1",
+            binding_host="compute-2",
             revision_number=1,
         ).to_dict()
 

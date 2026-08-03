@@ -8,8 +8,8 @@ Target environment:
 
 | Item | Value |
 | --- | --- |
-| Neutron server nodes exercised | `ostack2.bj159.net` (`10.58.159.2`), `ostack3.bj159.net` (`10.58.159.3`) |
-| Agent hosts visible in Neutron | `ostack2.bj159.net`, `ostack3.bj159.net`, `ostack4.bj159.net` |
+| Neutron server nodes exercised | `compute-1.example.test` (`192.0.2.2`), `compute-2.example.test` (`192.0.2.3`) |
+| Agent hosts visible in Neutron | `compute-1.example.test`, `compute-2.example.test`, `compute-3.example.test` |
 | Neutron runtime constraint | legacy Python 2 Neutron; no `neutron_lib`; plugin path must use old Neutron service-plugin style |
 | Delivery artifact | `dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz` |
 | Gate script | `deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh install` |
@@ -48,7 +48,7 @@ ssh root@<host> '
 
 ## Field Results
 
-`ostack2.bj159.net`:
+`compute-1.example.test`:
 
 | Gate | Observed result |
 | --- | --- |
@@ -58,12 +58,12 @@ ssh root@<host> '
 | NeutronAclSource | `aria_acl_source policies=1 rules=1 bindings=1` |
 | Full resync | snapshot generation `78` submitted and accepted/applied |
 | Managed ports | `MANAGED_COUNT=5` |
-| Port-status reportback | `aria_acl_port_statuses host=ostack2.bj159.net managed=5 reported=6 generation=78` |
+| Port-status reportback | `aria_acl_port_statuses host=compute-1.example.test managed=5 reported=6 generation=78` |
 | Rollback | all five managed ports deleted through UDS; `rollback_remaining_managed_ports=0` |
-| Heartbeat summary | `heartbeat_summary_fields=ok host=ostack2.bj159.net` |
+| Heartbeat summary | `heartbeat_summary_fields=ok host=compute-1.example.test` |
 | Final gate | `stage-two ACL gate ok` |
 
-`ostack3.bj159.net`:
+`compute-2.example.test`:
 
 | Gate | Observed result |
 | --- | --- |
@@ -73,9 +73,9 @@ ssh root@<host> '
 | NeutronAclSource | `aria_acl_source policies=1 rules=1 bindings=1` |
 | Full resync | snapshot generation `15` submitted and accepted/applied |
 | Managed ports | `MANAGED_COUNT=0` |
-| Port-status reportback | `aria_acl_port_statuses host=ostack3.bj159.net managed=0 reported=0 generation=15` |
+| Port-status reportback | `aria_acl_port_statuses host=compute-2.example.test managed=0 reported=0 generation=15` |
 | Rollback | `rollback_remaining_managed_ports=0` |
-| Heartbeat summary | `heartbeat_summary_fields=ok host=ostack3.bj159.net` |
+| Heartbeat summary | `heartbeat_summary_fields=ok host=compute-2.example.test` |
 | Final gate | `stage-two ACL gate ok` |
 
 ## Delivery Constraints Confirmed

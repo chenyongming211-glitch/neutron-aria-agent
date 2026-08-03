@@ -94,7 +94,7 @@ plugin.create_aria_acl_rule(ctx, {'aria_acl_rule': {
     'priority': 100,
     'action': 'drop',
     'protocol': 'icmp',
-    'src_cidr': '10.58.159.2/32',
+    'src_cidr': '192.0.2.2/32',
 }})
 plugin.create_aria_acl_binding(ctx, {'aria_acl_binding': {
     'id': binding_id,
@@ -105,7 +105,7 @@ plugin.create_aria_acl_binding(ctx, {'aria_acl_binding': {
 }})
 plugin.create_aria_acl_port_status(ctx, {'aria_acl_port_status': {
     'port_id': port_id,
-    'host': 'ostack2.bj159.net',
+    'host': 'compute-1.example.test',
     'effective_policy_id': policy_id,
     'binding_id': binding_id,
     'status': 'ready',
@@ -120,7 +120,7 @@ assert effective['effective_action'] == 'enforce'
 assert effective['policy_id'] == policy_id
 assert len(effective['rules']) == 1
 
-plugin.delete_aria_acl_port_status(ctx, port_id, host='ostack2.bj159.net')
+plugin.delete_aria_acl_port_status(ctx, port_id, host='compute-1.example.test')
 plugin.delete_aria_acl_binding(ctx, binding_id)
 plugin.delete_aria_acl_rule(ctx, rule_id)
 plugin.delete_aria_acl_policy(ctx, policy_id)
@@ -189,7 +189,7 @@ if [ -z "${policy_id}" ]; then
 fi
 
 rule_create="$(curl_body POST "${LOCAL_NEUTRON_URL}/aria-acl-rules" \
-    "{\"aria_acl_rule\":{\"policy_id\":\"${policy_id}\",\"direction\":\"ingress\",\"priority\":100,\"action\":\"drop\",\"protocol\":\"icmp\",\"src_cidr\":\"10.58.159.2/32\"}}")"
+    "{\"aria_acl_rule\":{\"policy_id\":\"${policy_id}\",\"direction\":\"ingress\",\"priority\":100,\"action\":\"drop\",\"protocol\":\"icmp\",\"src_cidr\":\"192.0.2.2/32\"}}")"
 rule_id="$(printf '%s' "${rule_create}" | json_id)"
 if [ -z "${rule_id}" ]; then
     echo "Failed to parse rule id from: ${rule_create}" >&2

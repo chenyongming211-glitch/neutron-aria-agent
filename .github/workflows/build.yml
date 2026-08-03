@@ -372,9 +372,9 @@ jobs:
           python3 ci/check_neutron_stage2_acl.py
           python3 ci/check_n05_discovery_evidence.py
           python3 ci/check_uds_hardening_evidence.py \
-            --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net \
-            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net \
-            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net \
+            --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-compute-1.example.test \
+            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-2.example.test \
+            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-3.example.test \
             --min-hosts 3 \
             --require-hardened
           python3 ci/check_stage2_acceptance_evidence.py

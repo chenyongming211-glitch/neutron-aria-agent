@@ -72,7 +72,7 @@ is not the raw datapath apply time.
 ### 2.1 2026-07-08 Optimization Update
 
 The first datapath optimization has been implemented and smoke-tested on
-`ostack2` against the same test VM port.
+`compute-1` against the same test VM port.
 
 Implemented changes:
 
@@ -132,7 +132,7 @@ This changes the immediate product guidance:
 ### 2.2 2026-07-08 Rule/Group Diff Apply Update
 
 The second datapath optimization has also been implemented and smoke-tested on
-`ostack2` against the same test VM port.
+`compute-1` against the same test VM port.
 
 Implemented changes:
 
@@ -194,14 +194,14 @@ This changes the immediate product guidance again:
 
 ### 2.3 2026-07-08 1000-Rule Gate Update
 
-After rule/group diff apply, a 1000-rule gate was run on `ostack2` against the
+After rule/group diff apply, a 1000-rule gate was run on `compute-1` against the
 same CirrOS test VM port.
 
 Test target:
 
 | Field | Value |
 | --- | --- |
-| VM IP | `10.58.159.68` |
+| VM IP | `192.0.2.68` |
 | Neutron port | `ff0b04e9-c1b3-4779-ae63-7e6d2a966a50` |
 | tap | `tapff0b04e9-c1` |
 | policy size | 1000 ingress ICMP drop rules |
@@ -864,7 +864,7 @@ should become no-op at datapath level.
 | failed add | old committed plan remains active |
 | failed delete | old committed plan remains active or status degraded without false ready |
 
-Observed on `ostack2`:
+Observed on `compute-1`:
 
 ```text
 add one rule:

@@ -1,7 +1,7 @@
 # Stage-Three N3 No-Binding Probe
 
 Date: 2026-06-30
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -42,7 +42,7 @@ Mirror scope.
 After deploying the CI datapath artifact built from commit
 `e476b2d1463988a84dc525f58bf01e46d0121146` and applying the Python
 timeout/reportback fix to the test `neutron_aria_agent` package on
-`ostack2.bj159.net`, the parameterized no-binding smoke passed:
+`compute-1.example.test`, the parameterized no-binding smoke passed:
 
 - UDS hardened path was active:
   - `/run/aria/aria-agent.sock`: `root:42435 0660`

@@ -11,9 +11,9 @@ port-scoped incremental apply.
 
 | Host | Package refresh | Package smoke | Heartbeat projection fields |
 | --- | --- | --- | --- |
-| `ostack2.bj159.net` | pass | pass | pass |
-| `ostack3.bj159.net` | pass | pass | pass |
-| `ostack4.bj159.net` | pass | pass | pass |
+| `compute-1.example.test` | pass | pass | pass |
+| `compute-2.example.test` | pass | pass | pass |
+| `compute-3.example.test` | pass | pass | pass |
 
 ## Observed Signals
 
@@ -26,7 +26,7 @@ port-scoped incremental apply.
   hosts with `rpc_event_package_smoke=pass`.
 - `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh` passed from the control
   path with:
-  - `EXPECTED_HOSTS="ostack2.bj159.net ostack3.bj159.net ostack4.bj159.net"`
+  - `EXPECTED_HOSTS="compute-1.example.test compute-2.example.test compute-3.example.test"`
   - `REQUIRE_HEARTBEAT_SUMMARY_FIELDS=true`
   - `REQUIRE_P3_PROJECTION_FIELDS=true`
 

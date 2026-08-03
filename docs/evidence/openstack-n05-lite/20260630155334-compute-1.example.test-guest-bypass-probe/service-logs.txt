@@ -1,0 +1,51 @@
+## dnsmasq DHCP for 192.0.2.40
+Jun 30 15:54:56 dnsmasq-dhcp[216]: DHCPOFFER(tapc84708de-7e) 192.0.2.40 fa:16:3e:86:a3:f1
+Jun 30 15:54:56 dnsmasq-dhcp[216]: DHCPREQUEST(tapc84708de-7e) 192.0.2.40 fa:16:3e:86:a3:f1
+Jun 30 15:54:56 dnsmasq-dhcp[216]: DHCPACK(tapc84708de-7e) 192.0.2.40 fa:16:3e:86:a3:f1 host-10-58-159-40
+Jun 30 15:56:40 dnsmasq-dhcp[216]: DHCPRELEASE(tapc84708de-7e) 192.0.2.40 fa:16:3e:86:a3:f1
+
+## metadata proxy for 192.0.2.40
+1:2026-06-30 15:55:07.134 229 INFO neutron.wsgi [-] (229) accepted ('192.0.2.40', 56580)
+2-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy [-] Unexpected error.
+3-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy Traceback (most recent call last):
+4-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/neutron/agent/metadata/namespace_proxy.py", line 56, in __call__
+5-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     req.body)
+6-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/neutron/agent/metadata/namespace_proxy.py", line 88, in _proxy_request
+7-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     connection_type=agent_utils.UnixDomainHTTPConnection)
+8-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/httplib2/__init__.py", line 1621, in request
+9-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     (response, content) = self._request(conn, authority, uri, request_uri, method, body, headers, redirections, cachekey)
+10-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/httplib2/__init__.py", line 1363, in _request
+11-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     (response, content) = self._conn_request(conn, request_uri, method, body, headers)
+12-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/httplib2/__init__.py", line 1284, in _conn_request
+13-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     conn.connect()
+14-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/neutron/agent/linux/utils.py", line 392, in connect
+15-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     self.sock.connect(self.socket_path)
+16-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/eventlet/greenio/base.py", line 237, in connect
+17-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     while not socket_connect(fd, address):
+18-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/eventlet/greenio/base.py", line 39, in socket_connect
+19-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy     raise socket.error(err, errno.errorcode[err])
+20-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy error: [Errno 2] ENOENT
+21-2026-06-30 15:55:07.144 229 ERROR neutron.agent.metadata.namespace_proxy
+22:2026-06-30 15:55:07.146 229 INFO neutron.wsgi [-] 192.0.2.40 - - [30/Jun/2026 15:55:07] "GET /latest/meta-data/instance-id HTTP/1.1" 500 248 0.010160
+23:2026-06-30 15:55:07.148 229 INFO neutron.wsgi [-] (229) accepted ('192.0.2.40', 56594)
+24-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy [-] Unexpected error.
+25-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy Traceback (most recent call last):
+26-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/neutron/agent/metadata/namespace_proxy.py", line 56, in __call__
+27-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     req.body)
+28-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/neutron/agent/metadata/namespace_proxy.py", line 88, in _proxy_request
+29-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     connection_type=agent_utils.UnixDomainHTTPConnection)
+30-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/httplib2/__init__.py", line 1621, in request
+31-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     (response, content) = self._request(conn, authority, uri, request_uri, method, body, headers, redirections, cachekey)
+32-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/httplib2/__init__.py", line 1363, in _request
+33-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     (response, content) = self._conn_request(conn, request_uri, method, body, headers)
+34-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/httplib2/__init__.py", line 1284, in _conn_request
+35-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     conn.connect()
+36-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/neutron/agent/linux/utils.py", line 392, in connect
+37-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     self.sock.connect(self.socket_path)
+38-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/eventlet/greenio/base.py", line 237, in connect
+39-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     while not socket_connect(fd, address):
+40-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy   File "/usr/lib/python2.7/site-packages/eventlet/greenio/base.py", line 39, in socket_connect
+41-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy     raise socket.error(err, errno.errorcode[err])
+42-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy error: [Errno 2] ENOENT
+43-2026-06-30 15:55:07.153 229 ERROR neutron.agent.metadata.namespace_proxy
+44:2026-06-30 15:55:07.155 229 INFO neutron.wsgi [-] 192.0.2.40 - - [30/Jun/2026 15:55:07] "GET /openstack/latest/meta_data.json HTTP/1.1" 500 248 0.003428

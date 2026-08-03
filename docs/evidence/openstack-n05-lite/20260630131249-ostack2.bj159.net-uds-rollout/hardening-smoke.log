@@ -1,7 +1,0 @@
-[neutron-aria-uds-hardening] Collecting Container peer identities
-[neutron-aria-uds-hardening] Collecting UDS directory and socket permissions
-[neutron-aria-uds-hardening] Collecting World-writable socket check
-[neutron-aria-uds-hardening] Collecting Peercred allow-list candidates
-[neutron-aria-uds-hardening] Collecting Audit log path
-[neutron-aria-uds-hardening] Collecting Hardened enforcement gate
-[neutron-aria-uds-hardening] UDS hardening evidence written to /var/tmp/neutron-aria-uds-hardening/20260630131254-ostack2.bj159.net

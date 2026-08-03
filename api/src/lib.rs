@@ -47,7 +47,7 @@ pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-1";
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
     "generation": 101,
-    "host": "ostack2.bj159.net",
+    "host": "compute-1.example.test",
     "ports": [
         {
             "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
@@ -78,7 +78,7 @@ pub struct NeutronSnapshotRequest {
     pub desired_hash: Option<String>,
     /// Neutron host that produced the snapshot.
     #[serde(default)]
-    #[schema(example = "ostack2.bj159.net")]
+    #[schema(example = "compute-1.example.test")]
     pub host: Option<String>,
     /// Desired local port runtime state for this host.
     #[serde(default)]
@@ -174,7 +174,7 @@ pub struct NeutronPortSnapshot {
             "action": "drop",
             "ethertype": "IPv4",
             "protocol": "icmp",
-            "src_cidrs": ["10.58.159.2/32"],
+            "src_cidrs": ["192.0.2.2/32"],
             "dst_cidrs": [],
             "src_port_min": null,
             "src_port_max": null,
@@ -2671,7 +2671,7 @@ mod tests {
             schema_version: Some(1),
             generation: 42,
             desired_hash: Some("hash-42".to_string()),
-            host: Some("ostack2.bj159.net".to_string()),
+            host: Some("compute-1.example.test".to_string()),
             ports: vec![NeutronPortSnapshot {
                 port_id: "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f".to_string(),
                 ifname: "tape607e86b-9e".to_string(),
@@ -2703,7 +2703,7 @@ mod tests {
                         action: Some("drop".to_string()),
                         ethertype: Some("IPv4".to_string()),
                         protocol: Some("icmp".to_string()),
-                        src_cidrs: vec!["10.58.159.2/32".to_string()],
+                        src_cidrs: vec!["192.0.2.2/32".to_string()],
                         dst_cidrs: Vec::new(),
                         src_port_min: None,
                         src_port_max: None,

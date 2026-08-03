@@ -17,7 +17,7 @@ Current N0.5 and Q0 evidence records:
 - Target host shells lack the `tc` command, but the relevant Kolla containers
   (`neutron_openvswitch_agent`, `neutron_aria_agent`, and `aria_datapath`) do
   include `/usr/sbin/tc`.
-- On `ostack2.bj159.net`, container-side `tc qdisc show dev tap86b83885-67`
+- On `compute-1.example.test`, container-side `tc qdisc show dev tap86b83885-67`
   succeeds against a live VM tap. This proves read-only qdisc visibility from
   containers, not shaping support.
 - QoS shaping is currently `unsupported` for that environment.

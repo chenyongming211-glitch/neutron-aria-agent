@@ -239,7 +239,7 @@ Expected: Python/static checks pass and test discovery recognizes the new Rust f
 
 ```bash
 git add agent/src/control_plane.rs agent/src/control_plane/standalone_group.rs ci/check_neutron_stage1.py docs/superpowers/plans/2026-07-28-debt-acl-001-standalone-group-durability.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "test: expose standalone group durability gap"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "test: expose standalone group durability gap"
 git push origin v0.9-neutron-agent
 ```
 

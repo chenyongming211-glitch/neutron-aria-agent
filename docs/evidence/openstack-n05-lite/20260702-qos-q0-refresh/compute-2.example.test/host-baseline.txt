@@ -1,0 +1,101 @@
+
+## identity
+
+compute-2.example.test
+
+2026-07-02T10:20:01Z
+
+Linux compute-2.example.test 4.18.0-553.5.1.el8_10.x86_64 #1 SMP Thu Jun 6 09:41:19 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux
+
+NAME="Rocky Linux"
+
+VERSION="8.6 (Green Obsidian)"
+
+ID="rocky"
+
+ID_LIKE="rhel centos fedora"
+
+VERSION_ID="8.6"
+
+PLATFORM_ID="platform:el8"
+
+PRETTY_NAME="Rocky Linux 8.6 (Green Obsidian)"
+
+ANSI_COLOR="0;32"
+
+CPE_NAME="cpe:/o:rocky:rocky:8:GA"
+
+HOME_URL="https://rockylinux.org/"
+
+BUG_REPORT_URL="https://bugs.rockylinux.org/"
+
+ROCKY_SUPPORT_PRODUCT="Rocky Linux"
+
+ROCKY_SUPPORT_PRODUCT_VERSION="8"
+
+REDHAT_SUPPORT_PRODUCT="Rocky Linux"
+
+REDHAT_SUPPORT_PRODUCT_VERSION="8"
+
+
+
+openstack_version=openstack 1.7.1
+
+neutron_version=2016.9.9
+
+
+
+NAMES                                                          IMAGE                                                                 STATUS
+
+nova_serialproxy_poc                                           registry-redacted/openstack-nova-novncproxy:2.0.6sp2    Up 2 hours
+
+aria_datapath                                                  aria-datapath:stage3-apply-failure-20260630211410                     Up 29 hours
+
+neutron_aria_agent                                             neutron-aria-agent:0b20bbd                                            Up 8 hours
+
+vmautodrift_agent                                              registry-redacted/openstack-vmautodrift:2.0.6sp2        Up 4 weeks (healthy)
+
+vmautodrift_server                                             registry-redacted/openstack-vmautodrift:2.0.6sp2        Up 4 weeks (healthy)
+
+cinder_backup                                                  registry-redacted/openstack-cinder-backup:2.0.6sp2      Up 4 weeks (healthy)
+
+cinder_scheduler                                               registry-redacted/openstack-cinder-scheduler:2.0.6sp2   Up 4 weeks (healthy)
+
+cinder_api                                                     registry-redacted/openstack-cinder-api:2.0.6sp2         Up 4 weeks (healthy)
+
+neutron_metadata_agent                                         registry-redacted/neutron-metadata-agent:2.0.6sp2       Up 4 weeks (healthy)
+
+neutron_sriov_agent                                            registry-redacted/neutron-sriov-agent:2.0.6sp2          Up 4 weeks (healthy)
+
+neutron_dhcp_agent                                             registry-redacted/neutron-dhcp-agent:2.0.6sp2           Up 4 weeks (healthy)
+
+neutron_linuxbridge_agent                                      registry-redacted/neutron-linuxbridge-agent:2.0.6sp2    Up 4 weeks (healthy)
+
+neutron_openvswitch_agent                                      registry-redacted/neutron-openvswitch-agent:2.0.6sp2    Up 4 weeks (healthy)
+
+neutron_server                                                 registry-redacted/neutron-server:2.0.6sp2               Up 2 days (healthy)
+
+nova_compute                                                   371a713217ad                                                          Up 3 days (healthy)
+
+nova_consoleauth                                               registry-redacted/openstack-nova-consoleauth:2.0.6sp2   Up 4 weeks (healthy)
+
+nova_novncproxy                                                registry-redacted/openstack-nova-novncproxy:2.0.6sp2    Up 4 weeks (healthy)
+
+nova_conductor                                                 registry-redacted/openstack-nova-conductor:2.0.6sp2     Up 4 weeks (healthy)
+
+nova_scheduler                                                 registry-redacted/openstack-nova-scheduler:2.0.6sp2     Up 4 weeks (healthy)
+
+nova_api                                                       registry-redacted/openstack-nova-api:2.0.6sp2           Up 3 hours (healthy)
+
+nova_libvirtd                                                  registry-redacted/openstack-nova-libvirtd:2.0.6sp2      Up 4 weeks (healthy)
+
+glance_registry                                                registry-redacted/openstack-glance:2.0.6sp2             Up 4 weeks (healthy)
+
+glance_api                                                     registry-redacted/openstack-glance:2.0.6sp2             Up 4 weeks (healthy)
+
+keystone_nginx                                                 registry-redacted/openstack-keystone:2.0.6sp2           Up 4 weeks (healthy)
+
+keystone_uwsgi                                                 registry-redacted/openstack-keystone:2.0.6sp2           Up 4 weeks (healthy)
+
+openstack_client                                               registry-redacted/openstack-glance:2.0.6sp2             Up 4 weeks (healthy)
+

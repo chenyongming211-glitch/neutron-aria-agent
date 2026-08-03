@@ -1,0 +1,16 @@
+2026-06-30T07:54:30Z start host=compute-1.example.test run=20260630155334 network=23eb9d08-ec8b-4610-a1ff-61492134b6d2
+2026-06-30T07:54:30Z preflight
+2026-06-30T07:54:33Z convert image
+2026-06-30T07:54:33Z create glance image
+2026-06-30T07:54:39Z create keypair
+2026-06-30T07:54:40Z boot server with explicit network
+2026-06-30T07:54:55Z wait ssh vm_ip=192.0.2.40
+2026-06-30T07:55:03Z capture neutron and datapath context
+2026-06-30T07:55:05Z guest baseline
+2026-06-30T07:55:05Z dhcp renew probe
+2026-06-30T07:55:07Z metadata probe
+2026-06-30T07:55:07Z ipv6 nd probe
+2026-06-30T07:55:07Z post status
+2026-06-30T07:55:07Z done evidence=/tmp/aria-n05-guest-probe-20260630155334
+2026-06-30T07:55:07Z cleanup start
+2026-06-30T07:55:32Z cleanup done

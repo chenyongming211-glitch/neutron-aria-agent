@@ -105,11 +105,11 @@ class AriaAclQueryTestCase(unittest.TestCase):
     def test_status_id_and_projected_filters_are_stable(self):
         contract = self._query_contract()
         status_id = contract.encode_port_status_id(
-            "port-1", "ostack2.bj159.net"
+            "port-1", "compute-1.example.test"
         )
         self.assertTrue(status_id.startswith("aria-status-v1."))
         self.assertEqual(
-            ("port-1", "ostack2.bj159.net"),
+            ("port-1", "compute-1.example.test"),
             contract.decode_port_status_id(status_id),
         )
         projection = contract.PortStatusProjection(
@@ -118,7 +118,7 @@ class AriaAclQueryTestCase(unittest.TestCase):
         )
         rows = [{
             "port_id": "port-1",
-            "host": "ostack2.bj159.net",
+            "host": "compute-1.example.test",
             "status": "ready",
             "updated_at": "1970-01-01T00:01:00.000000Z",
         }]
@@ -201,7 +201,7 @@ class AriaAclQueryTestCase(unittest.TestCase):
 
         repository.upsert_port_status({
             "port_id": "port-1",
-            "host": "ostack2",
+            "host": "compute-1",
             "status": "ready",
             "updated_at": "1970-01-01T00:01:00.000000Z",
         })
@@ -212,7 +212,7 @@ class AriaAclQueryTestCase(unittest.TestCase):
         )
         self.assertEqual(
             [{
-                "id": contract.encode_port_status_id("port-1", "ostack2"),
+                "id": contract.encode_port_status_id("port-1", "compute-1"),
                 "runtime_status": "stale",
             }],
             statuses,

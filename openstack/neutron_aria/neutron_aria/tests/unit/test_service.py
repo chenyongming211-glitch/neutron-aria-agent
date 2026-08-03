@@ -25,14 +25,14 @@ class FakeClock(object):
 
 class FakeSynchronizer(object):
     def __init__(self):
-        self.runtime_status = AgentRuntimeStatus("ostack2.bj159.net")
+        self.runtime_status = AgentRuntimeStatus("compute-1.example.test")
         self.resync_calls = 0
         self.heartbeat_calls = 0
         self.projected_port_ids = set()
         self.delete_calls = []
         self.delete_reasons = []
         self.scoped_calls = []
-        self.host = "ostack2.bj159.net"
+        self.host = "compute-1.example.test"
         self.forced_revision_status = None
         self.scoped_exception = None
         self.scoped_result = None
@@ -264,7 +264,7 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-1.example.test")
         clock.advance(0.2)
         result = service.run_once()
 
@@ -287,8 +287,8 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
-        merger.record_port_update("p2", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-1.example.test")
+        merger.record_port_update("p2", binding_host="compute-1.example.test")
         self.assertEqual(None, service.run_once())
         clock.advance(0.2)
         result = service.run_once()
@@ -323,7 +323,7 @@ class AgentServiceTestCase(unittest.TestCase):
 
         merger.record_port_update(
             "p1",
-            binding_host="ostack2.bj159.net",
+            binding_host="compute-1.example.test",
             revision_number=8,
         )
         clock.advance(0.2)
@@ -364,7 +364,7 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-1.example.test")
         clock.advance(0.2)
         result = service.run_once()
 
@@ -391,7 +391,7 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-1.example.test")
         clock.advance(0.2)
         result = service.run_once()
 
@@ -422,7 +422,7 @@ class AgentServiceTestCase(unittest.TestCase):
 
         merger.record_port_update(
             "p1",
-            binding_host="ostack2.bj159.net",
+            binding_host="compute-1.example.test",
             revision_number=8,
         )
         clock.advance(0.2)
@@ -453,7 +453,7 @@ class AgentServiceTestCase(unittest.TestCase):
 
         merger.record_port_update(
             "p1",
-            binding_host="ostack2.bj159.net",
+            binding_host="compute-1.example.test",
             revision_number=8,
         )
         clock.advance(0.2)
@@ -490,7 +490,7 @@ class AgentServiceTestCase(unittest.TestCase):
 
         merger.record_port_update(
             "p1",
-            binding_host="ostack2.bj159.net",
+            binding_host="compute-1.example.test",
             revision_number=8,
         )
         clock.advance(0.2)
@@ -519,8 +519,8 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
-        merger.record_port_update("p2", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-1.example.test")
+        merger.record_port_update("p2", binding_host="compute-1.example.test")
         clock.advance(0.2)
         result = service.run_once()
 
@@ -544,7 +544,7 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-1.example.test")
         merger.record_port_delete("p2")
         clock.advance(0.2)
         result = service.run_once()
@@ -568,7 +568,7 @@ class AgentServiceTestCase(unittest.TestCase):
         )
         service.initialize()
 
-        merger.record_port_update("p1", binding_host="ostack3.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-2.example.test")
         clock.advance(0.2)
         result = service.run_once()
 
@@ -597,7 +597,7 @@ class AgentServiceTestCase(unittest.TestCase):
         service.initialize()
         sync.projected_port_ids.add("p1")
 
-        merger.record_port_update("p1", binding_host="ostack3.bj159.net")
+        merger.record_port_update("p1", binding_host="compute-2.example.test")
         clock.advance(0.2)
         result = service.run_once()
 
@@ -753,7 +753,7 @@ class StatusContractServiceRedTestCase(unittest.TestCase):
         initial_delete_calls = list(sync.delete_calls)
         merger.record_port_update(
             "p1",
-            binding_host="ostack2.bj159.net",
+            binding_host="compute-1.example.test",
             revision_number=8,
         )
         clock.advance(0.2)

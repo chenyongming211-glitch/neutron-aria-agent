@@ -89,7 +89,7 @@ policy_id="$(printf '%s' "${policy_create}" | json_id)"
 [ -n "${policy_id}" ] || die "failed to create aria_acl policy: ${policy_create}"
 
 rule_create="$(curl_body POST "${LOCAL_NEUTRON_URL}/aria-acl-rules" \
-    "{\"aria_acl_rule\":{\"policy_id\":\"${policy_id}\",\"direction\":\"ingress\",\"priority\":100,\"action\":\"drop\",\"protocol\":\"icmp\",\"src_cidr\":\"10.58.159.2/32\"}}")"
+    "{\"aria_acl_rule\":{\"policy_id\":\"${policy_id}\",\"direction\":\"ingress\",\"priority\":100,\"action\":\"drop\",\"protocol\":\"icmp\",\"src_cidr\":\"192.0.2.2/32\"}}")"
 rule_id="$(printf '%s' "${rule_create}" | json_id)"
 [ -n "${rule_id}" ] || die "failed to create aria_acl rule: ${rule_create}"
 

@@ -472,7 +472,7 @@ git add \
   openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_write_invariants.py \
   openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_write_migration.py \
   docs/superpowers/plans/2026-07-31-acl-058-061-northbound-write-invariants-red.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "test: expose ACL northbound write invariant gaps"
 git push origin v0.9-neutron-agent
 ```

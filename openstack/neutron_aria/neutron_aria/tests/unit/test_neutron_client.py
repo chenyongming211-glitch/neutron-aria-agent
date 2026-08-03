@@ -24,12 +24,12 @@ class FakeNeutronClient(object):
 class NeutronClientTestCase(unittest.TestCase):
     def test_port_source_filters_by_host(self):
         client = FakeNeutronClient([{"ports": [{"id": "p1"}], "ports_links": []}])
-        source = NeutronPortSource(client, "ostack2")
+        source = NeutronPortSource(client, "compute-1")
 
         ports = source.list_ports_for_host()
 
         self.assertEqual([{"id": "p1"}], ports)
-        self.assertEqual("ostack2", client.calls[0]["binding:host_id"])
+        self.assertEqual("compute-1", client.calls[0]["binding:host_id"])
 
     def test_port_source_follows_legacy_pagination(self):
         client = FakeNeutronClient([
@@ -39,7 +39,7 @@ class NeutronClientTestCase(unittest.TestCase):
             },
             {"ports": [{"id": "p2"}], "ports_links": []},
         ])
-        source = NeutronPortSource(client, "ostack2", page_size=1)
+        source = NeutronPortSource(client, "compute-1", page_size=1)
 
         ports = source.list_ports_for_host()
 
@@ -59,7 +59,7 @@ class NeutronClientTestCase(unittest.TestCase):
             },
             {"ports": [{"id": "unexpected"}], "ports_links": []},
         ])
-        source = NeutronPortSource(client, "ostack2", page_size=1)
+        source = NeutronPortSource(client, "compute-1", page_size=1)
 
         with self.assertRaises(PortSourceUnavailable) as context:
             source.list_ports_for_host()
@@ -79,7 +79,7 @@ class NeutronClientTestCase(unittest.TestCase):
             },
             {"ports": [{"id": "unexpected"}], "ports_links": []},
         ])
-        source = NeutronPortSource(client, "ostack2", page_size=1)
+        source = NeutronPortSource(client, "compute-1", page_size=1)
         source.max_pages = 2
 
         with self.assertRaises(PortSourceUnavailable) as context:
@@ -91,7 +91,7 @@ class NeutronClientTestCase(unittest.TestCase):
     def test_full_resync_client_delegates_to_port_source(self):
         source = NeutronPortSource(
             FakeNeutronClient([{"ports": [{"id": "p1"}], "ports_links": []}]),
-            "ostack2",
+            "compute-1",
         )
         full_resync = NeutronFullResyncClient(source)
 
@@ -131,7 +131,7 @@ class NeutronClientTestCase(unittest.TestCase):
             port_source = "disabled"
             port_page_size = None
 
-        source = build_port_source(Config(), "ostack2")
+        source = build_port_source(Config(), "compute-1")
 
         with self.assertRaises(PortSourceUnavailable):
             source.list_ports_for_host()

@@ -185,14 +185,14 @@ class UdsClientTestCase(unittest.TestCase):
             "target-port",
             {
                 "generation": 13,
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{"port_id": "target-port", "ifname": "tap1"}],
             },
             required_domains=["acl"],
         )
         client.put_snapshot({
             "generation": 14,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [],
         })
 
@@ -225,7 +225,7 @@ class UdsClientTestCase(unittest.TestCase):
             "active_instances": [],
         }))
 
-        self.client.put_snapshot({"generation": 12, "host": "ostack2", "ports": []})
+        self.client.put_snapshot({"generation": 12, "host": "compute-1", "ports": []})
 
         request = FakeConnection.requests[0]
         self.assertEqual("PUT", request["method"])
@@ -274,7 +274,7 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertRaises(
             LocalApiContractError,
             client.put_snapshot,
-            {"generation": 12, "host": "ostack2", "ports": []},
+            {"generation": 12, "host": "compute-1", "ports": []},
         )
         self.assertEqual([], FakeConnection.requests)
 
@@ -289,7 +289,7 @@ class UdsClientTestCase(unittest.TestCase):
         )
 
         with self.assertRaises(LocalApiResponseError) as ctx:
-            self.client.put_snapshot({"generation": 12, "host": "ostack2", "ports": []})
+            self.client.put_snapshot({"generation": 12, "host": "compute-1", "ports": []})
 
         self.assertEqual(413, ctx.exception.status)
         self.assertEqual("UDS_BODY_TOO_LARGE", ctx.exception.body["error"])
@@ -303,7 +303,7 @@ class UdsClientTestCase(unittest.TestCase):
                 "target-port",
                 {
                     "generation": 12,
-                    "host": "ostack2",
+                    "host": "compute-1",
                     "ports": [{"port_id": "target-port", "ifname": "tap1"}],
                 },
                 required_domains=["acl"],
@@ -335,7 +335,7 @@ class UdsClientTestCase(unittest.TestCase):
             "port/with/slash",
             {
                 "generation": 13,
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{"port_id": "port/with/slash", "ifname": "tap1"}],
             },
             required_domains=["acl"],
@@ -361,7 +361,7 @@ class UdsClientTestCase(unittest.TestCase):
                 "target-port",
                 {
                     "generation": 14,
-                    "host": "ostack2",
+                    "host": "compute-1",
                     "ports": [{"port_id": "other-port", "ifname": "tap1"}],
                 },
             )
@@ -417,7 +417,7 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertRaises(
             LocalApiTimeoutError,
             client.put_snapshot,
-            {"generation": 12, "host": "ostack2", "ports": []},
+            {"generation": 12, "host": "compute-1", "ports": []},
         )
 
 
@@ -571,7 +571,7 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
         write_errors = [
             self._capture_contract_error(lambda: client.put_snapshot({
                 "generation": 43,
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [],
             })),
             self._capture_contract_error(lambda: client.delete_port("port-a")),
@@ -609,7 +609,7 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
         self._response({"status": "recovered"})
         snapshot = {
             "generation": 2,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [{"port_id": "port-a", "ifname": "tap-port-a"}],
         }
         write_errors = [
@@ -658,7 +658,7 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
             write_errors = [
                 self._capture_contract_error(lambda: client.put_snapshot({
                     "generation": 43,
-                    "host": "ostack2",
+                    "host": "compute-1",
                     "ports": [],
                 })),
                 self._capture_contract_error(lambda: client.delete_port("port-a")),
@@ -752,7 +752,7 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
         write_errors = [
             self._capture_contract_error(lambda: client.put_snapshot({
                 "generation": 41,
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [],
             })),
             self._capture_contract_error(lambda: client.recover_pending_snapshot(
@@ -789,14 +789,14 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
         requests_before_write = len(FakeConnection.requests)
         blocked_write_error = self._capture_contract_error(lambda: client.put_snapshot({
             "generation": 43,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [],
         }))
         requests_after_blocked_write = len(FakeConnection.requests)
         valid_status = client.status()
         reopened_response = client.put_snapshot({
             "generation": 43,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [],
         })
 
@@ -823,7 +823,7 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
         requests_before_write = len(FakeConnection.requests)
         write_error = self._capture_contract_error(lambda: client.put_snapshot({
             "generation": 43,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [],
         }))
 
@@ -866,7 +866,7 @@ class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
     def _snapshot(self, generation=43):
         return {
             "generation": generation,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [],
         }
 
@@ -1566,7 +1566,7 @@ class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
             "port-a",
             {
                 "generation": 43,
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{"port_id": "port-a", "ifname": "tap-port-a"}],
             },
             required_domains=["acl"],

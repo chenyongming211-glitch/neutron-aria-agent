@@ -202,8 +202,8 @@ Stage-one implementation status:
 
 ## Stage-Two ACL MVP Field Evidence
 
-The 2026-06-29 stage-two ACL MVP gate passed on `ostack2.bj159.net` and
-`ostack3.bj159.net` with the packaged Kolla bundle. Evidence is recorded in:
+The 2026-06-29 stage-two ACL MVP gate passed on `compute-1.example.test` and
+`compute-2.example.test` with the packaged Kolla bundle. Evidence is recorded in:
 
 ```text
 docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md
@@ -253,7 +253,7 @@ docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md
 ```
 
 It proves external/host -> VM ACL block and UDS rollback recovery on
-`ostack2.bj159.net`, plus `neutron_aria_agent` and `aria_datapath`
+`compute-1.example.test`, plus `neutron_aria_agent` and `aria_datapath`
 stop/restart without OVS connectivity loss. Active direction evidence is
 recorded in:
 
@@ -266,7 +266,7 @@ reverse traffic for a stateful inbound flow. The accepted VM -> external proof
 uses a temporary CirrOS guest-originated ICMP loop: packets are visible before
 the ACL, absent after generation `85` reaches UDS `ready`, and visible again
 after UDS rollback. DHCP/metadata/IPv6 guest disposition is recorded in
-`docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/`;
+`docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/`;
 metadata content HTTP 200 remains dependent on fixing the target metadata
 backend socket, not on adding Aria product features. IPv6 ND remains not
 applicable until an IPv6 network exists.

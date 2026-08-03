@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_HOSTS="${EXPECTED_HOSTS:-ostack2.bj159.net ostack3.bj159.net ostack4.bj159.net}"
+EXPECTED_HOSTS="${EXPECTED_HOSTS:-compute-1.example.test compute-2.example.test compute-3.example.test}"
 ADMINRC="${ADMINRC:-/root/adminrc}"
 REQUIRE_HEARTBEAT_SUMMARY_FIELDS="${REQUIRE_HEARTBEAT_SUMMARY_FIELDS:-false}"
 REQUIRE_P3_PROJECTION_FIELDS="${REQUIRE_P3_PROJECTION_FIELDS:-false}"

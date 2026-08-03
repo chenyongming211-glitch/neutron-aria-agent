@@ -2,11 +2,11 @@
 
 Date: 2026-07-03
 
-Host: `ostack2.bj159.net`
+Host: `compute-1.example.test`
 
 Temporary VM: `aria-n05-egress-20260703114351`
 
-Temporary VM IP: `10.58.159.54`
+Temporary VM IP: `192.0.2.54`
 
 Temporary port: `5c9a69a5-ea32-4fee-83f2-ff8dd8f5669e`
 
@@ -15,7 +15,7 @@ Temporary tap: `tap5c9a69a5-ea`
 Remote evidence directory:
 
 ```text
-/var/tmp/neutron-aria-acl-live-egress-20260703114351-ostack2.bj159.net
+/var/tmp/neutron-aria-acl-live-egress-20260703114351-compute-1.example.test
 ```
 
 ## Scope
@@ -42,8 +42,8 @@ policy default_action = allow
 rule direction        = egress
 rule action           = drop
 rule protocol         = icmp
-rule src_cidr         = 10.58.159.54/32
-rule dst_cidr         = 10.58.159.2/32
+rule src_cidr         = 192.0.2.54/32
+rule dst_cidr         = 192.0.2.2/32
 binding target_type   = port
 binding target_id     = 5c9a69a5-ea32-4fee-83f2-ff8dd8f5669e
 ```
@@ -56,7 +56,7 @@ rollback.
 Baseline guest-originated traffic:
 
 ```text
-guest ping 10.58.159.2: 3 transmitted, 3 received, 0% packet loss
+guest ping 192.0.2.2: 3 transmitted, 3 received, 0% packet loss
 target status before first apply: missing from UDS because the VM was newly booted
 ```
 
@@ -66,14 +66,14 @@ After ACL apply:
 snapshot generation 202 submitted
 target status: ready / enforce
 datapath policy: icmp drop present on tap5c9a69a5-ea
-guest ping 10.58.159.2: 3 transmitted, 0 received, 100% packet loss
+guest ping 192.0.2.2: 3 transmitted, 0 received, 100% packet loss
 ```
 
 After rollback:
 
 ```text
 target status: not_requested / bypass
-guest ping 10.58.159.2: recovered to 0% packet loss
+guest ping 192.0.2.2: recovered to 0% packet loss
 ```
 
 Final cleanup:

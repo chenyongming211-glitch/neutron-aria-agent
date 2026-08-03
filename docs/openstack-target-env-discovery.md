@@ -13,8 +13,8 @@
 
 本次记录只覆盖 stage-two ACL MVP 交付 gate：
 
-- `aria_acl` Neutron service plugin/API/DB 在 `ostack2.bj159.net` 与
-  `ostack3.bj159.net` 上通过安装、DB schema、REST CRUD smoke。
+- `aria_acl` Neutron service plugin/API/DB 在 `compute-1.example.test` 与
+  `compute-2.example.test` 上通过安装、DB schema、REST CRUD smoke。
 - `NeutronAclSource` 通过真实 Neutron API 读取 `aria_acl` policy/rule/binding，
   并提交 full-resync snapshot。
 - `aria_acl_port_statuses` 可以从 Neutron API 读回 runtime reportback，
@@ -37,9 +37,9 @@ hardening、legacy path、增量事件等项仍按本文件后续表格跟踪。
 
 | Host | Evidence Path | Result |
 | --- | --- | --- |
-| `ostack2.bj159.net` | `docs/evidence/openstack-n05-lite/20260630114142-ostack2.bj159.net/` | 18 pass, 3 unsupported, 0 fail |
-| `ostack3.bj159.net` | `docs/evidence/openstack-n05-lite/20260630114142-ostack3.bj159.net/` | 16 pass, 3 unsupported, 2 not_applicable, 0 fail |
-| `ostack4.bj159.net` | `docs/evidence/openstack-n05-lite/20260630114142-ostack4.bj159.net/` | 16 pass, 3 unsupported, 2 not_applicable, 0 fail |
+| `compute-1.example.test` | `docs/evidence/openstack-n05-lite/20260630114142-compute-1.example.test/` | 18 pass, 3 unsupported, 0 fail |
+| `compute-2.example.test` | `docs/evidence/openstack-n05-lite/20260630114142-compute-2.example.test/` | 16 pass, 3 unsupported, 2 not_applicable, 0 fail |
+| `compute-3.example.test` | `docs/evidence/openstack-n05-lite/20260630114142-compute-3.example.test/` | 16 pass, 3 unsupported, 2 not_applicable, 0 fail |
 
 G4 discovery 验收命令：
 
@@ -52,7 +52,7 @@ python ci/check_n05_discovery_evidence.py
 ```text
 G4 N0.5 discovery evidence accepted
 hosts=3
-hosts_with_compute_iface_id=ostack2.bj159.net
+hosts_with_compute_iface_id=compute-1.example.test
 unsupported=9
 not_applicable=4
 ```
@@ -62,7 +62,7 @@ not_applicable=4
 - 三台均为 Rocky Linux 8.6，kernel
   `4.18.0-553.5.1.el8_10.x86_64`。
 - 三台 OVS 版本均为 `3.3.5`，均存在 `br-int`。
-- `ostack2`、`ostack3` neutron-server ML2 配置包含
+- `compute-1`、`compute-2` neutron-server ML2 配置包含
   `openvswitch,linuxbridge,l2population,sriovnicswitch`。
 - 三台均未发现 `qvo/qvb` hybrid-plug 链路。
 - 三台均可读 BTF，且 bpffs 已挂载。
@@ -73,7 +73,7 @@ not_applicable=4
   或 `virtio-forwarder`。
 - 三台均可读取 UDS capabilities/status。
 - 三台均可通过 `neutron_aria_agent` 读取 `aria_acl` API。
-- `ostack4` 初始 agent egg 滞后，已通过 stage-two bundle 安装同版
+- `compute-3` 初始 agent egg 滞后，已通过 stage-two bundle 安装同版
   `neutron_aria` egg 并重启 `neutron_aria_agent` 修正。
 
 剩余或带 disposition 的项：
@@ -95,22 +95,22 @@ not_applicable=4
 
 | Host | Evidence Path | Result |
 | --- | --- | --- |
-| `ostack2.bj159.net` | `docs/evidence/openstack-n05-lite/20260630115838-ostack2.bj159.net/` | 7 pass, 0 fail |
+| `compute-1.example.test` | `docs/evidence/openstack-n05-lite/20260630115838-compute-1.example.test/` | 7 pass, 0 fail |
 
 已确认：
 
-- `10.58.159.26` 在 smoke 前可达。
+- `192.0.2.26` 在 smoke 前可达。
 - `neutron_aria_rollback_connectivity_smoke.sh` 对
   `86b83885-671f-474c-9556-8af98cf1cdc8` / `tap86b83885-67` 执行
   ACL fixture full-resync，generation `81` 管理 5 个本地 compute tap ports。
-- ICMP from `10.58.159.2/32` 被 smoke ACL 阻断，证明 external/host -> VM
+- ICMP from `192.0.2.2/32` 被 smoke ACL 阻断，证明 external/host -> VM
   active path 已经过 datapath。
 - UDS rollback 删除所有 5 个 managed ports，`rollback_remaining_managed_ports=0`，
   rollback 后 `managed_ports=[]`、`active_instances=[]`、`wal_replay_failures=0`。
-- rollback 后 `10.58.159.26` 恢复可达。
-- 停止 `neutron_aria_agent` 期间 `10.58.159.26` 仍保持 0% 丢包，重启后
+- rollback 后 `192.0.2.26` 恢复可达。
+- 停止 `neutron_aria_agent` 期间 `192.0.2.26` 仍保持 0% 丢包，重启后
   `Aria ACL agent` heartbeat 恢复为 `:-)`。
-- 停止 `aria_datapath` 期间 `10.58.159.26` 仍保持 0% 丢包，重启后
+- 停止 `aria_datapath` 期间 `192.0.2.26` 仍保持 0% 丢包，重启后
   UDS status 恢复可读，且 `managed_ports=[]`、`active_instances=[]`、
   `wal_replay_failures=0`。
 
@@ -132,13 +132,13 @@ Summary evidence:
 Accepted:
 
 - external/host -> VM active ACL evidence is covered by
-  `docs/evidence/openstack-n05-lite/20260630115838-ostack2.bj159.net/`.
+  `docs/evidence/openstack-n05-lite/20260630115838-compute-1.example.test/`.
 - VM -> external/host active ACL evidence is covered by
-  `docs/evidence/openstack-n05-lite/20260630145200-ostack2.bj159.net-cirros-vm-egress-final/`.
+  `docs/evidence/openstack-n05-lite/20260630145200-compute-1.example.test-cirros-vm-egress-final/`.
 
 Rejected as proof:
 
-- `docs/evidence/openstack-n05-lite/20260630121023-ostack2.bj159.net/`
+- `docs/evidence/openstack-n05-lite/20260630121023-compute-1.example.test/`
   submitted an `ACL_DIRECTION=egress` policy and rolled back cleanly, but the
   host-initiated ping was not blocked. This is not counted as VM -> external
   evidence because the echo-reply is reverse traffic for a stateful inbound
@@ -147,15 +147,15 @@ Rejected as proof:
 Guest access status:
 
 Detailed read-only audit:
-`docs/evidence/openstack-n05-lite/20260630134000-ostack2.bj159.net-guest-access-audit/`
+`docs/evidence/openstack-n05-lite/20260630134000-compute-1.example.test-guest-access-audit/`
 
-- `wp-test` / `10.58.159.26`: SSH unavailable; QEMU guest agent is not
+- `wp-test` / `192.0.2.26`: SSH unavailable; QEMU guest agent is not
   configured.
-- `cym_vfw1` / `10.58.159.28`: SSH port reachable inside the cloud, but
+- `cym_vfw1` / `192.0.2.28`: SSH port reachable inside the cloud, but
   existing root/admin/centos key auth was denied.
-- `test1111` / `10.58.159.27`: SSH refused; console is `SecOS login:`; QEMU
+- `test1111` / `192.0.2.27`: SSH refused; console is `SecOS login:`; QEMU
   guest agent is not configured.
-- `cym_hlas_test` / `10.58.159.29`: SSH refused; console is Rocky Linux
+- `cym_hlas_test` / `192.0.2.29`: SSH refused; console is Rocky Linux
   `LAS login:` with cloud-init fallback datasource; QEMU guest agent is not
   configured.
 - Existing servers all report `key_name=null`. Legacy `nova`/`glance` clients can
@@ -180,25 +180,25 @@ because the proxy backend Unix socket was missing (`ENOENT`), and IPv6 ND is
 ## 0.5 2026-06-30 DHCP / Metadata / IPv6 Guest Probe Evidence
 
 Read-only evidence:
-`docs/evidence/openstack-n05-lite/20260630153231-ostack2.bj159.net-service-path-readonly/`
+`docs/evidence/openstack-n05-lite/20260630153231-compute-1.example.test-service-path-readonly/`
 
 Bounded guest evidence:
-`docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/`
+`docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/`
 
 Accepted for disposition:
 
-- DHCP agents are alive on `ostack2.bj159.net` and `ostack3.bj159.net`.
-- Metadata agents are alive on `ostack2.bj159.net` and `ostack3.bj159.net`.
+- DHCP agents are alive on `compute-1.example.test` and `compute-2.example.test`.
+- Metadata agents are alive on `compute-1.example.test` and `compute-2.example.test`.
 - UDS status remained `authority_state=ready`, `managed_ports=[]`, and
   `active_instances=[]` during the read-only service-path and bounded guest
   checks.
-- A temporary CirrOS VM `10.58.159.40/25` received DHCP through Neutron dnsmasq;
+- A temporary CirrOS VM `192.0.2.40/25` received DHCP through Neutron dnsmasq;
   `service-logs.txt` records `DHCPOFFER`, `DHCPREQUEST`, and `DHCPACK`.
 - The CirrOS image does not include an executable `udhcpc`, so explicit DHCP
   renew is marked `not_applicable`; the initial DHCP request/lease path is the
   accepted DHCP evidence for this environment.
-- The guest had a route to `169.254.169.254` via `10.58.159.24`, and the
-  Neutron metadata namespace proxy accepted HTTP from `10.58.159.40`. The
+- The guest had a route to `169.254.169.254` via `192.0.2.24`, and the
+  Neutron metadata namespace proxy accepted HTTP from `192.0.2.40`. The
   endpoint returned HTTP 500 because the proxy backend Unix socket was missing
   (`ENOENT`). This is recorded as target metadata service degraded, not an Aria
   ACL block.
@@ -218,7 +218,7 @@ Summary evidence:
 
 Accepted:
 
-- `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` have
+- `compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test` have
   reversible `REQUIRE_HARDENED=true` proofs using
   `aria-datapath:peercred-test-202606301305`.
 - During the hardened window, `/run/aria/aria-agent.sock` was
@@ -235,16 +235,16 @@ Validation:
 
 ```bash
 python ci/check_uds_hardening_evidence.py \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-compute-1.example.test \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-2.example.test \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-3.example.test \
   --min-hosts 3 \
   --require-hardened
 ```
 
 Remaining:
 
-- Persistent hardened rollout on `ostack2/3/4` is not enabled yet; the restored
+- Persistent hardened rollout on `compute-1/3/4` is not enabled yet; the restored
   baseline still uses the previous smoke-functional `0666` socket.
 
 ## 0. N0.5-lite 执行记录
@@ -265,7 +265,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 | 项 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
 | OpenStack 发行版与版本 | `openstack --version`；记录发行版包版本 | 明确发行版和客户端版本 | 三台采集到 `openstack 1.7.1`；发行版为 Rocky Linux 8.6 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不能进入完整 N0.5 |
-| Neutron ML2 mechanism driver | `grep -R "mechanism_drivers" /etc/neutron/plugins/ml2/` | 包含 OVS 相关 driver，不采用 OVN | `ostack2/3` neutron-server 配置为 `mechanism_drivers=openvswitch,linuxbridge,l2population,sriovnicswitch`；未见 OVN | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不冻结 attach/direction 结论 |
+| Neutron ML2 mechanism driver | `grep -R "mechanism_drivers" /etc/neutron/plugins/ml2/` | 包含 OVS 相关 driver，不采用 OVN | `compute-1/3` neutron-server 配置为 `mechanism_drivers=openvswitch,linuxbridge,l2population,sriovnicswitch`；未见 OVN | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不冻结 attach/direction 结论 |
 | compute host OS / kernel | `uname -a`; `cat /etc/os-release` | 记录 kernel 和 OS | 三台均为 kernel `4.18.0-553.5.1.el8_10.x86_64`，Rocky Linux 8.6 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 eBPF attach smoke |
 | OVS 版本 | `ovs-vsctl --version` | 记录 OVS 版本 | 三台均为 Open vSwitch `3.3.5` | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 OVS smoke |
 | 目标部署形态 | `openstack network agent list --host <compute>` | OVS only | 三台均有 `Aria ACL agent` heartbeat；ML2 同时启用 OVS/Linuxbridge/SRIOV 机制，当前 Aria MVP 仅按 OVS tap 证据推进 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 若存在 OVN/Linux bridge，当前阶段不支持 |
@@ -274,10 +274,10 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 | 项 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
-| VM tap 是否直接接入 `br-int` | `ovs-vsctl show`; `ovs-vsctl list interface <tap>` | tap 直接在 `br-int` 上 | `ostack2` 有 5 个 compute ports 且 br-int 上可见对应 tap；`ostack3/4` 当前无 compute ports，VM tap `iface-id`/XDP 证据为 not_applicable | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不冻结 PR-1A direction 字段 |
+| VM tap 是否直接接入 `br-int` | `ovs-vsctl show`; `ovs-vsctl list interface <tap>` | tap 直接在 `br-int` 上 | `compute-1` 有 5 个 compute ports 且 br-int 上可见对应 tap；`compute-2/4` 当前无 compute ports，VM tap `iface-id`/XDP 证据为 not_applicable | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不冻结 PR-1A direction 字段 |
 | 是否存在 `qvo/qvb/veth` 路径 | `sh -c 'ip link show \| egrep "qvo\|qvb\|veth"'` | 目标 VM 无 hybrid plug 路径 | 三台均未发现 `qvo/qvb` hybrid-plug 链路 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 当前阶段不支持该环境 |
-| tap 命名模式 | `sh -c 'ip link show \| grep tap'`; `ovs-vsctl list interface` | 可稳定映射 Neutron port | `ostack2` compute ports 映射到 `tap<port-id-prefix>`；`ostack3/4` 当前 compute_ports=0 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 N3 smoke |
-| `binding_host` 与 hostname 映射 | `hostname -f`; Neutron port binding 查询 | `binding_host` 与本机 host 一致 | `ostack2` 5 个 compute port 的 `binding_host=ostack2.bj159.net`；`ostack3/4` 当前 compute_ports=0 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | adapter host 配置不得冻结 |
+| tap 命名模式 | `sh -c 'ip link show \| grep tap'`; `ovs-vsctl list interface` | 可稳定映射 Neutron port | `compute-1` compute ports 映射到 `tap<port-id-prefix>`；`compute-2/4` 当前 compute_ports=0 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 N3 smoke |
+| `binding_host` 与 hostname 映射 | `hostname -f`; Neutron port binding 查询 | `binding_host` 与本机 host 一致 | `compute-1` 5 个 compute port 的 `binding_host=compute-1.example.test`；`compute-2/4` 当前 compute_ports=0 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | adapter host 配置不得冻结 |
 | OVS agent / ovs-vswitchd / ovsdb-server 重启行为 | 重启服务并记录 tap/ifindex/XDP 和 VM forwarding 变化 | tap 仍存在且 XDP/map 健康时 ACL attach 可保持 ready；tap 消失或 ifindex 改变时按 tap recreate 恢复；VM ping 单独作为 OVS forwarding 证据 | 2026-07-01 ACL-focused smoke passed: test harness restarted `ovs-vswitchd.service`, target tap stayed at ifindex 71 with XDP attached, ACL remained `ready/enforce`, rollback left zero managed ports, and VM forwarding recovered after 8 seconds | `docs/evidence/openstack-n05-lite/20260701-stage3-ovs-restart-acl-focused-probe/summary.md` | 无 |
 
 ## 3. Hook Direction 矩阵
@@ -285,18 +285,18 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 | 流量方向 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
 | VM -> same host VM | tcpdump / tc trace / eBPF test hook | 明确 XDP/TC 可见点 | 未执行 | 未执行 | 不冻结 ACL/QoS direction |
-| VM -> external | tcpdump / tc trace / eBPF test hook | 明确 egress/ingress 映射 | 临时 CirrOS VM `10.58.159.35` 从 guest 内发起 ICMP；egress ACL generation `85` ready 后 tcpdump 捕获 0 包；UDS rollback 后恢复捕获 | `docs/evidence/openstack-n05-lite/20260630145200-ostack2.bj159.net-cirros-vm-egress-final/` | 保留为 active ACL direction 验收证据 |
-| external -> VM | tcpdump / tc trace / eBPF test hook | 明确 ingress 映射 | `ostack2` -> VM `10.58.159.26` 的 ICMP 在 ACL full-resync 后被阻断，UDS rollback 后恢复；datapath HTTP policy 显示对应 drop ACL | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 不进入 N3 smoke |
-| DHCP | DHCP request/renew smoke | bypass 不影响 DHCP | DHCP agents alive；UDS `managed_ports=[]`；guest `10.58.159.40/25` 获取动态 IPv4，dnsmasq 记录 `DHCPOFFER/DHCPREQUEST/DHCPACK`；显式 renew 因 CirrOS 无可执行 `udhcpc` 标记 `not_applicable` | `docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/` | 默认只允许 bypass，不启用相关 ACL；若换用含 DHCP client 的镜像，可补 explicit renew |
-| metadata | curl metadata endpoint smoke | bypass 不影响 metadata | Metadata agents alive；guest 有 `169.254.169.254 via 10.58.159.24` 路由，请求到达 Neutron metadata namespace proxy；HTTP 500 原因为 backend Unix socket `ENOENT`，记为目标 metadata service degraded，不是 Aria block | `docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/` | 修复目标 metadata service 后重测 HTTP 200 内容；不扩 Aria 功能 |
-| IPv6 ND | `ping6` / neighbor discovery smoke | bypass 不影响 ND | 当前 Neutron subnet 只发现 IPv4 CIDR，guest 无 IPv6 global route；本环境标记 `not_applicable`，新增 IPv6 network 后重测 | `docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/` | N3 如启用 IPv6 network，必须补 IPv6 ND guest probe |
+| VM -> external | tcpdump / tc trace / eBPF test hook | 明确 egress/ingress 映射 | 临时 CirrOS VM `192.0.2.35` 从 guest 内发起 ICMP；egress ACL generation `85` ready 后 tcpdump 捕获 0 包；UDS rollback 后恢复捕获 | `docs/evidence/openstack-n05-lite/20260630145200-compute-1.example.test-cirros-vm-egress-final/` | 保留为 active ACL direction 验收证据 |
+| external -> VM | tcpdump / tc trace / eBPF test hook | 明确 ingress 映射 | `compute-1` -> VM `192.0.2.26` 的 ICMP 在 ACL full-resync 后被阻断，UDS rollback 后恢复；datapath HTTP policy 显示对应 drop ACL | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 不进入 N3 smoke |
+| DHCP | DHCP request/renew smoke | bypass 不影响 DHCP | DHCP agents alive；UDS `managed_ports=[]`；guest `192.0.2.40/25` 获取动态 IPv4，dnsmasq 记录 `DHCPOFFER/DHCPREQUEST/DHCPACK`；显式 renew 因 CirrOS 无可执行 `udhcpc` 标记 `not_applicable` | `docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/` | 默认只允许 bypass，不启用相关 ACL；若换用含 DHCP client 的镜像，可补 explicit renew |
+| metadata | curl metadata endpoint smoke | bypass 不影响 metadata | Metadata agents alive；guest 有 `169.254.169.254 via 192.0.2.24` 路由，请求到达 Neutron metadata namespace proxy；HTTP 500 原因为 backend Unix socket `ENOENT`，记为目标 metadata service degraded，不是 Aria block | `docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/` | 修复目标 metadata service 后重测 HTTP 200 内容；不扩 Aria 功能 |
+| IPv6 ND | `ping6` / neighbor discovery smoke | bypass 不影响 ND | 当前 Neutron subnet 只发现 IPv4 CIDR，guest 无 IPv6 global route；本环境标记 `not_applicable`，新增 IPv6 network 后重测 | `docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/` | N3 如启用 IPv6 network，必须补 IPv6 ND guest probe |
 
 ## 4. Aria Bypass Smoke
 
 | 场景 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
-| `aria-datapath` 未启动 | VM 连通性 smoke | OVS 原有转发不受影响 | `ostack2` 上 rollback 后停止 `aria_datapath` 时，VM `10.58.159.26` ping 0% 丢包；重启后 UDS status 可读且 `managed_ports=[]` | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 不进入 N3 |
-| `neutron-aria-agent` degraded | 停止 agent 后连通性 smoke | OVS 原有转发不受影响 | `ostack2` 上停止 `neutron_aria_agent` 时，VM `10.58.159.26` ping 0% 丢包；重启后 agent heartbeat 恢复 | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 修正 agent degraded 语义 |
+| `aria-datapath` 未启动 | VM 连通性 smoke | OVS 原有转发不受影响 | `compute-1` 上 rollback 后停止 `aria_datapath` 时，VM `192.0.2.26` ping 0% 丢包；重启后 UDS status 可读且 `managed_ports=[]` | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 不进入 N3 |
+| `neutron-aria-agent` degraded | 停止 agent 后连通性 smoke | OVS 原有转发不受影响 | `compute-1` 上停止 `neutron_aria_agent` 时，VM `192.0.2.26` ping 0% 丢包；重启后 agent heartbeat 恢复 | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 修正 agent degraded 语义 |
 | ACL rollback cleanup | 下发显式 ACL 后 UDS delete rollback | rollback 后 VM 连通性恢复，`managed_ports=[]` | generation `81` 下发 ICMP drop 后 ping 被阻断；UDS rollback 删除 5 个 managed ports，`rollback_remaining_managed_ports=0`，VM ping 恢复 | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md` | 不允许进入 ready |
 | `aria_acl` binding 缺失 | 无 ACL binding VM 连通性 smoke | port 保持 bypass | 未执行 | 未执行 | 修正 translator 默认行为 |
 | `aria_acl` policy 缺失或不可访问 | binding 指向不存在/无权限 policy | `DomainStatus=degraded,effective_action=bypass`，OVS 转发不受影响 | 未执行 | 未执行 | 修正错误码和 status |
@@ -308,7 +308,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 | 项 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
-| `aria_acl` extension | `openstack extension list --network` 或 legacy neutron extension list | 能看到 `aria-acl` | 2026-06-29 stage-two gate 通过；`ostack2`、`ostack3` 的 `neutron extension-list` 均可见 `aria-acl` | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 任一 active `neutron_server` 未安装同一 bundle 时，不进入生产 ACL feature gate |
+| `aria_acl` extension | `openstack extension list --network` 或 legacy neutron extension list | 能看到 `aria-acl` | 2026-06-29 stage-two gate 通过；`compute-1`、`compute-2` 的 `neutron extension-list` 均可见 `aria-acl` | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 任一 active `neutron_server` 未安装同一 bundle 时，不进入生产 ACL feature gate |
 | `aria_acl` API CRUD | 创建/查询 policy、rule、address-set、binding | admin/operator 可操作，request id 可追踪 | 2026-06-29 stage-two gate 通过；plugin DB CRUD 与 REST CRUD 均为 `ok` | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不启动 `acl_source=neutron` |
 | `aria_acl` effective read path | 查询 port effective ACL | 返回 policy/rules/revision/project 信息 | 阶段二 MVP 通过；`NeutronAclSource` 从真实 Neutron API 读到 `policies=1 rules=1 bindings=1` 并生成 full-resync snapshot。Port-show effective 字段仍属后续产品化增强 | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | `NeutronAclSource` 不得宣称完整增量 ready |
 | `aria_acl` DB/revision | 检查 revision_number 和 binding 更新 | revision 单调，agent 能识别更新 | DB schema upgrade/check 通过；七张 `aria_acl` 表存在。Revision/增量事件 gate 尚未完成 | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不进入增量事件 gate |
@@ -322,9 +322,9 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 | 项 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
-| agent type 名称 | `openstack network agent list` | 明确 agent type | 2026-06-29 可见 `Aria ACL agent`，host 包含 `ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`，alive 为 `:-)` | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不冻结 heartbeat |
+| agent type 名称 | `openstack network agent list` | 明确 agent type | 2026-06-29 可见 `Aria ACL agent`，host 包含 `compute-1.example.test`、`compute-2.example.test`、`compute-3.example.test`，alive 为 `:-)` | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不冻结 heartbeat |
 | heartbeat 注册方式 | 查 Neutron agent 配置和日志 | agent alive/degraded 可上报 | 阶段二 MVP 通过；`agent-show` configurations 可见 generation lag、accepted/applied generation、domain counts、degraded reasons | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不进入后续状态验收 |
-| port binding/full resync API | mock 或目标环境查询 | 可按 host 拉取 authoritative ports | 阶段二 MVP 通过；`ostack2` host ports=8、compute ports=5，snapshot generation 78；`ostack3` host ports=3、compute ports=0，snapshot generation 15 | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不进入 translator full resync |
+| port binding/full resync API | mock 或目标环境查询 | 可按 host 拉取 authoritative ports | 阶段二 MVP 通过；`compute-1` host ports=8、compute ports=5，snapshot generation 78；`compute-2` host ports=3、compute ports=0，snapshot generation 15 | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 不进入 translator full resync |
 | port update event source | RPC topic / callback / polling 记录 | 有明确 event source | 未执行 | 未执行 | PR-4 只能使用 full resync |
 | 第一阶段功能白名单 | 检查主方案、schema、translator、PR gate | 只包含 ACL enhancement 和 QoS；其它能力只能是支撑能力或保留代码 | stage-two ACL gate 只打开 `aria_acl` production input；QoS/Mirror/RPC event 未随本 gate 启用 | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md` | 删除非 ACL/QoS 的功能模块入口 |
 | QoS extension 可用性 | 查 Neutron extension list | 明确 `support_disposition=supported` 或 `unsupported` | 三台 discovery 均未发现 QoS extension；`support_disposition=unsupported` | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | PR-5B 降级或延期 |
@@ -333,7 +333,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 ### 6.1 2026-06-24 目标环境 RPC 源码确认记录
 
-执行节点：`ostack2.bj159.net`
+执行节点：`compute-1.example.test`
 
 检查位置：`neutron_openvswitch_agent` 容器内 `/usr/lib/python2.7/site-packages/neutron/plugins/ml2/drivers/openvswitch/agent/ovs_neutron_agent.py` 与 `neutron/agent/rpc.py`。
 
@@ -355,7 +355,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 ### 6.2 2026-06-24 RPC skeleton 测试部署记录
 
-执行节点：`ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`
+执行节点：`compute-1.example.test`、`compute-2.example.test`、`compute-3.example.test`
 
 部署形态：
 
@@ -377,7 +377,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 - 三台均以 `python -m neutron_aria.agent.main ... --heartbeat-only` 启动临时常驻进程。
 - 三台临时进程 stdout/stderr 已切到 `/var/log/kolla/neutron/neutron-aria-agent.log`，文件存在且可看到启动记录。
 - 2026-06-24 更新：提交 `e68e1aa` 已刷新到三台临时进程，日志文件可看到 `service_initialize`、`heartbeat_reported`、`service_result`，且包含 host、generation、snapshot_ports、managed_ports、degraded reason、event counters。
-- 控制面查询 `neutron agent-list` 可见三个 `Aria ACL agent`，host 分别为 `ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`，alive 均为 `:-)`。
+- 控制面查询 `neutron agent-list` 可见三个 `Aria ACL agent`，host 分别为 `compute-1.example.test`、`compute-2.example.test`、`compute-3.example.test`，alive 均为 `:-)`。
 
 边界说明：
 
@@ -388,7 +388,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 ### 6.3 2026-06-24 Independent Kolla Container Smoke
 
-Hosts: `ostack2.bj159.net`, `ostack3.bj159.net`, `ostack4.bj159.net`
+Hosts: `compute-1.example.test`, `compute-2.example.test`, `compute-3.example.test`
 
 Deployment shape:
 - Built `neutron-aria-agent:smoke-e68e1aa` from the onsite OVS agent image family.
@@ -414,7 +414,7 @@ Boundary:
 
 ### 6.4 2026-06-24 Full-Resync Smoke Gate
 
-Host: `ostack2.bj159.net`
+Host: `compute-1.example.test`
 
 Gate checks:
 - Started a temporary Rust `aria-agent` from the existing smoke artifact with:
@@ -430,7 +430,7 @@ Gate checks:
   - `supports_port_delete = true`
   - `supported_domains` includes `acl`
 - Confirmed initial UDS status had `managed_ports = []`.
-- Confirmed legacy neutronclient could list local ports for `ostack2.bj159.net`:
+- Confirmed legacy neutronclient could list local ports for `compute-1.example.test`:
   - total host ports: 5
   - compute ports: 2
 - Submitted one full-resync snapshot through `neutron-aria-agent --once --enable-full-resync`.
@@ -440,7 +440,7 @@ Gate checks:
 - Rollback used `DELETE /api/v1/neutron/ports/{port_id}` for both ports.
 - Final UDS status returned `active_instances = []` and `managed_ports = []`.
 - `ip -d link show` on both tap ports showed no XDP attachment after rollback.
-- `neutron agent-list` still showed the `Aria ACL agent` on `ostack2.bj159.net` as alive.
+- `neutron agent-list` still showed the `Aria ACL agent` on `compute-1.example.test` as alive.
 
 Boundary:
 - This validates full-resync smoke mechanics on one compute host.
@@ -453,7 +453,7 @@ Boundary:
 
 | port 类型 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
 | --- | --- | --- | --- | --- | --- |
-| normal tap | 查询 host-bound ports 与 `binding:vnic_type` | supported | `ostack2` 有 8 个本地 `normal` vnic ports，其中 5 个 compute ports；`ostack3` 有 3 个本地 `normal` vnic ports；`ostack4` 当前 0 个本地 ports | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 N3 |
+| normal tap | 查询 host-bound ports 与 `binding:vnic_type` | supported | `compute-1` 有 8 个本地 `normal` vnic ports，其中 5 个 compute ports；`compute-2` 有 3 个本地 `normal` vnic ports；`compute-3` 当前 0 个本地 ports | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 N3 |
 | trunk parent | 查询 Trunk extension 与本地 port class | `support_disposition=unsupported` 或 `DomainStatus=degraded` | 三台未发现 Trunk extension；当前未发现本地 trunk port | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不假 ready |
 | VLAN subport | 查询 Trunk extension 与本地 port class | `support_disposition=unsupported` 或 `DomainStatus=degraded` | 三台未发现 Trunk extension；当前未发现本地 VLAN subport | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不假 ready |
 | SR-IOV / direct | 查询 binding vnic type | `support_disposition=unsupported`，不假 ready | 本次本地 port class 未发现 `direct` / `direct-physical` / `baremetal` | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 标记 unsupported |
@@ -466,7 +466,7 @@ Boundary:
 | BTF `/sys/kernel/btf/vmlinux` | `test -r /sys/kernel/btf/vmlinux` | 可读 | 三台均可读 | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | datapath degraded |
 | bpffs `/sys/fs/bpf` | `sh -c 'mount \| grep bpffs'` | 已挂载且持久 | 三台均已挂载 bpffs | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不进入 datapath ready |
 | TC clsact/qdisc 能力 | `tc qdisc show dev <tap>` | 可 attach 或明确冲突策略 | 三台均缺 `tc` 命令；QoS shaping 标记 `unsupported` | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | attach degraded |
-| XDP attach 能力 | `ip link show <tap>` + attach smoke | 明确支持或不采用 | `ostack2/3` 已记录当前 tap XDP status；`ostack4` 无本地 VM tap，`not_applicable`。未执行主动 attach | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不使用 XDP path |
+| XDP attach 能力 | `ip link show <tap>` + attach smoke | 明确支持或不采用 | `compute-1/3` 已记录当前 tap XDP status；`compute-3` 无本地 VM tap，`not_applicable`。未执行主动 attach | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | 不使用 XDP path |
 | `/run/aria` mount / owner / mode | `stat -c "%U %G %a" /run/aria` | `root:neutron-aria 0770` | 三台为 `/run/aria root:UNKNOWN 0770`，smoke-functional 但非最终 hardened group | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md` | socket 不启动 |
 | socket owner / mode | `stat -c "%U %G %a" /run/aria/aria-agent.sock` | `aria-datapath:neutron-aria 0660` | discovery baseline 为 `root:root 0666`；三节点可逆 hardening proof 期间为 `root:42435 0660`；持久化 rollout 尚未启用 | `docs/evidence/openstack-n05-lite/2026-06-30-uds-hardening-summary.md` | `AriaSocketPermissionDenied` |
 | peer credential | 记录容器 uid/gid，并在 enforcement 模式拒绝非授权 peer | 三台均记录 `neutron_aria_agent` 的 `neutron` UID/GID `42435`，groups `42435 42400`；`REQUIRE_HARDENED=true` proof 已验证 allow-list match | `docs/evidence/openstack-n05-lite/2026-06-30-uds-hardening-summary.md` | 持久化 hardened rollout 前复核生产容器 uid/gid |
@@ -507,7 +507,7 @@ N0.5-lite 必须完成：
 - 完整 N0.5 完成前，不进入 N3 目标环境验证。
 ## 2026-06-30 G4 UDS Hardening Update
 
-`ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` now have
+`compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test` now have
 reversible UDS hardened rollout proofs using
 `aria-datapath:peercred-test-202606301305`. During each proof window the socket
 was `root:42435 0660`, the `neutron` user in `neutron_aria_agent` received
@@ -518,7 +518,7 @@ three-host rollout is still pending.
 
 ## 2026-07-02 P3-1 Projection Heartbeat Update
 
-`ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` now have
+`compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test` now have
 accepted P3-1 heartbeat/debug observability evidence:
 
 - Current `neutron_aria` egg was installed into each running
@@ -539,7 +539,7 @@ restart, or `aria-datapath` restart was performed.
 
 ## 2026-07-02 P3 Revisionless Experimental Update
 
-`ostack2.bj159.net` has controlled legacy-mode evidence for P3 port-scoped
+`compute-1.example.test` has controlled legacy-mode evidence for P3 port-scoped
 apply when the old Neutron API returns no port `revision_number`.
 
 - Current `neutron_aria` egg was installed into the running
@@ -574,11 +574,11 @@ Accepted Q0 facts:
   plugin.
 - OVS agent config still uses `extensions = mirror`; standard OVS QoS agent
   execution is not enabled.
-- Host shells on `ostack2.bj159.net`, `ostack3.bj159.net`, and
-  `ostack4.bj159.net` do not have `tc`.
+- Host shells on `compute-1.example.test`, `compute-2.example.test`, and
+  `compute-3.example.test` do not have `tc`.
 - The relevant Kolla containers do have `/usr/sbin/tc`.
-- On `ostack2.bj159.net`, container-side `tc qdisc show dev tap86b83885-67`
-  succeeds against a live VM tap. On `ostack3/4`, no VM tap was present during
+- On `compute-1.example.test`, container-side `tc qdisc show dev tap86b83885-67`
+  succeeds against a live VM tap. On `compute-2/4`, no VM tap was present during
   Q0, but container-side global qdisc output was readable.
 
 Disposition:

@@ -11,6 +11,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 from ci import check_blocked_terms
+from ci import check_payload_terms
 from ci import public_release_policy
 
 
@@ -88,7 +89,8 @@ class PublicReleasePolicyTest(unittest.TestCase):
 
     def test_diagnostics_do_not_echo_decoded_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir, "fixture.txt")
+            path_token = bytes.fromhex(NEW_RULE_HEX[5]).decode("ascii")
+            path = Path(temp_dir, path_token + "-fixture.txt")
             prohibited = bytes.fromhex(NEW_RULE_HEX[1])
             path.write_bytes(prohibited)
             stderr = io.StringIO()
@@ -97,6 +99,26 @@ class PublicReleasePolicyTest(unittest.TestCase):
                 check_blocked_terms.report_blocked(hits)
             self.assertTrue(hits)
             self.assertNotIn(prohibited.decode("ascii"), stderr.getvalue())
+            self.assertNotIn(path_token, stderr.getvalue())
+
+    def test_malformed_named_archive_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "malformed public archive"):
+            public_release_policy.scan_payload("fixture.zip", b"not a zip")
+
+    def test_elf_machine_code_is_not_treated_as_public_text(self):
+        data = b"\x7fELF\0" + bytes.fromhex(NEW_RULE_HEX[4])
+        self.assertEqual([], public_release_policy.scan_payload("fixture.so", data))
+
+    def test_payload_entry_point_scans_relative_names_and_archive_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "payload")
+            root.mkdir()
+            archive_path = root / "fixture.zip"
+            with zipfile.ZipFile(str(archive_path), "w") as archive:
+                archive.writestr("safe.txt", bytes.fromhex(NEW_RULE_HEX[4]))
+            checked, hits = check_payload_terms.collect_payload_hits([str(root)])
+            self.assertEqual(1, checked)
+            self.assertTrue(hits)
 
     def test_migration_is_idempotent_on_a_temporary_tree(self):
         from ci import anonymize_public_tree

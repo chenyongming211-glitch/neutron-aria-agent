@@ -1,6 +1,6 @@
 # 2026-07-02 P3 Revisionless Experimental Fanout Smoke
 
-Scope: controlled ostack2 test of P3 port-scoped apply in an old Neutron
+Scope: controlled compute-1 test of P3 port-scoped apply in an old Neutron
 environment that returns no trustworthy port `revision_number`.
 
 This is legacy-environment evidence only. It does not replace the production

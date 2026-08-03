@@ -1,0 +1,272 @@
+[
+    {
+        "Id": "6792d871c6c48d88b38c4eaac2df56abee8f41e53d5f94ed7b4ea81187129754",
+        "Created": "2026-06-26T02:05:01.333304959Z",
+        "Path": "dumb-init",
+        "Args": [
+            "--single-child",
+            "--",
+            "kolla_start"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 2423208,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-06-29T14:10:39.853881509Z",
+            "FinishedAt": "2026-06-29T14:10:39.634938095Z"
+        },
+        "Image": "sha256:669374e4f698c36b784dfdf8e38926ddf260ecf142d30d33cc61cc20c8589b8f",
+        "ResolvConfPath": "/data/docker/containers/6792d871c6c48d88b38c4eaac2df56abee8f41e53d5f94ed7b4ea81187129754/resolv.conf",
+        "HostnamePath": "/data/docker/containers/6792d871c6c48d88b38c4eaac2df56abee8f41e53d5f94ed7b4ea81187129754/hostname",
+        "HostsPath": "/data/docker/containers/6792d871c6c48d88b38c4eaac2df56abee8f41e53d5f94ed7b4ea81187129754/hosts",
+        "LogPath": "/data/docker/containers/6792d871c6c48d88b38c4eaac2df56abee8f41e53d5f94ed7b4ea81187129754/6792d871c6c48d88b38c4eaac2df56abee8f41e53d5f94ed7b4ea81187129754-json.log",
+        "Name": "/neutron_aria_agent",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/run/aria:/run/aria:rw",
+                "/etc/kolla/neutron-aria-agent/:/var/lib/kolla/config_files/:ro",
+                "/etc/localtime:/etc/localtime:ro",
+                "kolla_logs:/var/log/kolla/:rw"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {
+                    "max-file": "30",
+                    "max-size": "10m"
+                }
+            },
+            "NetworkMode": "host",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "unless-stopped",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "host",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "KernelMemory": 0,
+            "KernelMemoryTCP": 0,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": false,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/asound",
+                "/proc/acpi",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/data/docker/overlay2/eefb54f0e855891c8dc841861fc76abc69f259fdc07efedbf96a43ed9bc8804b-init/diff:/data/docker/overlay2/da9d2dd4cacc3f1e9da035d04e558176a4a90b47145d0afa2bb699d20a03b47e/diff:/data/docker/overlay2/8170ab8a9d63e78a34a5d32f4cd4b01020b0cbfadcaa5470bd8b75e9cc744de2/diff:/data/docker/overlay2/ec9c6f2797df329f94f1c778add582087491576983ce53c572c8639fdaa17ac2/diff:/data/docker/overlay2/76f493c17e3d731d5fec2f2c9b71a855a78de022cd64563a4a0a1db425c600c8/diff:/data/docker/overlay2/924d4d82698e26655493fe2f7d6948a5117ef9a21a49a4b09a6f5b2ab9eed4ed/diff:/data/docker/overlay2/cc155bbad7ec302e0ff8bee3429747289c71f5390bf80c779e63b6dbe946b9ca/diff:/data/docker/overlay2/5e6455c019adb942f88ab604e293796e7f83879c1b7e5e4fc4cbe0162d38b537/diff:/data/docker/overlay2/26a05f409ca3c8bbd1971ea312f6f7778298bac4cd00451e0a69093768056090/diff:/data/docker/overlay2/c8e6df81b8a6b8eafa0495a78bfd1db1211c646f2abdce2df19c3fcd76c39153/diff:/data/docker/overlay2/03b1e79e21f9712e39ccbb4a894a5c4b0e563aaab70489dd678ab3dd74a572c1/diff:/data/docker/overlay2/c11749958413b9058b8c9ef53f917e84f57462c7b65b153e739fc58178830f73/diff:/data/docker/overlay2/1fea114eaaf97dcf90ae2638ebc916145fb8d4ac9e55f96a0ae563f5004e8f8b/diff:/data/docker/overlay2/97c2395f3c0a6f3cb27e53b8bef788745d210ff7fb145b71b11f64a1d01092ce/diff:/data/docker/overlay2/0a8d28c7913b7589cfcbb4d053e6b83e280e32ca29b35a801cde4f0e41d9a441/diff:/data/docker/overlay2/a24a131e8aea79cc85dfafd7b6a41f9fe374d16d9cf5d9df1c7d306bdeb7ddcf/diff:/data/docker/overlay2/9ab5d4c5cd35230c2934b81ac7df17480fd08968adf5668844c357e3631066ee/diff:/data/docker/overlay2/9f980837d075fb8168a3f70378d2d058b5bc087227605e0ba71adb7e3a1a8ba5/diff:/data/docker/overlay2/f93d1041d8e7eddaa40e81b28108d13b8eab2579180c7fd79726137d6ee69f20/diff:/data/docker/overlay2/a9d325e5fd62c4527f9dbdcf23eb964fe2c32c3932d25dc05fe195a22993ffc1/diff:/data/docker/overlay2/d9991d199a85782f17744e8574bf994890cd1958222432d3eb5ab85d8c83db00/diff:/data/docker/overlay2/8e9b7ad67d7ab4ee3db64d1186c9093543ef3bea3a8c5ce4f3fd99fc2def4da3/diff",
+                "MergedDir": "/data/docker/overlay2/eefb54f0e855891c8dc841861fc76abc69f259fdc07efedbf96a43ed9bc8804b/merged",
+                "UpperDir": "/data/docker/overlay2/eefb54f0e855891c8dc841861fc76abc69f259fdc07efedbf96a43ed9bc8804b/diff",
+                "WorkDir": "/data/docker/overlay2/eefb54f0e855891c8dc841861fc76abc69f259fdc07efedbf96a43ed9bc8804b/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/run/aria",
+                "Destination": "/run/aria",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/etc/kolla/neutron-aria-agent",
+                "Destination": "/var/lib/kolla/config_files",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/etc/localtime",
+                "Destination": "/etc/localtime",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "volume",
+                "Name": "kolla_logs",
+                "Source": "/data/docker/volumes/kolla_logs/_data",
+                "Destination": "/var/log/kolla",
+                "Driver": "local",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": ""
+            },
+            {
+                "Type": "volume",
+                "Name": "7ce4c0c97737c11b1254bee8502c0a7e0395b1f8827a5f2bd3532fb808c74aa4",
+                "Source": "/data/docker/volumes/7ce4c0c97737c11b1254bee8502c0a7e0395b1f8827a5f2bd3532fb808c74aa4/_data",
+                "Destination": "/sys/fs/cgroup",
+                "Driver": "local",
+                "Mode": "",
+                "RW": true,
+                "Propagation": ""
+            }
+        ],
+        "Config": {
+            "Hostname": "compute-2.example.test",
+            "Domainname": "",
+            "User": "neutron",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "KOLLA_CONFIG_STRATEGY=COPY_ALWAYS",
+                "KOLLA_SERVICE_NAME=neutron-aria-agent",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "container=docker"
+            ],
+            "Cmd": [
+                "kolla_start"
+            ],
+            "Image": "neutron-aria-agent:0b20bbd",
+            "Volumes": {
+                "/sys/fs/cgroup": {}
+            },
+            "WorkingDir": "",
+            "Entrypoint": [
+                "dumb-init",
+                "--single-child",
+                "--"
+            ],
+            "OnBuild": null,
+            "Labels": {
+                "org.label-schema.build-date": "20201113",
+                "org.label-schema.license": "GPLv2",
+                "org.label-schema.name": "CentOS Base Image",
+                "org.label-schema.schema-version": "1.0",
+                "org.label-schema.vendor": "CentOS",
+                "org.opencontainers.image.created": "2020-11-13 00:00:00+00:00",
+                "org.opencontainers.image.licenses": "GPL-2.0-only",
+                "org.opencontainers.image.title": "CentOS Base Image",
+                "org.opencontainers.image.vendor": "CentOS"
+            }
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "f48d6dcdcef06c58514b6dea9ab0af38db3995764265a0947e8778cea06a3d3c",
+            "HairpinMode": false,
+            "LinkLocalIPv6Address": "",
+            "LinkLocalIPv6PrefixLen": 0,
+            "Ports": {},
+            "SandboxKey": "/var/run/docker/netns/default",
+            "SecondaryIPAddresses": null,
+            "SecondaryIPv6Addresses": null,
+            "EndpointID": "",
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {
+                "host": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "NetworkID": "b6d2f42e65894bf64a5ad3e0733d4e7c375c373fab8934d865ccec1fba6df15d",
+                    "EndpointID": "9282c77f86436f9c6f2a04d13ca42ff90ecef5f967af48af468cbe71ce01361a",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "MacAddress": "",
+                    "DriverOpts": null
+                }
+            }
+        }
+    }
+]

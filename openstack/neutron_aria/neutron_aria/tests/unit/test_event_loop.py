@@ -893,19 +893,19 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-a",
             "revision_number": 8,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }, {
             "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             "device_owner": "network:dhcp",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -943,7 +943,7 @@ class EventLoopTestCase(unittest.TestCase):
         )
         decision = sync.decide_port_update(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            binding_host="ostack2",
+            binding_host="compute-1",
             revision_number=9,
         ).to_dict()
         self.assertEqual("full_resync", decision["action"])
@@ -952,11 +952,11 @@ class EventLoopTestCase(unittest.TestCase):
     def test_full_resync_allows_ineligible_port_without_runtime_status(self):
         port_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "device_owner": "network:dhcp",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -978,13 +978,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1005,13 +1005,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = AdvancedGenerationLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1029,14 +1029,14 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             state_store = SnapshotStateStore(state_dir)
             first_client = StatusAfterApplyLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -1050,7 +1050,7 @@ class EventLoopTestCase(unittest.TestCase):
                 first_result["snapshot"]["desired_hash"],
             )
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -1081,14 +1081,14 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-a",
             "revision_number": 8,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
 
     def _baseline_snapshot(self):
         return {
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [{
                 "port_id": "port-old",
                 "ifname": "tap-port-old",
@@ -1101,7 +1101,7 @@ class EventLoopTestCase(unittest.TestCase):
         scenario = status_scenario("unknown-v1-contract")
         local_client = ContractErrorStatusLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             self._target_port_source(),
             FakeOvsReader(),
             local_client,
@@ -1154,7 +1154,7 @@ class EventLoopTestCase(unittest.TestCase):
                 }],
             )
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 self._target_port_source(),
                 FakeOvsReader(),
                 local_client,
@@ -1240,7 +1240,7 @@ class EventLoopTestCase(unittest.TestCase):
                 json.dump(scenario["durable_state"], stream, sort_keys=True)
                 stream.write("\n")
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 FixtureStatusLocalClient(scenario),
@@ -1251,7 +1251,7 @@ class EventLoopTestCase(unittest.TestCase):
 
             update = sync.decide_port_update(
                 context["update_port_id"],
-                binding_host="ostack2",
+                binding_host="compute-1",
                 revision_number=51,
             ).to_dict()
             delete = sync.decide_port_delete(
@@ -1295,13 +1295,13 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             first_client = StatusAfterApplyLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -1313,7 +1313,7 @@ class EventLoopTestCase(unittest.TestCase):
 
             second_client = FixedStatusLocalClient(converged_status)
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -1338,13 +1338,13 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": port_id,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             first_client = StatusAfterApplyLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -1366,7 +1366,7 @@ class EventLoopTestCase(unittest.TestCase):
                 converged_status,
             )
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -1390,7 +1390,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_remote_pending_action_recovers_blocked_same_hash(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -1431,7 +1431,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_remote_pending_action_rejects_malformed_authority_state(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -1458,7 +1458,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_pending_recovery_helper_rejects_malformed_authority_state(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -1487,7 +1487,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_remote_pending_action_rejects_invalid_pending_generation(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -1547,12 +1547,12 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         probe = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             FakeLocalClient(),
@@ -1571,7 +1571,7 @@ class EventLoopTestCase(unittest.TestCase):
             "active_instances": [],
         })
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1596,12 +1596,12 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             probe = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 FakeLocalClient(),
@@ -1626,7 +1626,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "active_instances": [],
             })
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 local_client,
@@ -1654,7 +1654,7 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
@@ -1670,7 +1670,7 @@ class EventLoopTestCase(unittest.TestCase):
             "active_instances": [],
         })
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1690,7 +1690,7 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
@@ -1706,7 +1706,7 @@ class EventLoopTestCase(unittest.TestCase):
             "active_instances": [],
         })
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1729,13 +1729,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": port_id,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = AcceptedThenConvergedLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1755,13 +1755,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": port_id,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = AcceptedSlowPendingThenConvergedLocalClient(pending_polls=3)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1786,13 +1786,13 @@ class EventLoopTestCase(unittest.TestCase):
                 "network_id": "net-1",
                 "revision_number": 7,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]
             local_client = TerminalIdentityMismatchLocalClient()
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource(neutron_ports),
                 FakeOvsReader(),
                 local_client,
@@ -1826,11 +1826,11 @@ class EventLoopTestCase(unittest.TestCase):
             port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
             local_client = AcceptedThenStatusUnavailableLocalClient()
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([{
                     "id": port_id,
                     "device_owner": "compute:nova",
-                    "binding:host_id": "ostack2",
+                    "binding:host_id": "compute-1",
                     "binding:vif_type": "ovs",
                     "binding:vnic_type": "normal",
                 }]),
@@ -1860,11 +1860,11 @@ class EventLoopTestCase(unittest.TestCase):
         try:
             port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([{
                     "id": port_id,
                     "device_owner": "compute:nova",
-                    "binding:host_id": "ostack2",
+                    "binding:host_id": "compute-1",
                     "binding:vif_type": "ovs",
                     "binding:vnic_type": "normal",
                 }]),
@@ -1889,13 +1889,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = AcceptedNotConvergedLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -1917,13 +1917,13 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             first_client = TimeoutNotConvergedLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -1939,7 +1939,7 @@ class EventLoopTestCase(unittest.TestCase):
 
             second_client = FakeLocalClient()
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -1959,13 +1959,13 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": port_id,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             first_client = TimeoutNotConvergedLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -1980,7 +1980,7 @@ class EventLoopTestCase(unittest.TestCase):
             status = _terminal_status_for_snapshot(first_client.snapshots[0])
             second_client = FixedStatusLocalClient(status)
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -2012,7 +2012,7 @@ class EventLoopTestCase(unittest.TestCase):
                 try:
                     snapshot = {
                         "generation": 0,
-                        "host": "ostack2",
+                        "host": "compute-1",
                         "ports": [{
                             "port_id": port_id,
                             "ifname": "",
@@ -2044,7 +2044,7 @@ class EventLoopTestCase(unittest.TestCase):
                             }],
                         })
                     sync = SnapshotSynchronizer(
-                        "ostack2",
+                        "compute-1",
                         StaticPortSource([]),
                         FakeOvsReader(),
                         FixedStatusLocalClient(status),
@@ -2069,7 +2069,7 @@ class EventLoopTestCase(unittest.TestCase):
             "id": port_id,
             "network_id": "net-1",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
@@ -2104,7 +2104,7 @@ class EventLoopTestCase(unittest.TestCase):
                 try:
                     first_client = AcceptedThenStatusUnavailableLocalClient()
                     first = SnapshotSynchronizer(
-                        "ostack2",
+                        "compute-1",
                         port_source,
                         FakeOvsReader(),
                         first_client,
@@ -2122,7 +2122,7 @@ class EventLoopTestCase(unittest.TestCase):
 
                     second_client = FixedStatusLocalClient(status)
                     second = SnapshotSynchronizer(
-                        "ostack2",
+                        "compute-1",
                         port_source,
                         FakeOvsReader(),
                         second_client,
@@ -2177,7 +2177,7 @@ class EventLoopTestCase(unittest.TestCase):
                 try:
                     snapshot = {
                         "generation": 0,
-                        "host": "ostack2",
+                        "host": "compute-1",
                         "ports": [{
                             "port_id": port_id,
                             "eligible": True,
@@ -2205,7 +2205,7 @@ class EventLoopTestCase(unittest.TestCase):
                     if pending_generation is not missing:
                         status["pending_generation"] = pending_generation
                     sync = SnapshotSynchronizer(
-                        "ostack2",
+                        "compute-1",
                         StaticPortSource([]),
                         FakeOvsReader(),
                         FixedStatusLocalClient(status),
@@ -2235,13 +2235,13 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": port_id,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             first_client = TimeoutNotConvergedLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -2262,7 +2262,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "active_instances": [],
             })
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -2314,7 +2314,7 @@ class EventLoopTestCase(unittest.TestCase):
                     store = SnapshotStateStore(state_dir)
                     prepared = store.prepare_snapshot({
                         "generation": 0,
-                        "host": "ostack2",
+                        "host": "compute-1",
                         "ports": [{
                             "port_id": port_id,
                             "eligible": True,
@@ -2342,7 +2342,7 @@ class EventLoopTestCase(unittest.TestCase):
                     if applied_hash is not missing:
                         status["applied_desired_hash"] = applied_hash
                     sync = SnapshotSynchronizer(
-                        "ostack2",
+                        "compute-1",
                         StaticPortSource([]),
                         FakeOvsReader(),
                         FixedStatusLocalClient(status),
@@ -2371,7 +2371,7 @@ class EventLoopTestCase(unittest.TestCase):
             store = SnapshotStateStore(state_dir)
             prepared = store.prepare_snapshot({
                 "generation": 0,
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [],
             })
             newer_generation = prepared["generation"] + 1
@@ -2388,7 +2388,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "active_instances": [],
             }
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 FixedStatusLocalClient(status),
@@ -2418,13 +2418,13 @@ class EventLoopTestCase(unittest.TestCase):
             port_source = StaticPortSource([{
                 "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }])
             first_client = TimeoutNotConvergedLocalClient()
             first = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 first_client,
@@ -2445,7 +2445,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "active_instances": [],
             })
             second = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 port_source,
                 FakeOvsReader(),
                 second_client,
@@ -2469,11 +2469,11 @@ class EventLoopTestCase(unittest.TestCase):
         state_dir = tempfile.mkdtemp()
         try:
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([{
                     "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     "device_owner": "compute:nova",
-                    "binding:host_id": "ostack2",
+                    "binding:host_id": "compute-1",
                     "binding:vif_type": "ovs",
                     "binding:vnic_type": "normal",
                 }]),
@@ -2495,11 +2495,11 @@ class EventLoopTestCase(unittest.TestCase):
     def test_full_resync_carries_port_statuses_from_datapath_status(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -2539,7 +2539,7 @@ class EventLoopTestCase(unittest.TestCase):
             "id": port_id,
             "network_id": "net-1",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
@@ -2553,7 +2553,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "action": "drop",
                 "ethertype": "IPv4",
                 "protocol": "icmp",
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             }],
             bindings=[{
                 "id": "acl-binding",
@@ -2564,7 +2564,7 @@ class EventLoopTestCase(unittest.TestCase):
         )
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -2578,7 +2578,7 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual("acl-policy", port["acl"]["policy_id"])
         self.assertTrue(port["acl"]["enabled"])
         self.assertEqual("drop-icmp", port["acl"]["rules"][0]["id"])
-        self.assertEqual(["10.58.159.2/32"], port["acl"]["rules"][0]["src_cidrs"])
+        self.assertEqual(["192.0.2.2/32"], port["acl"]["rules"][0]["src_cidrs"])
 
     def test_full_resync_enriches_port_status_with_effective_acl_identity(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -2592,7 +2592,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "action": "drop",
                 "ethertype": "IPv4",
                 "protocol": "icmp",
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             }],
             bindings=[{
                 "id": "acl-binding",
@@ -2602,12 +2602,12 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "network_id": "net-1",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -2637,7 +2637,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "action": "drop",
                 "ethertype": "IPv4",
                 "protocol": "icmp",
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             }],
             bindings=[{
                 "id": "acl-binding",
@@ -2647,12 +2647,12 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "network_id": "net-1",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -2682,7 +2682,7 @@ class EventLoopTestCase(unittest.TestCase):
                 "action": "drop",
                 "ethertype": "IPv4",
                 "protocol": "icmp",
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             }],
             bindings=[{
                 "id": "acl-binding",
@@ -2692,12 +2692,12 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "network_id": "net-1",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -2717,12 +2717,12 @@ class EventLoopTestCase(unittest.TestCase):
     def test_full_resync_accepts_not_requested_runtime_for_unbound_acl(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "network_id": "net-1",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -2757,7 +2757,7 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         }
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -2785,7 +2785,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -2821,7 +2821,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -2860,7 +2860,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -2888,7 +2888,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -2917,7 +2917,7 @@ class EventLoopTestCase(unittest.TestCase):
     def test_terminal_status_requires_string_hash_identity(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -2985,7 +2985,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3020,7 +3020,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3056,7 +3056,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3111,7 +3111,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3158,7 +3158,7 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         }
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3200,7 +3200,7 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         }
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3236,7 +3236,7 @@ class EventLoopTestCase(unittest.TestCase):
             }],
         }
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3256,7 +3256,7 @@ class EventLoopTestCase(unittest.TestCase):
         snapshot = _ready_acl_snapshot(generation=2, desired_hash="hash-2")
         port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3299,12 +3299,12 @@ class EventLoopTestCase(unittest.TestCase):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([{
                 "id": port_id,
                 "network_id": "net-1",
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]),
@@ -3329,12 +3329,12 @@ class EventLoopTestCase(unittest.TestCase):
             with self.subTest(effective_action=effective_action):
                 local_client = ReadyAclActionLocalClient(effective_action)
                 sync = SnapshotSynchronizer(
-                    "ostack2",
+                    "compute-1",
                     StaticPortSource([{
                         "id": port_id,
                         "network_id": "net-1",
                         "device_owner": "compute:nova",
-                        "binding:host_id": "ostack2",
+                        "binding:host_id": "compute-1",
                         "binding:vif_type": "ovs",
                         "binding:vnic_type": "normal",
                     }]),
@@ -3359,7 +3359,7 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }
@@ -3380,7 +3380,7 @@ class EventLoopTestCase(unittest.TestCase):
         )
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -3392,7 +3392,7 @@ class EventLoopTestCase(unittest.TestCase):
 
         preview = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack2",
+            binding_host="compute-1",
             revision_number=8,
         )
 
@@ -3415,13 +3415,13 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -3431,12 +3431,12 @@ class EventLoopTestCase(unittest.TestCase):
 
         same = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack2",
+            binding_host="compute-1",
             revision_number=7,
         )
         older = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack2",
+            binding_host="compute-1",
             revision_number=6,
         )
 
@@ -3454,13 +3454,13 @@ class EventLoopTestCase(unittest.TestCase):
             "id": port_id,
             "network_id": "net-1",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -3470,11 +3470,11 @@ class EventLoopTestCase(unittest.TestCase):
 
         default = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack2",
+            binding_host="compute-1",
         )
         allowed = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack2",
+            binding_host="compute-1",
             allow_revisionless=True,
         )
 
@@ -3493,14 +3493,14 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }
         port_source = StaticPortSource([neutron_port])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -3510,13 +3510,13 @@ class EventLoopTestCase(unittest.TestCase):
 
         foreign = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack3",
+            binding_host="compute-2",
             revision_number=8,
         )
-        neutron_port["binding:host_id"] = "ostack3"
+        neutron_port["binding:host_id"] = "compute-2"
         unavailable = sync.dry_run_port_scoped_snapshot(
             port_id,
-            binding_host="ostack2",
+            binding_host="compute-1",
             revision_number=8,
         )
 
@@ -3538,7 +3538,7 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }, {
@@ -3546,14 +3546,14 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-2",
             "revision_number": 3,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }]
         port_source = StaticPortSource(neutron_ports)
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -3564,7 +3564,7 @@ class EventLoopTestCase(unittest.TestCase):
 
         result = sync.apply_port_scoped_snapshot(
             port1,
-            binding_host="ostack2",
+            binding_host="compute-1",
             revision_number=8,
         )
 
@@ -3587,7 +3587,7 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }, {
@@ -3595,13 +3595,13 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-2",
             "revision_number": 3,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }]
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource(neutron_ports),
             FakeOvsReader(),
             local_client,
@@ -3628,7 +3628,7 @@ class EventLoopTestCase(unittest.TestCase):
         try:
             result = sync.apply_port_scoped_snapshot(
                 target_port,
-                binding_host="ostack2",
+                binding_host="compute-1",
                 revision_number=8,
             )
         except LocalApiError as exc:
@@ -3671,13 +3671,13 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }]
         local_client = ScopedResponseErrorLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource(neutron_ports),
             FakeOvsReader(),
             local_client,
@@ -3689,7 +3689,7 @@ class EventLoopTestCase(unittest.TestCase):
         with self.assertRaises(LocalApiError) as ctx:
             sync.apply_port_scoped_snapshot(
                 port_id,
-                binding_host="ostack2",
+                binding_host="compute-1",
                 revision_number=8,
             )
 
@@ -3714,13 +3714,13 @@ class EventLoopTestCase(unittest.TestCase):
                 "network_id": "net-1",
                 "revision_number": 7,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]
             local_client = TerminalIdentityMismatchLocalClient()
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource(neutron_ports),
                 FakeOvsReader(),
                 local_client,
@@ -3737,7 +3737,7 @@ class EventLoopTestCase(unittest.TestCase):
             with self.assertRaises(LocalApiError) as ctx:
                 sync.apply_port_scoped_snapshot(
                     port_id,
-                    binding_host="ostack2",
+                    binding_host="compute-1",
                     revision_number=8,
                 )
 
@@ -3769,13 +3769,13 @@ class EventLoopTestCase(unittest.TestCase):
                 "network_id": "net-1",
                 "revision_number": 7,
                 "device_owner": "compute:nova",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
             }]
             local_client = ScopedStatusUnavailableLocalClient()
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource(neutron_ports),
                 FakeOvsReader(),
                 local_client,
@@ -3789,7 +3789,7 @@ class EventLoopTestCase(unittest.TestCase):
             with self.assertRaises(LocalApiError):
                 sync.apply_port_scoped_snapshot(
                     port_id,
-                    binding_host="ostack2",
+                    binding_host="compute-1",
                     revision_number=8,
                 )
 
@@ -3815,7 +3815,7 @@ class EventLoopTestCase(unittest.TestCase):
             "network_id": "net-1",
             "revision_number": 7,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }]
@@ -3844,7 +3844,7 @@ class EventLoopTestCase(unittest.TestCase):
         )
         local_client = StatusFromPortSnapshotLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource(neutron_ports),
             FakeOvsReader(),
             local_client,
@@ -3878,7 +3878,7 @@ class EventLoopTestCase(unittest.TestCase):
         with self.assertRaises(LocalApiError) as ctx:
             sync.apply_port_scoped_snapshot(
                 port_id,
-                binding_host="ostack2",
+                binding_host="compute-1",
                 revision_number=8,
             )
 
@@ -3895,7 +3895,7 @@ class EventLoopTestCase(unittest.TestCase):
     def test_status_projection_never_overwrites_runtime_bypass(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -3943,7 +3943,7 @@ class EventLoopTestCase(unittest.TestCase):
             "id": port_id,
             "network_id": "net-1",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
@@ -3969,7 +3969,7 @@ class EventLoopTestCase(unittest.TestCase):
         ])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -3987,7 +3987,7 @@ class EventLoopTestCase(unittest.TestCase):
     def test_full_resync_reports_ready_heartbeat(self):
         status_reporter = FakeStatusReporter()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -4008,13 +4008,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": port_id,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         local_client = TimeoutThenConvergedLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -4039,13 +4039,13 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": port_id,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         } for port_id in port_ids])
         local_client = TimeoutThenCommittedWithPartialManagedClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             local_client,
@@ -4066,12 +4066,12 @@ class EventLoopTestCase(unittest.TestCase):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             port_source,
             FakeOvsReader(),
             TimeoutNotConvergedLocalClient(),
@@ -4091,7 +4091,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_safe_full_resync_marks_local_api_degraded(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FailingLocalClient(),
@@ -4110,7 +4110,7 @@ class EventLoopTestCase(unittest.TestCase):
     def test_safe_full_resync_reports_degraded_heartbeat(self):
         status_reporter = FakeStatusReporter()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FailingLocalClient(),
@@ -4128,7 +4128,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_heartbeat_failure_does_not_hide_resync_result(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -4147,7 +4147,7 @@ class EventLoopTestCase(unittest.TestCase):
         local_client = FakeLocalClient()
         try:
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 local_client,
@@ -4166,7 +4166,7 @@ class EventLoopTestCase(unittest.TestCase):
     def test_delete_port_recovers_when_timed_out_delete_converged(self):
         local_client = DeleteTimeoutThenConvergedLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -4186,7 +4186,7 @@ class EventLoopTestCase(unittest.TestCase):
         state_dir = tempfile.mkdtemp()
         try:
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 DeleteTimeoutNotConvergedLocalClient(),
@@ -4211,7 +4211,7 @@ class EventLoopTestCase(unittest.TestCase):
         try:
             store = SnapshotStateStore(state_dir)
             prepared = store.prepare_snapshot({
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "port-1",
                     "ifname": "tap-port-1",
@@ -4221,7 +4221,7 @@ class EventLoopTestCase(unittest.TestCase):
             })
             store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 DeleteResponseErrorLocalClient(),
@@ -4246,7 +4246,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_delete_port_rejects_mismatched_response_identity(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             DeleteWrongPortLocalClient(),
@@ -4262,7 +4262,7 @@ class EventLoopTestCase(unittest.TestCase):
 
     def test_delete_port_removes_cached_runtime_status_after_commit(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -4314,7 +4314,7 @@ class EventLoopTestCase(unittest.TestCase):
         try:
             store = SnapshotStateStore(state_dir)
             prepared = store.prepare_snapshot({
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "port-1",
                     "ifname": "tap-port-1",
@@ -4325,7 +4325,7 @@ class EventLoopTestCase(unittest.TestCase):
             store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
             store.prepare_delete("port-1", reason="port_delete_event")
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 FixedStatusLocalClient({
@@ -4367,7 +4367,7 @@ class StatusContractEventLoopRedTestCase(unittest.TestCase):
         }
         options.update(overrides)
         return SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client or FakeLocalClient(),
@@ -4386,7 +4386,7 @@ class StatusContractEventLoopRedTestCase(unittest.TestCase):
         context = scenario["request_context"]
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             context["expected_pending_generation"],
             desired_hash=context["expected_desired_hash"],
         )
@@ -4659,7 +4659,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         prepared = state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": port_id,
                     "ifname": "tap%s" % port_id[:11],
@@ -4703,7 +4703,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             "network_id": "net-a",
             "revision_number": 8,
             "device_owner": "compute:nova",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
         }])
@@ -4728,7 +4728,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         baseline = state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "port-old",
                     "ifname": "tap-port-old",
@@ -4748,7 +4748,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         local_client = FixtureStatusLocalClient(scenario)
         status_reporter = FakeStatusReporter()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             self._target_port_source(),
             FakeOvsReader(),
             local_client,
@@ -4787,7 +4787,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         scenario = status_scenario("classified-degraded-terminal")
         snapshot = self._terminal_degraded_snapshot(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -4846,7 +4846,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status["last_classified_generation"]
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -4901,7 +4901,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             legacy_status["last_classified_generation"]
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -4922,7 +4922,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         scenario = status_scenario("classified-degraded-terminal")
         snapshot = self._terminal_degraded_snapshot(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -4948,7 +4948,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
 
     def test_tombstones_are_diagnostic_only_and_cannot_replace_target_evidence(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -5049,7 +5049,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             state_store = InMemorySnapshotStateStore()
             baseline = state_store.prepare_snapshot_at_generation(
                 {
-                    "host": "ostack2",
+                    "host": "compute-1",
                     "ports": [{
                         "port_id": "port-last",
                         "eligible": True,
@@ -5064,7 +5064,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 baseline["desired_hash"],
             )
             scoped = state_store.prepare_scoped_snapshot({
-                "host": "ostack2",
+                "host": "compute-1",
                 "scope": {"type": "port", "port_id": "port-last"},
                 "ports": [{
                     "port_id": "port-last",
@@ -5091,7 +5091,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         baseline = state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "port-b",
                     "ifname": "tap-port-b",
@@ -5130,7 +5130,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 raise RuntimeError("neutron read failed")
 
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             FailingPortSource(),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -5170,7 +5170,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -5217,7 +5217,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -5271,7 +5271,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         )
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5320,7 +5320,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             "active_instances": [],
         })
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5397,7 +5397,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             connection_factory=Connection,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             self._target_port_source(),
             FakeOvsReader(),
             local_client,
@@ -5429,7 +5429,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=decoded_legacy,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5448,7 +5448,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_decoded_legacy_operator_cannot_clear_local_pending_as_stale(self):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             42,
             desired_hash="hash-local-42",
         )
@@ -5472,7 +5472,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=decoded_legacy,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5490,7 +5490,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "legacy-port",
                     "ifname": "tap-legacy",
@@ -5525,7 +5525,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=decoded_legacy,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5554,7 +5554,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             if row["port_id"] == "port-a"
         ]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -5599,7 +5599,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             if row["port_id"] != "port-a"
         ]
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -5630,7 +5630,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_v1_operator_cannot_clear_local_pending_as_stale(self):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             42,
             desired_hash="hash-local-42",
         )
@@ -5654,7 +5654,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 return copy.deepcopy(status)
 
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FixedOperatorClient(),
@@ -5701,7 +5701,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         for status in unsafe_statuses:
             state_store = InMemorySnapshotStateStore()
             state_store.prepare_snapshot_at_generation(
-                {"host": "ostack2", "ports": []},
+                {"host": "compute-1", "ports": []},
                 42,
                 desired_hash="hash-local-42",
             )
@@ -5710,7 +5710,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 status=status,
             )
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 local_client,
@@ -5736,7 +5736,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         for status in safe_statuses:
             state_store = InMemorySnapshotStateStore()
             state_store.prepare_snapshot_at_generation(
-                {"host": "ostack2", "ports": []},
+                {"host": "compute-1", "ports": []},
                 1,
                 desired_hash="hash-local-1",
             )
@@ -5745,7 +5745,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 status=status,
             )
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 local_client,
@@ -5763,7 +5763,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         baseline = state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "port-b",
                     "ifname": "tap-port-b",
@@ -5801,7 +5801,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         affected["desired_hash"] = scoped["desired_hash"]
         local_client = PublicV1ActionLocalClient(scenario, status=status)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5852,7 +5852,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=stale_status,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5873,7 +5873,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         baseline = state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": port_id,
                     "ifname": "tap-%s" % port_id,
@@ -5892,7 +5892,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             feature_ready_domains=["acl"],
         )
         scoped = state_store.prepare_scoped_snapshot({
-            "host": "ostack2",
+            "host": "compute-1",
             "scope": {"type": "port", "port_id": "port-a"},
             "ports": [{
                 "port_id": "port-a",
@@ -5917,7 +5917,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         })
         local_client = PublicV1ActionLocalClient(scenario, status=status)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5956,7 +5956,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         pending_before = copy.deepcopy(state_store.pending_snapshot())
         local_client = PublicV1ActionLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -5976,7 +5976,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         baseline = state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "port-b",
                     "ifname": "tap-port-b",
@@ -6003,7 +6003,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
         local_client = PublicV1ActionLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6033,7 +6033,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
         local_client = PublicV1ActionLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6063,7 +6063,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
         local_client = PublicV1ActionLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6093,7 +6093,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         pending_before = copy.deepcopy(state_store.pending_snapshot())
         local_client = PublicV1ActionLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6127,7 +6127,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         scenario = status_scenario("full-classified-ready")
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             42,
             desired_hash="hash-local-42",
         )
@@ -6151,7 +6151,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=advanced_status,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6172,7 +6172,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         pending_before = copy.deepcopy(state_store.pending_snapshot())
         local_client = PreSubmitStatusUnavailableLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6199,7 +6199,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         projected_before = set(state_store.last_projected_port_ids())
         local_client = PreSubmitStatusUnavailableLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             self._target_port_source(),
             FakeOvsReader(),
             local_client,
@@ -6212,7 +6212,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         try:
             sync.apply_port_scoped_snapshot(
                 target_port,
-                binding_host="ostack2",
+                binding_host="compute-1",
                 revision_number=8,
                 allow_revisionless=True,
             )
@@ -6233,7 +6233,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         projected_before = set(state_store.last_projected_port_ids())
         local_client = PreSubmitStatusUnavailableLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6251,7 +6251,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
 
     def test_pre_submit_action_gate_rejects_missing_status_defensively(self):
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -6267,7 +6267,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         pending_before = copy.deepcopy(state_store.pending_snapshot())
         local_client = PreSubmitNoneStatusLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6290,14 +6290,14 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         scenario = status_scenario("blocked-recoverable-inventory")
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             scenario["request_context"]["expected_pending_generation"],
             desired_hash=scenario["request_context"]["expected_desired_hash"],
         )
         pending_before = copy.deepcopy(state_store.pending_snapshot())
         local_client = PostRecoveryStatusUnavailableLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6320,7 +6320,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_event_target_rejects_whitespace_padded_historical_hash(self):
         scenario = status_scenario("scoped-classified-ready")
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -6369,7 +6369,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=operator_status,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6484,7 +6484,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 status=status,
             )
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 self._target_port_source(),
                 FakeOvsReader(),
                 local_client,
@@ -6498,7 +6498,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             try:
                 result = sync.apply_port_scoped_snapshot(
                     target_port,
-                    binding_host="ostack2",
+                    binding_host="compute-1",
                     revision_number=8,
                     allow_revisionless=True,
                 )
@@ -6624,7 +6624,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 status=status,
             )
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 local_client,
@@ -6675,7 +6675,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         )
         local_client = PublicV1ActionLocalClient(scenario)
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             self._target_port_source(),
             FakeOvsReader(),
             local_client,
@@ -6707,7 +6707,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         scenario = status_scenario("full-classified-ready")
         state_store = InMemorySnapshotStateStore()
         prepared = state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             42,
         )
         state_store.commit_snapshot(
@@ -6735,7 +6735,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=exact_ready,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6773,7 +6773,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         snapshot = {
             "generation": 40,
             "desired_hash": "legacy-hash-40",
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [{
                 "port_id": "legacy-port",
                 "ifname": "tap-legacy",
@@ -6798,7 +6798,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=decoded_status,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -6846,7 +6846,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_actual_decoded_legacy_actions_cannot_converge_delete(self):
         target_port = "legacy-port"
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -6893,7 +6893,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 status=operator_status,
             )
             restart_sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 local_client,
@@ -6921,7 +6921,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 status=operator_status,
             )
             timeout_sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 local_client,
@@ -6941,7 +6941,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             self.assertEqual([], local_client.mutating_calls)
 
     def test_actual_decoded_legacy_recovery_requires_barrier_and_forces_new(self):
-        empty_snapshot = {"host": "ostack2", "ports": []}
+        empty_snapshot = {"host": "compute-1", "ports": []}
         baseline_hash = "hash-applied-40"
 
         class LegacyRecoveryClient(FakeLocalClient):
@@ -7038,7 +7038,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         })
         row_baseline = _decode_legacy_status_v0(row_baseline_raw)
         row_baseline_sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             FakeLocalClient(),
@@ -7058,7 +7058,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             valid_post,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             client,
@@ -7141,7 +7141,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 post_status,
             )
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 client,
@@ -7161,7 +7161,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 self.assertEqual(pending_before, state_store.pending_snapshot())
 
     def test_actual_decoded_legacy_recovery_rejects_untrimmed_row_identities(self):
-        empty_snapshot = {"host": "ostack2", "ports": []}
+        empty_snapshot = {"host": "compute-1", "ports": []}
         baseline_hash = "legacy-hash-40"
         legacy_scenario = status_scenario("legacy-v0-ready")
 
@@ -7285,7 +7285,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                         post_status,
                     )
                     sync = SnapshotSynchronizer(
-                        "ostack2",
+                        "compute-1",
                         StaticPortSource([]),
                         FakeOvsReader(),
                         client,
@@ -7339,7 +7339,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             valid_post,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             client,
@@ -7486,7 +7486,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 }
                 client = DirectLegacyClient(raw_status)
                 sync = SnapshotSynchronizer(
-                    "ostack2",
+                    "compute-1",
                     StaticPortSource([]),
                     FakeOvsReader(),
                     client,
@@ -7538,7 +7538,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             state_store = seeded_state()
             client = DirectLegacyClient(raw_status)
             sync = SnapshotSynchronizer(
-                "ostack2",
+                "compute-1",
                 StaticPortSource([]),
                 FakeOvsReader(),
                 client,
@@ -7585,7 +7585,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = seeded_state()
         idle_client = DirectLegacyClient(idle_raw)
         idle_sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             idle_client,
@@ -7613,7 +7613,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             decode_status=False,
         )
         raw_sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             raw_client,
@@ -7634,7 +7634,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_actual_decoded_legacy_empty_full_host_restart_advances_ready_history(self):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {"host": "compute-1", "ports": []},
             40,
             desired_hash="legacy-hash-40",
         )
@@ -7646,7 +7646,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=decoded_ready,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,
@@ -7672,7 +7672,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
             {
-                "host": "ostack2",
+                "host": "compute-1",
                 "ports": [{
                     "port_id": "legacy-port",
                     "ifname": "tap-legacy",
@@ -7694,7 +7694,7 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status=decoded_ready,
         )
         sync = SnapshotSynchronizer(
-            "ostack2",
+            "compute-1",
             StaticPortSource([]),
             FakeOvsReader(),
             local_client,

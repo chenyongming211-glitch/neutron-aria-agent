@@ -34,20 +34,20 @@ class RpcCallbackTestCase(unittest.TestCase):
 
     def test_port_update_records_binding_host_and_revision(self):
         merger = EventMerger()
-        callback = AriaAgentRpcCallback(merger, local_host="ostack2.bj159.net")
+        callback = AriaAgentRpcCallback(merger, local_host="compute-1.example.test")
 
         callback.port_update(
             None,
             port={
                 "id": "p1",
-                "binding:host_id": "ostack2.bj159.net",
+                "binding:host_id": "compute-1.example.test",
                 "revision_number": 9,
             },
         )
 
         batch = merger.drain()
 
-        self.assertEqual("ostack2.bj159.net", batch.port_updates["p1"]["binding_host"])
+        self.assertEqual("compute-1.example.test", batch.port_updates["p1"]["binding_host"])
         self.assertEqual(9, batch.port_updates["p1"]["revision_number"])
 
     def test_port_delete_uses_legacy_port_id_kwarg(self):

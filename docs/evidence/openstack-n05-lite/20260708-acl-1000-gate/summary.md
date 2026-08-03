@@ -11,9 +11,9 @@ bypass during non-empty diff updates.
 
 | Field | Value |
 | --- | --- |
-| Host | `ostack2.bj159.net` |
+| Host | `compute-1.example.test` |
 | VM | `aria-cirros-test-20260707` |
-| VM IP | `10.58.159.68` |
+| VM IP | `192.0.2.68` |
 | Neutron port | `ff0b04e9-c1b3-4779-ae63-7e6d2a966a50` |
 | tap | `tapff0b04e9-c1` |
 | VIF / VNIC | `ovs` / `normal` |

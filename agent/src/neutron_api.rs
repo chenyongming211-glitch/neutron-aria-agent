@@ -12687,7 +12687,7 @@ mod tests {
         let nonempty = AclApplyPlan {
             groups: vec![AclGroupPlan {
                 name: "neutron:port-1:src:selector:0".to_string(),
-                cidrs: vec!["10.58.159.2/32".to_string()],
+                cidrs: vec!["192.0.2.2/32".to_string()],
             }],
             policies: vec![AclPolicyPlan {
                 src_group: "neutron:port-1:src:selector:0".to_string(),
@@ -14129,7 +14129,7 @@ mod tests {
             action: Some("drop".to_string()),
             ethertype: Some("IPv4".to_string()),
             protocol: Some("icmp".to_string()),
-            src_cidrs: vec!["10.58.159.2/32".to_string()],
+            src_cidrs: vec!["192.0.2.2/32".to_string()],
             dst_cidrs: Vec::new(),
             src_port_min: None,
             src_port_max: None,
@@ -14144,7 +14144,7 @@ mod tests {
             plan.groups,
             vec![AclGroupPlan {
                 name: "neutron:port-1:src:selector:0".to_string(),
-                cidrs: vec!["10.58.159.2/32".to_string()],
+                cidrs: vec!["192.0.2.2/32".to_string()],
             }]
         );
         assert_eq!(
@@ -14193,7 +14193,7 @@ mod tests {
         let plan = AclApplyPlan {
             groups: vec![AclGroupPlan {
                 name: "neutron:port-1:src:selector:0".to_string(),
-                cidrs: vec!["10.58.159.2/32".to_string()],
+                cidrs: vec!["192.0.2.2/32".to_string()],
             }],
             policies: vec![AclPolicyPlan {
                 src_group: "neutron:port-1:src:selector:0".to_string(),

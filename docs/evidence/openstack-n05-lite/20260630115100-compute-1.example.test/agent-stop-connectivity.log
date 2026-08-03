@@ -1,0 +1,20 @@
+Stopping neutron_aria_agent
+neutron_aria_agent
+Checking VM connectivity while neutron_aria_agent is stopped
+PING 192.0.2.26 (192.0.2.26) 56(84) bytes of data.
+64 bytes from 192.0.2.26: icmp_seq=1 ttl=64 time=0.168 ms
+64 bytes from 192.0.2.26: icmp_seq=2 ttl=64 time=0.143 ms
+
+--- 192.0.2.26 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1043ms
+rtt min/avg/max/mdev = 0.143/0.155/0.168/0.017 ms
+Restarting neutron_aria_agent
+neutron_aria_agent
+Checking VM connectivity after neutron_aria_agent restart
+PING 192.0.2.26 (192.0.2.26) 56(84) bytes of data.
+64 bytes from 192.0.2.26: icmp_seq=1 ttl=64 time=0.186 ms
+64 bytes from 192.0.2.26: icmp_seq=2 ttl=64 time=0.179 ms
+
+--- 192.0.2.26 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1015ms
+rtt min/avg/max/mdev = 0.179/0.182/0.186/0.013 ms

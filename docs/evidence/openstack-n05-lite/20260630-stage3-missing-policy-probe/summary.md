@@ -1,7 +1,7 @@
 # Stage-Three N3 Missing-Policy Probe
 
 Date: 2026-06-30
-Target: ostack2.bj159.net
+Target: compute-1.example.test
 
 ## Purpose
 
@@ -58,7 +58,7 @@ The production `aria_acl` source then read:
   - reason: `policy_missing_or_disabled`
   - stale: `False`
 - Forwarding stayed available while ACL was degraded/bypass:
-  - probe target: `10.58.159.28`
+  - probe target: `192.0.2.28`
   - ping: 2 transmitted, 2 received, 0% packet loss
 
 The datapath status still carried `wal_replay_failures=219` from the earlier

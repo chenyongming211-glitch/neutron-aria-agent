@@ -1,0 +1,6 @@
+host=compute-1.example.test ports=8 compute_ports=5
+compute_port id=39adf570-1acb-4e81-9215-96744a6bf627 device_owner=compute:None binding_host=compute-1.example.test status=ACTIVE
+compute_port id=86b83885-671f-474c-9556-8af98cf1cdc8 device_owner=compute:None binding_host=compute-1.example.test status=ACTIVE
+compute_port id=aa4ddb4a-5b73-4e94-bb21-e9a4f9614045 device_owner=compute:None binding_host=compute-1.example.test status=ACTIVE
+compute_port id=d53ce06c-c90e-4371-b8e4-4912f90a91d3 device_owner=compute:None binding_host=compute-1.example.test status=ACTIVE
+compute_port id=e607e86b-9e5f-4c63-a5df-3dc8986a1b0f device_owner=compute:None binding_host=compute-1.example.test status=ACTIVE

@@ -21,7 +21,7 @@ REMOTE_PORT = "33333333-4444-5555-6666-777777777777"
 MISSING_TAP_PORT = "44444444-5555-6666-7777-888888888888"
 
 
-def neutron_port(port_id, host="ostack2", owner="compute:nova", vif_type="ovs", vnic_type="normal"):
+def neutron_port(port_id, host="compute-1", owner="compute:nova", vif_type="ovs", vnic_type="normal"):
     return {
         "id": port_id,
         "device_owner": owner,
@@ -51,12 +51,12 @@ class AgentInventoryTestCase(unittest.TestCase):
             neutron_port(VM_PORT),
             neutron_port(DHCP_PORT, owner="network:dhcp"),
             neutron_port(SRIOV_PORT, vif_type="hw_veb", vnic_type="direct"),
-            neutron_port(REMOTE_PORT, host="ostack3"),
+            neutron_port(REMOTE_PORT, host="compute-2"),
             neutron_port(MISSING_TAP_PORT),
         ]
 
         builder = PortInventoryBuilder(
-            "ostack2",
+            "compute-1",
             managed_domains=["acl"],
             ifindex_lookup=lambda _name: 99,
         )
@@ -64,7 +64,7 @@ class AgentInventoryTestCase(unittest.TestCase):
         by_port = dict((entry["port_id"], entry) for entry in snapshot["ports"])
 
         self.assertEqual(7, snapshot["generation"])
-        self.assertEqual("ostack2", snapshot["host"])
+        self.assertEqual("compute-1", snapshot["host"])
         self.assertNotIn(REMOTE_PORT, by_port)
 
         vm_entry = by_port[VM_PORT]
@@ -98,7 +98,7 @@ class AgentInventoryTestCase(unittest.TestCase):
             ),
         ]
         builder = PortInventoryBuilder(
-            "ostack2",
+            "compute-1",
             managed_domains=["acl"],
             ifindex_lookup=lambda _name: 27,
             ovs_bridge="br-int",
@@ -143,7 +143,7 @@ class AgentInventoryTestCase(unittest.TestCase):
             ],
         )
         builder = PortInventoryBuilder(
-            "ostack2",
+            "compute-1",
             managed_domains=["acl", "qos"],
             ifindex_lookup=lambda _name: 27,
             acl_index=acl_index,
@@ -163,9 +163,9 @@ class AgentInventoryTestCase(unittest.TestCase):
             neutron_port(VM_PORT),
             neutron_port(DHCP_PORT, owner="network:dhcp"),
             neutron_port(SRIOV_PORT, vif_type="hw_veb", vnic_type="direct"),
-            neutron_port(REMOTE_PORT, host="ostack3"),
+            neutron_port(REMOTE_PORT, host="compute-2"),
         ]
-        builder = PortCandidateBuilder("ostack2", managed_domains=["acl"])
+        builder = PortCandidateBuilder("compute-1", managed_domains=["acl"])
 
         snapshot = builder.build_snapshot(ports, generation=10)
         by_port = dict((entry["port_id"], entry) for entry in snapshot["ports"])
@@ -191,7 +191,7 @@ class AgentInventoryTestCase(unittest.TestCase):
 
     def test_candidate_snapshot_claims_acl_domain_but_bypasses_without_binding(self):
         builder = PortCandidateBuilder(
-            "ostack2",
+            "compute-1",
             managed_domains=["acl"],
             acl_index=EffectiveAclIndex(),
         )
@@ -229,19 +229,19 @@ class AgentInventoryTestCase(unittest.TestCase):
             ],
         )
         builder = PortScopedSnapshotBuilder(
-            "ostack2",
+            "compute-1",
             managed_domains=["acl"],
             acl_index=acl_index,
         )
 
         snapshot = builder.build_port_snapshot(
-            [vm_port, other_port, neutron_port(REMOTE_PORT, host="ostack3")],
+            [vm_port, other_port, neutron_port(REMOTE_PORT, host="compute-2")],
             VM_PORT,
             generation=12,
         )
 
         self.assertEqual(12, snapshot["generation"])
-        self.assertEqual("ostack2", snapshot["host"])
+        self.assertEqual("compute-1", snapshot["host"])
         self.assertEqual({"type": "port", "port_id": VM_PORT}, snapshot["scope"])
         self.assertEqual(1, len(snapshot["ports"]))
 
@@ -254,10 +254,10 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertEqual("enforce", vm_entry["acl"]["effective_action"])
 
     def test_port_scoped_snapshot_returns_empty_for_foreign_or_missing_port(self):
-        builder = PortScopedSnapshotBuilder("ostack2", managed_domains=["acl"])
+        builder = PortScopedSnapshotBuilder("compute-1", managed_domains=["acl"])
 
         foreign_snapshot = builder.build_port_snapshot(
-            [neutron_port(REMOTE_PORT, host="ostack3")],
+            [neutron_port(REMOTE_PORT, host="compute-2")],
             REMOTE_PORT,
             generation=13,
         )
@@ -273,7 +273,7 @@ class AgentInventoryTestCase(unittest.TestCase):
 
     def test_port_scoped_snapshot_preserves_ineligible_target_disposition(self):
         builder = PortScopedSnapshotBuilder(
-            "ostack2",
+            "compute-1",
             managed_domains=["acl"],
             acl_index=EffectiveAclIndex(),
         )

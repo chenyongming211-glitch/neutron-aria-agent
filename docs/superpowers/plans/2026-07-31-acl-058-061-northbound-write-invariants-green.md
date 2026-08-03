@@ -463,7 +463,7 @@ git add \
   openstack/neutron_aria/neutron_aria/db/aria_acl/migration/versions/f61a2c4e7b90_add_acl_write_invariants.py \
   openstack/neutron_aria/neutron_aria/services/aria_acl/exceptions.py \
   docs/superpowers/plans/2026-07-31-acl-058-061-northbound-write-invariants-green.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "fix: enforce ACL northbound write invariants"
 git push origin v0.9-neutron-agent
 ```

@@ -250,7 +250,7 @@ ariactl --tap eth0 policy list
 - 去实例 `eth0` 的状态里查 ACL 配置
 - 不是去全局对象池里查
 
-省略 `--tap` 时，CLI 默认操作 `system` 实例，见 [/Users/chen/code/aria-firewall/user/src/main.rs#L9](/Users/chen/code/aria-firewall/user/src/main.rs#L9)。
+省略 `--tap` 时，CLI 默认操作 `system` 实例，见 [`user/src/main.rs`](../user/src/main.rs#L9)。
 
 ### 4.4 `instances` 与 `health`
 
@@ -312,9 +312,9 @@ ariactl --tap eth1 group add --name web --cidr 172.16.0.0/16
 
 为什么会这样：
 
-- group API 路由本身就是按实例作用域设计的，见 [/Users/chen/code/aria-firewall/agent/src/api_routes.rs#L54](/Users/chen/code/aria-firewall/agent/src/api_routes.rs#L54)
-- 每个 managed 实例都有自己独立的 `state_path`，见 [/Users/chen/code/aria-firewall/agent/src/tap_registry.rs#L108](/Users/chen/code/aria-firewall/agent/src/tap_registry.rs#L108)
-- 每个实例的 `FirewallState` 里都有各自的 `groups` 和 `next_group_id`，见 [/Users/chen/code/aria-firewall/core/src/state.rs#L122](/Users/chen/code/aria-firewall/core/src/state.rs#L122)
+- group API 路由本身就是按实例作用域设计的，见 [`agent/src/api_routes.rs`](../agent/src/api_routes.rs#L54)
+- 每个 managed 实例都有自己独立的 `state_path`，见 [`agent/src/tap_registry.rs`](../agent/src/tap_registry.rs#L108)
+- 每个实例的 `FirewallState` 里都有各自的 `groups` 和 `next_group_id`，见 [`core/src/state.rs`](../core/src/state.rs#L122)
 
 所以你可以直接记成一句话：
 
@@ -329,7 +329,7 @@ ariactl --tap eth1 group add --name web --cidr 172.16.0.0/16
 - 在规则语义里，`any` 表示通配
 - group id `0` 保留给 `any`
 
-对应实现见 [/Users/chen/code/aria-firewall/core/src/state.rs#L147](/Users/chen/code/aria-firewall/core/src/state.rs#L147) 和 [/Users/chen/code/aria-firewall/agent/src/control_plane.rs#L2300](/Users/chen/code/aria-firewall/agent/src/control_plane.rs#L2300)。
+对应实现见 [`core/src/state.rs`](../core/src/state.rs#L147) 和 [`agent/src/control_plane.rs`](../agent/src/control_plane.rs#L2300)。
 
 ### 5.4 group 常用命令
 
@@ -513,7 +513,7 @@ ariactl --tap eth0 qos add \
 - 如果你想限制“发往 db 的流量”，更合理的是在 egress QoS 上绑定 `db`
 - 如果你想限制“来自 web 的流量”，更合理的是在 ingress QoS 上绑定 `web`
 
-对应实现见 [/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L98](/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L98) 和 [/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L207](/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L207)。
+对应实现见 [`ebpf/src/qos.rs`](../ebpf/src/qos.rs#L98) 和 [`ebpf/src/qos.rs`](../ebpf/src/qos.rs#L207)。
 
 ### 6.6 `policing` 与 `shaping`
 

@@ -1,0 +1,13 @@
+# cleanup verification 2026-06-30T07:55:28Z
+## active servers
+## deleted audit records
+| 5ef9bf26-2569-4b35-b779-125fb6dc9127 | aria-n05-guestprobe-20260630155334              | 4ab07915da65403db282a4e210321ae1 | SOFT_DELETED | -          | Shutdown    | flat_mgt=192.0.2.40 |
+## keypairs
+## images
+| 8e1ec767-863d-4f25-989e-f9ea27459141 | aria-n05-cirros-raw-0.6.3-guestprobe-20260630155334 |
+## host temp files
+## container temp files
+tput: No value for $TERM and no -T specified
+tput: No value for $TERM and no -T specified
+## uds status
+{"generation":85,"accepted_generation":85,"applied_generation":85,"pending_generation":null,"desired_hash":"e2c3d464ecb8d8671f7cec09709a32b685ce0f90be52cbc4d008fa9d237153fa","applied_desired_hash":"e2c3d464ecb8d8671f7cec09709a32b685ce0f90be52cbc4d008fa9d237153fa","wal_status":"commit_written","wal_replay_failures":0,"authority_state":"ready","managed_ports":[],"port_statuses":[],"active_instances":[]}

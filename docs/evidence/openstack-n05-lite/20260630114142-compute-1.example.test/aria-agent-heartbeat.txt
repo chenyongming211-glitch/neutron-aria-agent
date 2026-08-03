@@ -1,0 +1,20 @@
+| 063f3316-8b9c-4ff1-90cd-3afc1b91876d | Aria ACL agent     | compute-2.example.test | :-)   | True           | neutron-aria-agent        |
+| 2cdd17d5-e0ad-4be7-bc54-111c21b2cf6a | Aria ACL agent     | compute-1.example.test | :-)   | True           | neutron-aria-agent        |
+| 9f09db4a-0737-48a6-910e-c3807c1097fc | Aria ACL agent     | compute-3.example.test | :-)   | True           | neutron-aria-agent        |
+| 063f3316-8b9c-4ff1-90cd-3afc1b91876d | Aria ACL agent     | compute-2.example.test | :-)   | True           | neutron-aria-agent        |
+| 2cdd17d5-e0ad-4be7-bc54-111c21b2cf6a | Aria ACL agent     | compute-1.example.test | :-)   | True           | neutron-aria-agent        |
+| 3ab3f9af-52e9-4627-972d-284738de211a | NIC Switch agent   | compute-1.example.test | :-)   | True           | neutron-sriov-nic-agent   |
+| 3e5147e9-4754-40f7-aa22-fb76551b59ef | Open vSwitch agent | compute-1.example.test | :-)   | True           | neutron-openvswitch-agent |
+| 42f69db3-ca3b-4f49-bd6f-c2cc300e7e71 | Linux bridge agent | compute-2.example.test | :-)   | True           | neutron-linuxbridge-agent |
+| 6979be31-507b-43c3-945a-6d48803d7040 | Metadata agent     | compute-1.example.test | :-)   | True           | neutron-metadata-agent    |
+| 7b2919b5-22eb-4a8e-b9ae-c9ce49bb6015 | Metadata agent     | compute-2.example.test | :-)   | True           | neutron-metadata-agent    |
+| 87f118ee-e95c-4ebc-8d5e-f1a472f66882 | Linux bridge agent | compute-1.example.test | :-)   | True           | neutron-linuxbridge-agent |
+| 920e04f0-9010-4223-8f92-9a3ce6d72525 | DHCP agent         | compute-2.example.test | :-)   | True           | neutron-dhcp-agent        |
+| 92b949a5-23cb-47f5-afc9-4dc3b2f9a960 | Linux bridge agent | compute-3.example.test | :-)   | True           | neutron-linuxbridge-agent |
+| 94a8a887-c978-44c0-9f74-ae4b1b82e538 | Open vSwitch agent | compute-2.example.test | :-)   | True           | neutron-openvswitch-agent |
+| 9f09db4a-0737-48a6-910e-c3807c1097fc | Aria ACL agent     | compute-3.example.test | :-)   | True           | neutron-aria-agent        |
+| b44f1624-f3ee-42a8-b639-23e0316a4bb5 | DHCP agent         | compute-1.example.test | :-)   | True           | neutron-dhcp-agent        |
+| e4f9b65e-852b-43d2-a7f5-afbdff9ccc25 | NIC Switch agent   | compute-2.example.test | :-)   | True           | neutron-sriov-nic-agent   |
+| f5788fdc-3fe8-4d57-9888-043c767c07ce | NIC Switch agent   | compute-3.example.test | :-)   | True           | neutron-sriov-nic-agent   |
+| f668e33c-b811-43aa-b91d-c08b35afbcc9 | Open vSwitch agent | compute-3.example.test | :-)   | True           | neutron-openvswitch-agent |
++--------------------------------------+--------------------+-------------------+-------+----------------+---------------------------+

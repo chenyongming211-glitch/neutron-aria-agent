@@ -8,15 +8,15 @@ consumption, or new tenant features.
 
 | Host | Evidence Path | Result |
 | --- | --- | --- |
-| `ostack2.bj159.net` | `docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net/` | hardened proof: 6 pass, 0 degraded, 0 not_applicable, 0 fail |
-| `ostack3.bj159.net` | `docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net/` | hardened proof: 6 pass, 0 degraded, 0 not_applicable, 0 fail |
-| `ostack4.bj159.net` | `docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net/` | hardened proof: 6 pass, 0 degraded, 0 not_applicable, 0 fail |
-| `ostack2.bj159.net` | `docs/evidence/openstack-n05-lite/20260630131249-ostack2.bj159.net-uds-rollout/` | reversible rollout proof: passed and restored original container/config |
-| `ostack3.bj159.net` | `docs/evidence/openstack-n05-lite/20260630133210-ostack3.bj159.net-uds-rollout/` | reversible rollout proof: passed and restored original container/config |
-| `ostack4.bj159.net` | `docs/evidence/openstack-n05-lite/20260630133210-ostack4.bj159.net-uds-rollout/` | reversible rollout proof: passed and restored original container/config |
-| `ostack2.bj159.net` | `docs/evidence/openstack-n05-lite/20260701132434-ostack2.bj159.net/` | persistent hardened proof: 6 pass, 0 fail |
-| `ostack3.bj159.net` | `docs/evidence/openstack-n05-lite/20260701132436-ostack3.bj159.net/` | persistent hardened proof: 6 pass, 0 fail |
-| `ostack4.bj159.net` | `docs/evidence/openstack-n05-lite/20260701132438-ostack4.bj159.net/` | persistent hardened proof: 6 pass, 0 fail |
+| `compute-1.example.test` | `docs/evidence/openstack-n05-lite/20260630131254-compute-1.example.test/` | hardened proof: 6 pass, 0 degraded, 0 not_applicable, 0 fail |
+| `compute-2.example.test` | `docs/evidence/openstack-n05-lite/20260630133213-compute-2.example.test/` | hardened proof: 6 pass, 0 degraded, 0 not_applicable, 0 fail |
+| `compute-3.example.test` | `docs/evidence/openstack-n05-lite/20260630133213-compute-3.example.test/` | hardened proof: 6 pass, 0 degraded, 0 not_applicable, 0 fail |
+| `compute-1.example.test` | `docs/evidence/openstack-n05-lite/20260630131249-compute-1.example.test-uds-rollout/` | reversible rollout proof: passed and restored original container/config |
+| `compute-2.example.test` | `docs/evidence/openstack-n05-lite/20260630133210-compute-2.example.test-uds-rollout/` | reversible rollout proof: passed and restored original container/config |
+| `compute-3.example.test` | `docs/evidence/openstack-n05-lite/20260630133210-compute-3.example.test-uds-rollout/` | reversible rollout proof: passed and restored original container/config |
+| `compute-1.example.test` | `docs/evidence/openstack-n05-lite/20260701132434-compute-1.example.test/` | persistent hardened proof: 6 pass, 0 fail |
+| `compute-2.example.test` | `docs/evidence/openstack-n05-lite/20260701132436-compute-2.example.test/` | persistent hardened proof: 6 pass, 0 fail |
+| `compute-3.example.test` | `docs/evidence/openstack-n05-lite/20260701132438-compute-3.example.test/` | persistent hardened proof: 6 pass, 0 fail |
 
 Command:
 
@@ -31,9 +31,9 @@ Validation:
 ```bash
 python ci/check_uds_hardening_evidence.py
 python ci/check_uds_hardening_evidence.py \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-compute-1.example.test \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-2.example.test \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-3.example.test \
   --min-hosts 3 \
   --require-hardened
 python ci/check_uds_hardening_evidence.py --require-hardened
@@ -47,8 +47,8 @@ python ci/check_uds_hardening_evidence.py --require-hardened
 - `aria_datapath` currently runs as `root` with UID/GID `0`.
 - `/run/aria` is `root:42435 0770` from the host numeric view and appears as
   `root:neutron 0770` inside `neutron_aria_agent`.
-- Reversible rollouts on `ostack2.bj159.net`, `ostack3.bj159.net`, and
-  `ostack4.bj159.net` with `aria-datapath:peercred-test-202606301305` proved
+- Reversible rollouts on `compute-1.example.test`, `compute-2.example.test`, and
+  `compute-3.example.test` with `aria-datapath:peercred-test-202606301305` proved
   the hardened target: `/run/aria/aria-agent.sock` became `root:42435 0660`,
   a UDS probe from the `neutron_aria_agent` container as the `neutron` user
   returned HTTP 200, and the audit log recorded `result=allowed` with
@@ -71,7 +71,7 @@ The repository now has a UDS hardening smoke, config-gated `SO_PEERCRED`
 implementation hooks, and static checks in `ci/check_neutron_stage1.py`.
 
 Site enforcement gate: accepted for three-node reversible proof on
-`ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`; additionally
+`compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test`; additionally
 accepted for persistent three-node rollout on the same target hosts.
 
 The closure evidence is:

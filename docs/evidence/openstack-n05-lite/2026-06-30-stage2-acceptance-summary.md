@@ -16,9 +16,9 @@ Scope:
 | --- | --- | --- |
 | G0 package gate | pass for MVP | `dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz` rebuild succeeded; image registry release remains later governance, not a stage-two MVP blocker. |
 | G4/N0.5 discovery | pass | `docs/evidence/openstack-n05-lite/2026-06-30-discovery-summary.md`; `python ci/check_n05_discovery_evidence.py` accepts three hosts with zero `fail`. |
-| DHCP/metadata/IPv6 disposition | pass with target metadata caveat | `docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/`: DHCP initial lease passed; metadata reached Neutron proxy but target backend returned HTTP 500/`ENOENT`; IPv6 ND is `not_applicable`. |
-| G5 production ACL source | pass | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md`: `aria_acl` extension/API/DB, CRUD, and `NeutronAclSource` passed on `ostack2` and `ostack3`. |
-| G6 full resync | pass | `ostack2` applied five ACL-managed ports and rolled them back; `ostack3` handled zero local compute ports cleanly. |
+| DHCP/metadata/IPv6 disposition | pass with target metadata caveat | `docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/`: DHCP initial lease passed; metadata reached Neutron proxy but target backend returned HTTP 500/`ENOENT`; IPv6 ND is `not_applicable`. |
+| G5 production ACL source | pass | `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md`: `aria_acl` extension/API/DB, CRUD, and `NeutronAclSource` passed on `compute-1` and `compute-2`. |
+| G6 full resync | pass | `compute-1` applied five ACL-managed ports and rolled them back; `compute-2` handled zero local compute ports cleanly. |
 | Port status and heartbeat | pass | `aria_acl_port_statuses` reportback, `last_reported_at`, `stale`, `runtime_status`, generation lag, and degraded reason summary are recorded in the stage-two ACL evidence. |
 | G7 rollback/connectivity | pass | `docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md`: baseline ping, ACL block, UDS rollback, post-rollback recovery, and agent/datapath stop-restart connectivity passed. |
 | Active traffic direction | pass | `docs/evidence/openstack-n05-lite/2026-06-30-active-direction-summary.md`: external/host -> VM and VM -> external/host are accepted; the rejected host-initiated egress proof is explicitly excluded. |
@@ -32,9 +32,9 @@ Scope:
 python ci/check_stage2_acceptance_evidence.py
 python ci/check_n05_discovery_evidence.py
 python ci/check_uds_hardening_evidence.py \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net \
-  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-compute-1.example.test \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-2.example.test \
+  --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-compute-3.example.test \
   --min-hosts 3 \
   --require-hardened
 python ci/check_neutron_stage2_acl.py

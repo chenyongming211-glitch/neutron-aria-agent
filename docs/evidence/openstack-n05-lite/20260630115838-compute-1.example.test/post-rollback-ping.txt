@@ -1,0 +1,7 @@
+PING 192.0.2.26 (192.0.2.26) 56(84) bytes of data.
+64 bytes from 192.0.2.26: icmp_seq=1 ttl=64 time=0.182 ms
+64 bytes from 192.0.2.26: icmp_seq=2 ttl=64 time=0.154 ms
+
+--- 192.0.2.26 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1010ms
+rtt min/avg/max/mdev = 0.154/0.168/0.182/0.014 ms

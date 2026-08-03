@@ -1,0 +1,23 @@
+host=compute-1.example.test
+require_hardened=false
+run_aria_dir=/run/aria
+socket_path=/run/aria/aria-agent.sock
+audit_log_path=/var/log/kolla/aria-datapath/neutron-uds-audit.log
+
+## container aria_datapath
+name=/aria_datapath image=aria-datapath:59c6dd1 user=root pid=1838468 mounts=/etc/localtime:/etc/localtime:ro;/data/docker/volumes/kolla_logs/_data:/var/log/kolla:rw;/run/openvswitch:/run/openvswitch:shared;/sys/fs/bpf:/sys/fs/bpf:shared;/data/docker/volumes/ba4615fe422bc9cdd398a9de5755682050f9f37e546cb41e12f50413540cab99/_data:/sys/fs/cgroup:;/var/lib/aria-agent-smoke:/var/lib/aria-agent:rw;/sys/kernel/btf/vmlinux:/sys/kernel/btf/vmlinux:ro;/etc/kolla/aria-datapath:/var/lib/kolla/config_files:ro;/run/aria:/run/aria:rw;
+root_identity=uid=0(root) gid=0(root) groups=0(root)
+neutron_identity=uid=42435(neutron) gid=42435(neutron) groups=42435(neutron),42400(kolla)
+root:x:0:0:root:/root:/bin/bash
+neutron:x:42435:42435::/var/lib/neutron:/usr/sbin/nologin
+root:x:0:
+neutron:x:42435:
+
+## container neutron_aria_agent
+name=/neutron_aria_agent image=neutron-aria-agent:0b20bbd user=neutron pid=1838195 mounts=/data/docker/volumes/kolla_logs/_data:/var/log/kolla:rw;/run/aria:/run/aria:rw;/data/docker/volumes/675107c91ee4123fba308ab3e3f28a93a4af6375bdce53820ed990adc2eff166/_data:/sys/fs/cgroup:;/etc/kolla/neutron-aria-agent:/var/lib/kolla/config_files:ro;/etc/localtime:/etc/localtime:ro;
+root_identity=uid=0(root) gid=0(root) groups=0(root)
+neutron_identity=uid=42435(neutron) gid=42435(neutron) groups=42435(neutron),42400(kolla)
+root:x:0:0:root:/root:/bin/bash
+neutron:x:42435:42435::/var/lib/neutron:/usr/sbin/nologin
+root:x:0:
+neutron:x:42435:

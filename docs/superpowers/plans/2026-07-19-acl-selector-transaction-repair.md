@@ -165,7 +165,7 @@ Do not add source-body parsing or mutation self-tests.
 git add agent/src/control_plane.rs agent/src/neutron_api.rs \
   ci/check_neutron_stage1.py \
   docs/openstack-neutron-aria-details/12-review-bug-backlog.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "test: expose managed ACL transaction gaps"
 git push origin codex/review-acl-046-selector-isolation-design
 ```
@@ -280,7 +280,7 @@ Change `reconcile_neutron_acl` to call `replace_owned_acl_and_flush`. Remove the
 
 ```bash
 git add agent/src/control_plane.rs agent/src/neutron_api.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "fix: roll back managed ACL publication on CT flush failure"
 git push origin codex/review-acl-046-selector-isolation-design
 gh run watch --exit-status
@@ -361,7 +361,7 @@ Keep shared private locked helpers only when still used by public standalone/loc
 
 ```bash
 git add agent/src/control_plane.rs agent/src/neutron_api.rs agent/src/tap_registry.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "fix: purge managed ACL state before detach atomically"
 git push origin codex/review-acl-046-selector-isolation-design
 gh run watch --exit-status
@@ -415,7 +415,7 @@ Task 0 has already separated the PR lanes. Remove the remaining second-order aud
 ```bash
 git add ci/check_neutron_stage1.py ci/check_tc_acl_smoke.py \
   ci/check_standalone_tc_acl_smoke.py .github/workflows/build.yml
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid \
   commit -m "test: replace ACL source-shape checks with behavior gates"
 git push origin codex/review-acl-046-selector-isolation-design
 gh run watch --exit-status

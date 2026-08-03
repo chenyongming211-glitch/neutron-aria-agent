@@ -1,0 +1,22 @@
++---------------------+--------------------------------------------------------------------------------------------------------------+
+| Field               | Value                                                                                                        |
++---------------------+--------------------------------------------------------------------------------------------------------------+
+| admin_state_up      | True                                                                                                         |
+| binding:host_id     | compute-1.example.test                                                                                            |
+| binding:profile     | {}                                                                                                           |
+| binding:vif_details | {"port_filter": false, "ovs_hybrid_plug": false}                                                             |
+| binding:vif_type    | ovs                                                                                                          |
+| binding:vnic_type   | normal                                                                                                       |
+| device_id           | 5ef9bf26-2569-4b35-b779-125fb6dc9127                                                                         |
+| device_owner        | compute:None                                                                                                 |
+| dns_assignment      | {"hostname": "host-10-58-159-40", "ip_address": "192.0.2.40", "fqdn": "host-10-58-159-40.openstacklocal."} |
+| dns_name            |                                                                                                              |
+| extra_dhcp_opts     |                                                                                                              |
+| fixed_ips           | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "192.0.2.40"}                          |
+| id                  | 504835d3-2df3-4901-a8fe-ebb2213bf0ec                                                                         |
+| mac_address         | fa:16:3e:86:a3:f1                                                                                            |
+| name                |                                                                                                              |
+| network_id          | 23eb9d08-ec8b-4610-a1ff-61492134b6d2                                                                         |
+| status              | ACTIVE                                                                                                       |
+| tenant_id           | 4ab07915da65403db282a4e210321ae1                                                                             |
++---------------------+--------------------------------------------------------------------------------------------------------------+

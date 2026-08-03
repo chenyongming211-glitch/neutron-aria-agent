@@ -154,16 +154,16 @@ class AriaAclQueryTestCase(unittest.TestCase):
         self.assertRaises(AriaAclNotFound, apply_memory_query, self.rows, query)
 
     def test_status_id_and_projected_filters_are_stable(self):
-        status_id = encode_port_status_id("port-1", "ostack2.bj159.net")
+        status_id = encode_port_status_id("port-1", "compute-1.example.test")
         self.assertTrue(status_id.startswith("aria-status-v1."))
         self.assertEqual(
-            ("port-1", "ostack2.bj159.net"),
+            ("port-1", "compute-1.example.test"),
             decode_port_status_id(status_id),
         )
         projection = PortStatusProjection(now_epoch=200.0, stale_seconds=90)
         rows = [{
             "port_id": "port-1",
-            "host": "ostack2.bj159.net",
+            "host": "compute-1.example.test",
             "status": "ready",
             "updated_at": "1970-01-01T00:01:00.000000Z",
         }]
@@ -246,15 +246,15 @@ Add exact integration tests:
 ```python
 def test_multi_host_legacy_status_show_is_conflict_but_id_is_exact(self):
     plugin = AriaAclPlugin(now=lambda: 200.0)
-    for host in ("ostack2", "ostack3"):
+    for host in ("compute-1", "compute-2"):
         plugin.report_aria_acl_port_status(None, {"aria_acl_port_status": {
             "port_id": "port-1", "host": host, "status": "ready",
         }})
     with self.assertRaises(AriaAclConflict):
         plugin.get_aria_acl_port_status(None, "port-1")
-    exact_id = encode_port_status_id("port-1", "ostack3")
+    exact_id = encode_port_status_id("port-1", "compute-2")
     self.assertEqual(
-        "ostack3", plugin.get_aria_acl_port_status(None, exact_id)["host"]
+        "compute-2", plugin.get_aria_acl_port_status(None, exact_id)["host"]
     )
 
 

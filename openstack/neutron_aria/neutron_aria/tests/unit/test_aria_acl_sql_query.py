@@ -154,9 +154,9 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
         from neutron_aria.db.aria_acl.query import PortStatusProjection
 
         expected_hosts = (
-            ("port-1", "ostack2"),
-            ("port-1", "ostack3"),
-            ("port-2", "ostack2"),
+            ("port-1", "compute-1"),
+            ("port-1", "compute-2"),
+            ("port-2", "compute-1"),
         )
         for port_id, host in expected_hosts:
             self.repository.upsert_port_status({
@@ -187,7 +187,7 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
         self.assertEqual(3, len(seen))
 
         exact_timestamp = self.repository.get_port_status(
-            "port-1", host="ostack2"
+            "port-1", host="compute-1"
         )["updated_at"]
         exact = self.repository.list_port_statuses(
             filters={"last_reported_at": [exact_timestamp]},
@@ -197,7 +197,7 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            [("port-1", "ostack2")],
+            [("port-1", "compute-1")],
             [(row["port_id"], row["host"]) for row in exact],
         )
         null_policy = self.repository.list_port_statuses(
@@ -244,7 +244,7 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             try:
                 repository.upsert_port_status({
                     "port_id": "port-1",
-                    "host": "ostack2",
+                    "host": "compute-1",
                     "status": "ready",
                     "generation": generation,
                 })
@@ -275,7 +275,7 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
                 verify_context,
                 auto_create=False,
             )
-            status = repository.get_port_status("port-1", host="ostack2")
+            status = repository.get_port_status("port-1", host="compute-1")
             self.assertIsNotNone(status)
             self.assertIn(status["generation"], (1, 2))
             verify_session.close()

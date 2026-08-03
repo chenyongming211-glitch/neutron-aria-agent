@@ -5,13 +5,10 @@ import os
 import subprocess
 import sys
 
-
-RULES = [
-    (bytes.fromhex("716178"), True),
-    (bytes.fromhex("7169616e78696e"), True),
-    (bytes.fromhex("e9bd90e5ae89e4bfa1"), False),
-    (bytes.fromhex("63736d70"), True),
-]
+try:
+    from .public_release_policy import redact_label, scan_path, scan_payload
+except ImportError:
+    from public_release_policy import redact_label, scan_path, scan_payload
 
 
 def tracked_files():
@@ -21,29 +18,27 @@ def tracked_files():
             yield os.fsdecode(raw_path)
 
 
-def scan_file(path):
-    with open(path, "rb") as handle:
-        data = handle.read()
-    lowered = data.lower()
-    hits = []
-    for index, (needle, ascii_fold) in enumerate(RULES, 1):
-        haystack = lowered if ascii_fold else data
-        if needle in haystack:
-            hits.append(index)
-    return hits
+def collect_blocked(paths):
+    blocked = []
+    for path in paths:
+        blocked.extend(scan_path(path))
+        with open(path, "rb") as handle:
+            blocked.extend(scan_payload(path, handle.read()))
+    return blocked
+
+
+def report_blocked(blocked):
+    if not blocked:
+        return
+    print("Blocked token found in tracked files:", file=sys.stderr)
+    for path, rule_index in blocked:
+        print("  %s (rule %s)" % (redact_label(path), rule_index), file=sys.stderr)
 
 
 def main():
-    blocked = []
-    for path in tracked_files():
-        hits = scan_file(path)
-        for rule_index in hits:
-            blocked.append((path, rule_index))
-
+    blocked = collect_blocked(tracked_files())
     if blocked:
-        print("Blocked token found in tracked files:", file=sys.stderr)
-        for path, rule_index in blocked:
-            print("  %s (rule %s)" % (path, rule_index), file=sys.stderr)
+        report_blocked(blocked)
         return 1
     return 0
 

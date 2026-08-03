@@ -135,7 +135,7 @@ Do not add a source parser to the Python checker.
 
 ```bash
 git add abi/tests/fragment_parser_contract.rs abi/tests/fragment_context_contract.rs ci/check_neutron_stage1.py
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "test: define fragment-safe ACL semantics"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "test: define fragment-safe ACL semantics"
 git push origin v0.9-neutron-agent
 ```
 
@@ -196,9 +196,9 @@ Read the Fragment header ID/offset/M fields during bounded extension traversal. 
 - [x] **Step 5: Push parser/ABI GREEN**
 
 ```bash
-/Users/chen/.cargo/bin/rustfmt --edition 2021 abi/src/lib.rs abi/src/fragment.rs abi/tests/fragment_parser_contract.rs abi/tests/fragment_context_contract.rs ebpf/src/parser.rs
+/home/developer/.cargo/bin/rustfmt --edition 2021 abi/src/lib.rs abi/src/fragment.rs abi/tests/fragment_parser_contract.rs abi/tests/fragment_context_contract.rs ebpf/src/parser.rs
 git add abi/src/lib.rs abi/src/fragment.rs abi/tests/fragment_parser_contract.rs abi/tests/fragment_context_contract.rs ebpf/src/parser.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fix: parse IP fragments without L4 ambiguity"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "fix: parse IP fragments without L4 ambiguity"
 git push origin v0.9-neutron-agent
 ```
 
@@ -286,9 +286,9 @@ TCPRT after successful insertion.
 - [x] **Step 6: Commit and push datapath GREEN**
 
 ```bash
-/Users/chen/.cargo/bin/rustfmt --edition 2021 abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/conntrack.rs ebpf/src/maps.rs ebpf/src/lib.rs
+/home/developer/.cargo/bin/rustfmt --edition 2021 abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/conntrack.rs ebpf/src/maps.rs ebpf/src/lib.rs
 git add abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/conntrack.rs ebpf/src/maps.rs ebpf/src/lib.rs docs/superpowers/plans/2026-07-19-acl-056-fragment-tracking.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fix: recover fragment ports before ACL conntrack"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "fix: recover fragment ports before ACL conntrack"
 git push origin v0.9-neutron-agent
 ```
 
@@ -364,9 +364,9 @@ durable-snapshot input, while managed projection retains the prepared snapshot.
 - [x] **Step 5: Commit and push userspace GREEN**
 
 ```bash
-/Users/chen/.cargo/bin/rustfmt --edition 2021 core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/scrub.rs core/src/ebpf_ops/inventory.rs core/src/ebpf_ops/replay.rs agent/src/instance.rs
+/home/developer/.cargo/bin/rustfmt --edition 2021 core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/scrub.rs core/src/ebpf_ops/inventory.rs core/src/ebpf_ops/replay.rs agent/src/instance.rs
 git add core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/scrub.rs core/src/ebpf_ops/inventory.rs core/src/ebpf_ops/replay.rs agent/src/instance.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fix: manage fragment epoch and recovery state"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "fix: manage fragment epoch and recovery state"
 git push origin v0.9-neutron-agent
 ```
 
@@ -407,9 +407,9 @@ Place the call inside the existing lifecycle/instance lock and transaction bound
 - [x] **Step 4: Commit and push publication GREEN**
 
 ```bash
-/Users/chen/.cargo/bin/rustfmt --edition 2021 agent/src/control_plane/standalone_acl.rs agent/src/control_plane.rs agent/src/neutron_api.rs
+/home/developer/.cargo/bin/rustfmt --edition 2021 agent/src/control_plane/standalone_acl.rs agent/src/control_plane.rs agent/src/neutron_api.rs
 git add agent/src/control_plane/standalone_acl.rs agent/src/control_plane.rs agent/src/neutron_api.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fix: fence ACL publication with fragment epochs"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "fix: fence ACL publication with fragment epochs"
 git push origin v0.9-neutron-agent
 ```
 
@@ -513,9 +513,9 @@ production activation, and field evidence. Real privileged evidence remains
 - [x] **Step 9: Commit, push, and verify Task 6B GREEN**
 
 ```bash
-/Users/chen/.cargo/bin/rustfmt --edition 2021 agent/src/main.rs agent/src/instance.rs agent/src/tap_registry.rs agent/src/system_manager.rs agent/src/control_plane.rs agent/src/control_plane/observability.rs agent/src/api_handlers/metrics.rs core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/replay.rs core/src/monitoring.rs abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_parser_contract.rs ebpf/src/parser.rs ebpf/src/fragment.rs ebpf/src/lib.rs
+/home/developer/.cargo/bin/rustfmt --edition 2021 agent/src/main.rs agent/src/instance.rs agent/src/tap_registry.rs agent/src/system_manager.rs agent/src/control_plane.rs agent/src/control_plane/observability.rs agent/src/api_handlers/metrics.rs core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/replay.rs core/src/monitoring.rs abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_parser_contract.rs ebpf/src/parser.rs ebpf/src/fragment.rs ebpf/src/lib.rs
 git add agent/src/main.rs agent/src/instance.rs agent/src/tap_registry.rs agent/src/system_manager.rs agent/src/control_plane.rs agent/src/control_plane/observability.rs agent/src/api_handlers/metrics.rs core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/replay.rs core/src/monitoring.rs abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_parser_contract.rs ebpf/src/parser.rs ebpf/src/fragment.rs ebpf/src/lib.rs config/aria-agent.toml deploy/kolla/config/aria-agent-openstack.toml docs/openstack-neutron-agent-mode.md docs/openstack-deployment-runbook.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "feat: expose guarded fragment tracking status"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "feat: expose guarded fragment tracking status"
 git push origin v0.9-neutron-agent
 ```
 
@@ -600,7 +600,7 @@ privileged packet is sent locally.
 
 ```bash
 git add deploy/smoke/lib/fragment_tracking_field_driver.py deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh deploy/kolla/smoke/neutron_aria_acl_tc_datapath_smoke.sh ci/check_neutron_stage1.py docs/openstack-neutron-aria-details/12-review-bug-backlog.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "test: wire fragment tracking field evidence"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "test: wire fragment tracking field evidence"
 git push origin v0.9-neutron-agent
 ```
 
@@ -640,7 +640,7 @@ Update the design status and backlog with RED and GREEN commits and exact CI URL
 
 ```bash
 git add docs/superpowers/specs/2026-07-19-acl-056-fragment-tracking-design.md docs/openstack-neutron-aria-details/12-review-bug-backlog.md docs/superpowers/plans/2026-07-19-acl-056-fragment-tracking.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "docs: record fragment tracking evidence"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "docs: record fragment tracking evidence"
 git push origin v0.9-neutron-agent
 ```
 

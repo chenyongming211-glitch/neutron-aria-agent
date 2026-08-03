@@ -27,9 +27,9 @@ the active `aria_datapath` service:
 
 | Host | Evidence | Smoke Result | Live-State Note |
 | --- | --- | --- | --- |
-| `ostack2.bj159.net` | `docs/evidence/openstack-n05-lite/20260701132434-ostack2.bj159.net/` | 6 pass, 0 fail | Already running the peercred-capable datapath image; socket stayed `0660`; UDS status stayed `ready`, generation `148`, managed ports `0`. |
-| `ostack3.bj159.net` | `docs/evidence/openstack-n05-lite/20260701132436-ostack3.bj159.net/` | 6 pass, 0 fail | Datapath container was rebuilt with the stage-three image and hardened config; post-rollout full-resync submitted generation `19`, status became `commit_written`, managed ports `0`. |
-| `ostack4.bj159.net` | `docs/evidence/openstack-n05-lite/20260701132438-ostack4.bj159.net/` | 6 pass, 0 fail | Datapath container was rebuilt with the stage-three image and hardened config; UDS status stayed `ready`, generation `9`, managed ports `0`. |
+| `compute-1.example.test` | `docs/evidence/openstack-n05-lite/20260701132434-compute-1.example.test/` | 6 pass, 0 fail | Already running the peercred-capable datapath image; socket stayed `0660`; UDS status stayed `ready`, generation `148`, managed ports `0`. |
+| `compute-2.example.test` | `docs/evidence/openstack-n05-lite/20260701132436-compute-2.example.test/` | 6 pass, 0 fail | Datapath container was rebuilt with the stage-three image and hardened config; post-rollout full-resync submitted generation `19`, status became `commit_written`, managed ports `0`. |
+| `compute-3.example.test` | `docs/evidence/openstack-n05-lite/20260701132438-compute-3.example.test/` | 6 pass, 0 fail | Datapath container was rebuilt with the stage-three image and hardened config; UDS status stayed `ready`, generation `9`, managed ports `0`. |
 
 Validation command:
 
@@ -54,9 +54,9 @@ not_applicable=0
   older non-hardened socket config.
 - Existing datapath state mounts were preserved; no state-directory migration
   was attempted as part of this UDS security gate.
-- Stopped pre-rollout `aria_datapath` containers were left on `ostack3` and
-  `ostack4` as immediate rollback handles.
-- `ostack3` had stale smoke-state WAL residue after the image update. A
+- Stopped pre-rollout `aria_datapath` containers were left on `compute-2` and
+  `compute-3` as immediate rollback handles.
+- `compute-2` had stale smoke-state WAL residue after the image update. A
   one-shot full-resync through the existing agent path advanced the runtime to
   generation `19` and `wal_status=commit_written`; the historical
   `wal_replay_failures=7` counter remains recorded but no managed ports or

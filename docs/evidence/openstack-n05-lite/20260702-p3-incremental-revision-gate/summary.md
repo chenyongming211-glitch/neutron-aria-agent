@@ -2,7 +2,7 @@
 
 Date: 2026-07-02
 
-Scope: controlled ostack2 test of P3 runtime incremental RPC after the Python
+Scope: controlled compute-1 test of P3 runtime incremental RPC after the Python
 submitter and Rust port-scoped UDS route were implemented behind
 `incremental_rpc_enabled=true`.
 
@@ -13,7 +13,7 @@ submitter and Rust port-scoped UDS route were implemented behind
 | Rust datapath capability | pass | `capability_hash=v0.9-neutron-capabilities-2`, `supports_port_scoped_snapshot=True` from the agent container. |
 | Python package smoke | pass | Updated `neutron_aria_rpc_event_smoke.sh` passed in `neutron_aria_agent`. |
 | Real RabbitMQ fanout | pass | Temporary enabled agent logged `event_batch_drained ... port_updates=1`. |
-| Neutron port read | pass | Temporary agent listed 8 ports bound to `ostack2.bj159.net`. |
+| Neutron port read | pass | Temporary agent listed 8 ports bound to `compute-1.example.test`. |
 | Full-resync apply | pass | Temporary agents submitted generations 167 and 168 with `snapshot_ports=8`, `managed_ports=5`. |
 | Rollback cleanup | pass | UDS delete cleanup returned `rollback_remaining_managed_ports=0` after each case. |
 
@@ -45,7 +45,7 @@ safe default or P2-only canary mode.
 
 ## Final State
 
-- `aria_datapath` on ostack2 was left running with the v2 port-scoped capable
+- `aria_datapath` on compute-1 was left running with the v2 port-scoped capable
   binary and existing peercred hardening.
 - `neutron_aria_agent` was restored to heartbeat-only safe defaults:
   `full_resync_enabled=false`, `rpc_events_enabled=false`,

@@ -21,20 +21,20 @@ class EventMergerTestCase(unittest.TestCase):
     def test_port_update_keeps_latest_revision(self):
         merger = EventMerger()
 
-        merger.record_port_update("p1", binding_host="ostack2", revision_number=4)
-        merger.record_port_update("p1", binding_host="ostack3", revision_number=3)
-        merger.record_port_update("p1", binding_host="ostack4", revision_number=5)
+        merger.record_port_update("p1", binding_host="compute-1", revision_number=4)
+        merger.record_port_update("p1", binding_host="compute-2", revision_number=3)
+        merger.record_port_update("p1", binding_host="compute-3", revision_number=5)
 
         batch = merger.drain()
 
         self.assertEqual(["p1"], sorted(batch.port_updates.keys()))
-        self.assertEqual("ostack4", batch.port_updates["p1"]["binding_host"])
+        self.assertEqual("compute-3", batch.port_updates["p1"]["binding_host"])
         self.assertEqual(5, batch.port_updates["p1"]["revision_number"])
 
     def test_delete_wins_over_previous_update(self):
         merger = EventMerger()
 
-        merger.record_port_update("p1", binding_host="ostack2")
+        merger.record_port_update("p1", binding_host="compute-1")
         merger.record_port_delete("p1")
 
         batch = merger.drain()
@@ -46,7 +46,7 @@ class EventMergerTestCase(unittest.TestCase):
         merger = EventMerger()
 
         merger.record_port_delete("p1")
-        merger.record_port_update("p1", binding_host="ostack2")
+        merger.record_port_update("p1", binding_host="compute-1")
 
         batch = merger.drain()
 

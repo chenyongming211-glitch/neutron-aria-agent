@@ -2,7 +2,7 @@
 
 Date: 2026-07-02
 
-Host: `ostack2.bj159.net`
+Host: `compute-1.example.test`
 
 Scope:
 

@@ -13,12 +13,12 @@ Scope:
 
 | Check | Host | Target | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| Agent precheck | ostack2/3/4 | Aria ACL agent heartbeat | PASS | All three agents `ready=true`, `degraded=false`, generation lag `0`. |
-| Downlink ACL | ostack2.bj159.net | Existing VM `10.58.159.26`, port `86b83885-671f-474c-9556-8af98cf1cdc8` | PASS | Baseline ping passed, temporary ingress ICMP drop produced 100% loss, rollback restored ping. Apply generation `205`, rollback generation `206`. |
-| Downlink ACL | ostack4.bj159.net | Existing VM `10.58.159.52`, port `dc70f24f-7637-4d04-ada4-b92aae7a53fc` | PASS | Baseline ping passed, temporary ingress ICMP drop produced 100% loss, rollback restored ping. Apply generation `12`, rollback generation `13`. |
-| Downlink ACL | ostack3.bj159.net | Temporary CirrOS VM `10.58.159.57`, port `73fefcf5-55b6-410e-ad13-703d7243a761` | PASS | Baseline ping passed, temporary ingress ICMP drop produced 100% loss, rollback restored ping. Apply generation `27`, rollback generation `28`. |
-| Guest egress ACL | ostack3.bj159.net | Temporary CirrOS VM `10.58.159.59`, port `4e5a70f8-b152-429e-b89e-66187fc0bfb5` | PASS | Guest ping to host passed, temporary egress ICMP drop produced 100% loss, rollback restored guest ping. Apply generation `36`, rollback generation `38`. |
-| Port status detail | ostack2.bj159.net | Existing VM `10.58.159.26` | RESOLVED | Initial run reported `ready/enforce` but left `effective_policy_id` and `binding_id` as `null`; the follow-up agent fix and formal smoke runs below verified both fields are populated. |
+| Agent precheck | compute-1/3/4 | Aria ACL agent heartbeat | PASS | All three agents `ready=true`, `degraded=false`, generation lag `0`. |
+| Downlink ACL | compute-1.example.test | Existing VM `192.0.2.26`, port `86b83885-671f-474c-9556-8af98cf1cdc8` | PASS | Baseline ping passed, temporary ingress ICMP drop produced 100% loss, rollback restored ping. Apply generation `205`, rollback generation `206`. |
+| Downlink ACL | compute-3.example.test | Existing VM `192.0.2.52`, port `dc70f24f-7637-4d04-ada4-b92aae7a53fc` | PASS | Baseline ping passed, temporary ingress ICMP drop produced 100% loss, rollback restored ping. Apply generation `12`, rollback generation `13`. |
+| Downlink ACL | compute-2.example.test | Temporary CirrOS VM `192.0.2.57`, port `73fefcf5-55b6-410e-ad13-703d7243a761` | PASS | Baseline ping passed, temporary ingress ICMP drop produced 100% loss, rollback restored ping. Apply generation `27`, rollback generation `28`. |
+| Guest egress ACL | compute-2.example.test | Temporary CirrOS VM `192.0.2.59`, port `4e5a70f8-b152-429e-b89e-66187fc0bfb5` | PASS | Guest ping to host passed, temporary egress ICMP drop produced 100% loss, rollback restored guest ping. Apply generation `36`, rollback generation `38`. |
+| Port status detail | compute-1.example.test | Existing VM `192.0.2.26` | RESOLVED | Initial run reported `ready/enforce` but left `effective_policy_id` and `binding_id` as `null`; the follow-up agent fix and formal smoke runs below verified both fields are populated. |
 | Cleanup | Neutron API | Temporary ACL objects | PASS | `aria_acl_policies=0`, `aria_acl_rules=0`, `aria_acl_bindings=0` after tests. |
 | Cleanup | Nova/Glance | Temporary VM/image resources | PASS | Temporary images were removed. Remaining `acl-live-*` Nova rows are `DELETED` audit records, not active resources. |
 
@@ -26,15 +26,15 @@ Scope:
 
 | Host | Ready | Degraded | Generation | Managed ports | Snapshot ports |
 | --- | --- | --- | --- | --- | --- |
-| ostack2.bj159.net | true | false | 220 | 13 | 16 |
-| ostack3.bj159.net | true | false | 47 | 0 | 3 |
-| ostack4.bj159.net | true | false | 17 | 1 | 1 |
+| compute-1.example.test | true | false | 220 | 13 | 16 |
+| compute-2.example.test | true | false | 47 | 0 | 3 |
+| compute-3.example.test | true | false | 17 | 1 | 1 |
 
 ## Formal Smoke Follow-up
 
 The status identity fix and heartbeat compaction were packaged into
 `dist/kolla/neutron_aria-0.1.0-py2.7.egg`, installed into the
-`neutron_aria_agent` container on ostack2/3/4, and loaded by restarting only the
+`neutron_aria_agent` container on compute-1/3/4, and loaded by restarting only the
 `neutron_aria_agent` containers.
 
 New smoke scripts:
@@ -46,9 +46,9 @@ Formal smoke results:
 
 | Script | Host | Result | Notes |
 | --- | --- | --- | --- |
-| `neutron_aria_acl_live_downlink_smoke.sh` | ostack2.bj159.net | PASS | Existing VM `10.58.159.26`; status row included `effective_policy_id` and `binding_id`. |
-| `neutron_aria_acl_live_downlink_smoke.sh` | ostack4.bj159.net | PASS | Existing VM `10.58.159.52`; status row included `effective_policy_id` and `binding_id`. |
-| `neutron_aria_acl_live_egress_smoke.sh` | ostack3.bj159.net | PASS | Temporary CirrOS VM `10.58.159.61`; guest-originated ICMP was blocked, then recovered after rollback; status row included `effective_policy_id` and `binding_id`. |
+| `neutron_aria_acl_live_downlink_smoke.sh` | compute-1.example.test | PASS | Existing VM `192.0.2.26`; status row included `effective_policy_id` and `binding_id`. |
+| `neutron_aria_acl_live_downlink_smoke.sh` | compute-3.example.test | PASS | Existing VM `192.0.2.52`; status row included `effective_policy_id` and `binding_id`. |
+| `neutron_aria_acl_live_egress_smoke.sh` | compute-2.example.test | PASS | Temporary CirrOS VM `192.0.2.61`; guest-originated ICMP was blocked, then recovered after rollback; status row included `effective_policy_id` and `binding_id`. |
 
 Final package checks:
 
@@ -62,7 +62,7 @@ Final package checks:
 ## Notes
 
 - The environment requires raw-format images for the target compute aggregate. The temporary CirrOS image was converted to raw before VM creation.
-- ostack3 had no pre-existing VM, so the test created and removed temporary CirrOS VMs.
+- compute-2 had no pre-existing VM, so the test created and removed temporary CirrOS VMs.
 - `aria_acl_port_statuses` retains historical rows, including detached/deleted ports. The current cleanup policy still needs to be documented.
-- Follow-up hotfix verification populated `effective_policy_id` and `binding_id` for the ready/enforce row on ostack2, generation `216`.
+- Follow-up hotfix verification populated `effective_policy_id` and `binding_id` for the ready/enforce row on compute-1, generation `216`.
 - The fix has now been included in the formal stage-two agent egg and verified with the new live smoke scripts.

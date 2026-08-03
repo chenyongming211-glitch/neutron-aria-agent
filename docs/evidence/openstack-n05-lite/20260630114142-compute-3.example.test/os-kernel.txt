@@ -1,0 +1,22 @@
+host=compute-3.example.test
+
+Linux compute-3.example.test 4.18.0-553.5.1.el8_10.x86_64 #1 SMP Thu Jun 6 09:41:19 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux
+
+NAME="Rocky Linux"
+VERSION="8.6 (Green Obsidian)"
+ID="rocky"
+ID_LIKE="rhel centos fedora"
+VERSION_ID="8.6"
+PLATFORM_ID="platform:el8"
+PRETTY_NAME="Rocky Linux 8.6 (Green Obsidian)"
+ANSI_COLOR="0;32"
+CPE_NAME="cpe:/o:rocky:rocky:8:GA"
+HOME_URL="https://rockylinux.org/"
+BUG_REPORT_URL="https://bugs.rockylinux.org/"
+ROCKY_SUPPORT_PRODUCT="Rocky Linux"
+ROCKY_SUPPORT_PRODUCT_VERSION="8"
+REDHAT_SUPPORT_PRODUCT="Rocky Linux"
+REDHAT_SUPPORT_PRODUCT_VERSION="8"
+
+openstack 1.7.1
+2016.9.9

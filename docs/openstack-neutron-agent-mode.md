@@ -3874,9 +3874,9 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 正式开始写代码前，先确认：
 
 - 当前分支是 `v0.9-neutron-agent`。
-- 工作目录是 `/Users/chen/code/aria-firewall-v0.9-neutron-agent`。
-- remote 指向 `git@github.com:chenyongming211-glitch/aria-firewall.git`。
-- Git identity 使用 `netmouser <chenyongming211@gmail.com>`。
+- 在仓库根目录工作。
+- 使用已配置的 `origin` remote。
+- Git identity 读取仓库本地配置，不写入 tracked 文档。
 - 本地不运行 `cargo build`、`cargo check`、`cargo test`。
 - 代码提交后由 GitHub Actions 编译。
 - PR-1 前不需要 OpenStack 环境。
@@ -3897,9 +3897,9 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 通用默认：
 
 - 开发分支固定为 `v0.9-neutron-agent`。
-- 工作目录固定为 `/Users/chen/code/aria-firewall-v0.9-neutron-agent`。
-- remote 固定为 `git@github.com:chenyongming211-glitch/aria-firewall.git`。
-- 提交身份固定为 `netmouser <chenyongming211@gmail.com>`。
+- 工作目录固定为当前仓库根目录。
+- remote 使用已配置的 `origin`。
+- 提交身份使用仓库本地 Git 配置，不在文档中硬编码。
 - Rust 编译、测试和打包只通过 GitHub Actions 验证，本地不运行 `cargo build`、`cargo check`、`cargo test`。
 - 文档和 Python 单元测试可以本地执行。
 - 每个工作包完成后独立提交，提交信息使用 `docs:`、`feat:`、`test:` 或 `ci:`。

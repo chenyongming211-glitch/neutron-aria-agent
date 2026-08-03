@@ -1,0 +1,24 @@
+# guest command: set -x; ip route get 169.254.169.254 || true; wget -T 8 -S -O - http://169.254.169.254/latest/meta-data/instance-id; rc1=$?; echo META_INSTANCE_RC=$rc1; wget -T 8 -S -O - http://169.254.169.254/openstack/latest/meta_data.json | head -c 800; rc2=${PIPESTATUS:-$?}; echo; echo META_JSON_RC=$rc2; if [ "$rc1" = "0" ]; then exit 0; else exit "$rc1"; fi
+Warning: Permanently added '192.0.2.40' (ED25519) to the list of known hosts.
++ ip route get 169.254.169.254
+169.254.169.254 via 192.0.2.24 dev eth0  src 192.0.2.40
++ wget -T 8 -S -O - http://169.254.169.254/latest/meta-data/instance-id
+Connecting to 169.254.169.254 (169.254.169.254:80)
+  HTTP/1.1 500 Internal Server Error
+wget: server returned error: HTTP/1.1 500 Internal Server Error
+META_INSTANCE_RC=1
++ rc1=1
++ echo 'META_INSTANCE_RC=1'
++ head -c 800
++ wget -T 8 -S -O - http://169.254.169.254/openstack/latest/meta_data.json
+Connecting to 169.254.169.254 (169.254.169.254:80)
+  HTTP/1.1 500 Internal Server Error
+wget: server returned error: HTTP/1.1 500 Internal Server Error
+
+META_JSON_RC=0
++ rc2=0
++ echo
++ echo 'META_JSON_RC=0'
++ '[' 1 '=' 0 ]
++ exit 1
+# exit=1

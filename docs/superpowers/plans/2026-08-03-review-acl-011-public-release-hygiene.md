@@ -208,7 +208,7 @@ git commit -m "test: expose public release identifier leaks"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Capture hosted RED evidence**
+- [x] **Step 5: Capture hosted RED evidence**
 
 Run:
 
@@ -244,7 +244,7 @@ Expected: `fast-contracts` fails on the missing public policy/migration interfac
   - `collect_payload_hits(args: Iterable[str]) -> tuple[int, list[tuple[str, int]]]`
   - `migrate_paths(paths: Iterable[Path], root: Path) -> None`
 
-- [ ] **Step 1: Implement the shared encoded policy**
+- [x] **Step 1: Implement the shared encoded policy**
 
 Create `ci/public_release_policy.py`. Keep the existing four hex rules first so their numeric diagnostics remain stable, append the nine new encoded rules from Task 1, and implement these exact behaviors:
 
@@ -306,7 +306,7 @@ def scan_path(label):
 
 Add the existing ELF/text/binary-string discrimination from `check_payload_terms.py`, then implement recursive ZIP/TAR scanning over `io.BytesIO`. Every archive member runs `scan_path(member_label)` and `scan_payload(member_label, member_data, depth + 1)`. At depth greater than `_MAX_ARCHIVE_DEPTH`, fall back to the normal text/binary-string scan rather than silently accepting content.
 
-- [ ] **Step 2: Refactor both entry points onto the shared policy**
+- [x] **Step 2: Refactor both entry points onto the shared policy**
 
 In `ci/check_blocked_terms.py`:
 
@@ -352,7 +352,7 @@ def collect_payload_hits(args):
 
 The CLI retains the existing missing-path error and accepted-output text. Delete duplicate archive and binary scanning code.
 
-- [ ] **Step 3: Implement the deterministic migration script**
+- [x] **Step 3: Implement the deterministic migration script**
 
 Create `ci/anonymize_public_tree.py` with ordered encoded byte mappings. Apply complete FQDN before short host, and the address prefix as one mapping so every host octet and prefix length is preserved:
 
@@ -375,7 +375,7 @@ Handle the public repository owner separately: mask complete canonical HTTPS rep
 
 The CLI obtains the tracked set from `git ls-files -z`, migrates file content, then renames matched paths deepest-first. It prints counts only, never decoded source values.
 
-- [ ] **Step 4: Run the migration and rebuild tracked generated archives**
+- [x] **Step 4: Run the migration and rebuild tracked generated archives**
 
 Run:
 
@@ -388,7 +388,7 @@ cd ../../..
 
 Expected: tracked content and evidence paths use deterministic aliases; the tracked report archive contains only anonymized source files.
 
-- [ ] **Step 5: Repair semantic prose and public metadata after mechanical replacement**
+- [x] **Step 5: Repair semantic prose and public metadata after mechanical replacement**
 
 Review and use `apply_patch` for these exact files:
 
@@ -401,7 +401,7 @@ Review and use `apply_patch` for these exact files:
 
 Expected: no fake operational instruction remains after mechanical replacement, and canonical repository/Actions links still navigate correctly.
 
-- [ ] **Step 6: Run focused GREEN verification**
+- [x] **Step 6: Run focused GREEN verification**
 
 Run:
 
@@ -430,7 +430,14 @@ test "$before" = "$after"
 
 Expected: PASS with no additional changes.
 
-- [ ] **Step 7: Review the mechanical scope before commit**
+Execution note: `ci/check_smoke_python_blocks.py` reports three pre-existing
+heredoc-continuation false positives. The same failures were reproduced against
+the unmodified pre-migration `HEAD`; both affected shell files have no ACL-011
+diff and pass `bash -n`. This independent checker defect was not modified in
+this batch. All other commands above, the 557-test Python discovery, Stage 2/3
+contracts, N0.5 evidence, and three-host UDS evidence passed.
+
+- [x] **Step 7: Review the mechanical scope before commit**
 
 Run:
 
@@ -443,7 +450,7 @@ git diff -- ci/public_release_policy.py ci/check_blocked_terms.py ci/check_paylo
 
 Expected: policy code is reviewable separately; the remaining large diff is deterministic replacement/rename output with no ACL/runtime behavior change.
 
-- [ ] **Step 8: Commit and push GREEN**
+- [x] **Step 8: Commit and push GREEN**
 
 ```bash
 git add -A

@@ -2,7 +2,7 @@
 
 Date: 2026-07-03
 
-Host: `ostack2.bj159.net`
+Host: `compute-1.example.test`
 
 Target VM: `wp-test`
 
@@ -10,12 +10,12 @@ Target port: `86b83885-671f-474c-9556-8af98cf1cdc8`
 
 Target tap: `tap86b83885-67`
 
-Target IP: `10.58.159.26`
+Target IP: `192.0.2.26`
 
 Remote evidence directory:
 
 ```text
-/var/tmp/neutron-aria-acl-live-20260703100417-ostack2.bj159.net
+/var/tmp/neutron-aria-acl-live-20260703100417-compute-1.example.test
 ```
 
 ## Scope
@@ -41,7 +41,7 @@ policy default_action = allow
 rule direction        = ingress
 rule action           = drop
 rule protocol         = icmp
-rule src_cidr         = 10.58.159.2/32
+rule src_cidr         = 192.0.2.2/32
 binding target_type   = port
 binding target_id     = 86b83885-671f-474c-9556-8af98cf1cdc8
 ```
@@ -53,7 +53,7 @@ All temporary `aria_acl` policy/rule/binding objects were deleted during rollbac
 Baseline:
 
 ```text
-ping 10.58.159.26: 3 transmitted, 3 received, 0% packet loss
+ping 192.0.2.26: 3 transmitted, 3 received, 0% packet loss
 target status: not_requested / bypass
 generation: 189
 ```
@@ -64,7 +64,7 @@ After ACL apply:
 snapshot generation 190 submitted
 target status: ready / enforce
 datapath policy: icmp drop present on tap86b83885-67
-ping 10.58.159.26: 3 transmitted, 0 received, 100% packet loss
+ping 192.0.2.26: 3 transmitted, 0 received, 100% packet loss
 ```
 
 After rollback:
@@ -72,7 +72,7 @@ After rollback:
 ```text
 target status: not_requested / bypass
 datapath policies: []
-ping 10.58.159.26: recovered to 0% packet loss
+ping 192.0.2.26: recovered to 0% packet loss
 final API status generation: 192
 ```
 

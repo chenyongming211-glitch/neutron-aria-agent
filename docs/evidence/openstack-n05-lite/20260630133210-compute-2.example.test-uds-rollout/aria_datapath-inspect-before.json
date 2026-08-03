@@ -1,0 +1,293 @@
+[
+    {
+        "Id": "d05ba065559af35da73d99e1707f940f8bdfd8ee1fb8d6a214b6a20e01d610f3",
+        "Created": "2026-06-26T02:04:55.493432571Z",
+        "Path": "dumb-init",
+        "Args": [
+            "--single-child",
+            "--",
+            "kolla_start"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 2123834,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-06-26T02:04:55.697284878Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:ba7d51becb8a86d4916fdc9e36f02b0e0130c5f3733afa806b0fb1b3c85f39fe",
+        "ResolvConfPath": "/data/docker/containers/d05ba065559af35da73d99e1707f940f8bdfd8ee1fb8d6a214b6a20e01d610f3/resolv.conf",
+        "HostnamePath": "/data/docker/containers/d05ba065559af35da73d99e1707f940f8bdfd8ee1fb8d6a214b6a20e01d610f3/hostname",
+        "HostsPath": "/data/docker/containers/d05ba065559af35da73d99e1707f940f8bdfd8ee1fb8d6a214b6a20e01d610f3/hosts",
+        "LogPath": "/data/docker/containers/d05ba065559af35da73d99e1707f940f8bdfd8ee1fb8d6a214b6a20e01d610f3/d05ba065559af35da73d99e1707f940f8bdfd8ee1fb8d6a214b6a20e01d610f3-json.log",
+        "Name": "/aria_datapath",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/sys/fs/bpf:/sys/fs/bpf:shared",
+                "/var/lib/aria-agent-smoke:/var/lib/aria-agent:rw",
+                "/sys/kernel/btf/vmlinux:/sys/kernel/btf/vmlinux:ro",
+                "/etc/kolla/aria-datapath/:/var/lib/kolla/config_files/:ro",
+                "/etc/localtime:/etc/localtime:ro",
+                "kolla_logs:/var/log/kolla/:rw",
+                "/run/aria:/run/aria:rw",
+                "/run/openvswitch:/run/openvswitch:shared"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {
+                    "max-file": "30",
+                    "max-size": "10m"
+                }
+            },
+            "NetworkMode": "host",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "unless-stopped",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "host",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "host",
+            "Privileged": true,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": [
+                "label=disable"
+            ],
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "KernelMemory": 0,
+            "KernelMemoryTCP": 0,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": false,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": null,
+            "ReadonlyPaths": null
+        },
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/data/docker/overlay2/a88fa3390fc6e2de5f7b5d661cbd4b9112d425602474017111c30c63bf86f022-init/diff:/data/docker/overlay2/fcb086644277e4cfcd18468ae82420f768c5d058b5f1db02cfdeb6ce75406ec3/diff:/data/docker/overlay2/d8a01347046d8e16401bdbf3bc5769c128b8c9a56e6e61d4fc1ccc1c42da2842/diff:/data/docker/overlay2/5d4e65ed318bdc3dc0b51961ecc6c48c35a69f675d50e55ad5672cc9f7ba3ddd/diff:/data/docker/overlay2/2d435142518f5a88fa1b8059632ec96778e3968674a4827ba018880668a10e5a/diff:/data/docker/overlay2/47abf8aa47c05f584018a085a2d062c55f8656a064c693647d0343bf67ca7569/diff:/data/docker/overlay2/76f493c17e3d731d5fec2f2c9b71a855a78de022cd64563a4a0a1db425c600c8/diff:/data/docker/overlay2/924d4d82698e26655493fe2f7d6948a5117ef9a21a49a4b09a6f5b2ab9eed4ed/diff:/data/docker/overlay2/cc155bbad7ec302e0ff8bee3429747289c71f5390bf80c779e63b6dbe946b9ca/diff:/data/docker/overlay2/5e6455c019adb942f88ab604e293796e7f83879c1b7e5e4fc4cbe0162d38b537/diff:/data/docker/overlay2/26a05f409ca3c8bbd1971ea312f6f7778298bac4cd00451e0a69093768056090/diff:/data/docker/overlay2/c8e6df81b8a6b8eafa0495a78bfd1db1211c646f2abdce2df19c3fcd76c39153/diff:/data/docker/overlay2/03b1e79e21f9712e39ccbb4a894a5c4b0e563aaab70489dd678ab3dd74a572c1/diff:/data/docker/overlay2/c11749958413b9058b8c9ef53f917e84f57462c7b65b153e739fc58178830f73/diff:/data/docker/overlay2/1fea114eaaf97dcf90ae2638ebc916145fb8d4ac9e55f96a0ae563f5004e8f8b/diff:/data/docker/overlay2/97c2395f3c0a6f3cb27e53b8bef788745d210ff7fb145b71b11f64a1d01092ce/diff:/data/docker/overlay2/0a8d28c7913b7589cfcbb4d053e6b83e280e32ca29b35a801cde4f0e41d9a441/diff:/data/docker/overlay2/a24a131e8aea79cc85dfafd7b6a41f9fe374d16d9cf5d9df1c7d306bdeb7ddcf/diff:/data/docker/overlay2/9ab5d4c5cd35230c2934b81ac7df17480fd08968adf5668844c357e3631066ee/diff:/data/docker/overlay2/9f980837d075fb8168a3f70378d2d058b5bc087227605e0ba71adb7e3a1a8ba5/diff:/data/docker/overlay2/f93d1041d8e7eddaa40e81b28108d13b8eab2579180c7fd79726137d6ee69f20/diff:/data/docker/overlay2/a9d325e5fd62c4527f9dbdcf23eb964fe2c32c3932d25dc05fe195a22993ffc1/diff:/data/docker/overlay2/d9991d199a85782f17744e8574bf994890cd1958222432d3eb5ab85d8c83db00/diff:/data/docker/overlay2/8e9b7ad67d7ab4ee3db64d1186c9093543ef3bea3a8c5ce4f3fd99fc2def4da3/diff",
+                "MergedDir": "/data/docker/overlay2/a88fa3390fc6e2de5f7b5d661cbd4b9112d425602474017111c30c63bf86f022/merged",
+                "UpperDir": "/data/docker/overlay2/a88fa3390fc6e2de5f7b5d661cbd4b9112d425602474017111c30c63bf86f022/diff",
+                "WorkDir": "/data/docker/overlay2/a88fa3390fc6e2de5f7b5d661cbd4b9112d425602474017111c30c63bf86f022/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Name": "kolla_logs",
+                "Source": "/data/docker/volumes/kolla_logs/_data",
+                "Destination": "/var/log/kolla",
+                "Driver": "local",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": ""
+            },
+            {
+                "Type": "bind",
+                "Source": "/run/aria",
+                "Destination": "/run/aria",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/run/openvswitch",
+                "Destination": "/run/openvswitch",
+                "Mode": "shared",
+                "RW": true,
+                "Propagation": "shared"
+            },
+            {
+                "Type": "volume",
+                "Name": "65af337e71de6cc7af2709c6db4ab4faaeee77131ed699516a46a674ed3a24d7",
+                "Source": "/data/docker/volumes/65af337e71de6cc7af2709c6db4ab4faaeee77131ed699516a46a674ed3a24d7/_data",
+                "Destination": "/sys/fs/cgroup",
+                "Driver": "local",
+                "Mode": "",
+                "RW": true,
+                "Propagation": ""
+            },
+            {
+                "Type": "bind",
+                "Source": "/sys/fs/bpf",
+                "Destination": "/sys/fs/bpf",
+                "Mode": "shared",
+                "RW": true,
+                "Propagation": "shared"
+            },
+            {
+                "Type": "bind",
+                "Source": "/var/lib/aria-agent-smoke",
+                "Destination": "/var/lib/aria-agent",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/sys/kernel/btf/vmlinux",
+                "Destination": "/sys/kernel/btf/vmlinux",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/etc/localtime",
+                "Destination": "/etc/localtime",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/etc/kolla/aria-datapath",
+                "Destination": "/var/lib/kolla/config_files",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "compute-2.example.test",
+            "Domainname": "",
+            "User": "root",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "KOLLA_CONFIG_STRATEGY=COPY_ALWAYS",
+                "KOLLA_SERVICE_NAME=aria-datapath",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "container=docker"
+            ],
+            "Cmd": [
+                "kolla_start"
+            ],
+            "Image": "aria-datapath:59c6dd1",
+            "Volumes": {
+                "/sys/fs/cgroup": {}
+            },
+            "WorkingDir": "",
+            "Entrypoint": [
+                "dumb-init",
+                "--single-child",
+                "--"
+            ],
+            "OnBuild": null,
+            "Labels": {
+                "org.label-schema.build-date": "20201113",
+                "org.label-schema.license": "GPLv2",
+                "org.label-schema.name": "CentOS Base Image",
+                "org.label-schema.schema-version": "1.0",
+                "org.label-schema.vendor": "CentOS",
+                "org.opencontainers.image.created": "2020-11-13 00:00:00+00:00",
+                "org.opencontainers.image.licenses": "GPL-2.0-only",
+                "org.opencontainers.image.title": "CentOS Base Image",
+                "org.opencontainers.image.vendor": "CentOS"
+            }
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "6405ab53ea379c6b50f74bc632431fc0502876049a5e13a40c6b042962bec894",
+            "HairpinMode": false,
+            "LinkLocalIPv6Address": "",
+            "LinkLocalIPv6PrefixLen": 0,
+            "Ports": {},
+            "SandboxKey": "/var/run/docker/netns/default",
+            "SecondaryIPAddresses": null,
+            "SecondaryIPv6Addresses": null,
+            "EndpointID": "",
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {
+                "host": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "NetworkID": "b6d2f42e65894bf64a5ad3e0733d4e7c375c373fab8934d865ccec1fba6df15d",
+                    "EndpointID": "09c5422722e45ec2f961e3d4590e3b0d2b675c7bf396bddbb8b6bc7a3fa70032",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "MacAddress": "",
+                    "DriverOpts": null
+                }
+            }
+        }
+    }
+]

@@ -1,3 +1,0 @@
-host=ostack2.bj159.net host_ports=8 compute_ports=5
-vnic_type_counts=normal:8
-unsupported_vnic_types=baremetal,direct,direct-physical,macvtap,virtio-forwarder

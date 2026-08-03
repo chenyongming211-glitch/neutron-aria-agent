@@ -1,0 +1,78 @@
+# setup
+## upload image
++------------------+----------------------------------------------------------------------------------+
+| Property         | Value                                                                            |
++------------------+----------------------------------------------------------------------------------+
+| checksum         | 482d28abc35fc57595d42d6b085968f0                                                 |
+| container_format | bare                                                                             |
+| created_at       | 2026-06-30T06:52:07Z                                                             |
+| direct_url       | rbd://1f0b2982-5efb-11f1-9c9a-                                                   |
+|                  | b4055dfa274d/rbd/1c09374a-3785-4a17-87c4-98bfae57f1b3/snap                       |
+| disk_format      | raw                                                                              |
+| id               | 1c09374a-3785-4a17-87c4-98bfae57f1b3                                             |
+| min_disk         | 0                                                                                |
+| min_ram          | 0                                                                                |
+| name             | aria-n05-cirros-raw-0.6.3-20260630-1452                                          |
+| owner            | 4ab07915da65403db282a4e210321ae1                                                 |
+| protected        | False                                                                            |
+| size             | 117440512                                                                        |
+| status           | active                                                                           |
+| tags             | []                                                                               |
+| updated_at       | 2026-06-30T06:52:12Z                                                             |
+| virtual_size     | None                                                                             |
+| visibility       | public                                                                           |
++------------------+----------------------------------------------------------------------------------+
+image_id=1c09374a-3785-4a17-87c4-98bfae57f1b3
+image_name=aria-n05-cirros-raw-0.6.3-20260630-1452
+## keypair
+keypair=aria-stage2-n05-cirros-20260630-1452
+key_path=/tmp/aria-stage2-n05-cirros-20260630-1452.rsa
+## boot
++--------------------------------------+--------------------------------------------------------------------------------+
+| Property                             | Value                                                                          |
++--------------------------------------+--------------------------------------------------------------------------------+
+| OS-DCF:diskConfig                    | MANUAL                                                                         |
+| OS-EXT-AZ:availability_zone          | nova                                                                           |
+| OS-EXT-SRV-ATTR:host                 | -                                                                              |
+| OS-EXT-SRV-ATTR:hypervisor_hostname  | -                                                                              |
+| OS-EXT-SRV-ATTR:instance_name        | instance-0000001e                                                              |
+| OS-EXT-STS:power_state               | 0                                                                              |
+| OS-EXT-STS:task_state                | scheduling                                                                     |
+| OS-EXT-STS:vm_state                  | building                                                                       |
+| OS-SRV-USG:launched_at               | -                                                                              |
+| OS-SRV-USG:terminated_at             | -                                                                              |
+| accessIPv4                           |                                                                                |
+| accessIPv6                           |                                                                                |
+| config_drive                         | True                                                                           |
+| created                              | 2026-06-30T06:52:15Z                                                           |
+| deleted                              |                                                                                |
+| flavor                               | m1.small (2)                                                                   |
+| hostId                               |                                                                                |
+| id                                   | fe29ab91-eedf-48c8-8636-ab489acd4fed                                           |
+| image                                | aria-n05-cirros-raw-0.6.3-20260630-1452 (1c09374a-3785-4a17-87c4-98bfae57f1b3) |
+| key_name                             | aria-stage2-n05-cirros-20260630-1452                                           |
+| metadata                             | {"disk_type": "disk0"}                                                         |
+| name                                 | aria-stage2-n05-cirros-egress-20260630-1452                                    |
+| os-extended-volumes:volumes_attached | []                                                                             |
+| progress                             | 0                                                                              |
+| reclaim                              |                                                                                |
+| security_groups                      | default                                                                        |
+| status                               | BUILD                                                                          |
+| tenant_id                            | 4ab07915da65403db282a4e210321ae1                                               |
+| updated                              | 2026-06-30T06:52:15Z                                                           |
+| user_id                              | fccc2c97665d4a8b9036f3bac4d71088                                               |
++--------------------------------------+--------------------------------------------------------------------------------+
+server_name=aria-stage2-n05-cirros-egress-20260630-1452
+## wait active
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452 | BUILD  | spawning   | NOSTATE     |          |
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452 | BUILD  | spawning   | NOSTATE     | flat_mgt=192.0.2.35 |
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452 | ACTIVE | -          | Running     | flat_mgt=192.0.2.35 |
+server_id=fe29ab91-eedf-48c8-8636-ab489acd4fed
+vm_ip=192.0.2.35
++--------------------------------------+------+-------------------+-------------------------------------------------------------------------------------+
+| id                                   | name | mac_address       | fixed_ips                                                                           |
++--------------------------------------+------+-------------------+-------------------------------------------------------------------------------------+
+| 74edc260-dccd-4953-9915-9b0149729ffe |      | fa:16:3e:f9:5f:05 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "192.0.2.35"} |
++--------------------------------------+------+-------------------+-------------------------------------------------------------------------------------+
+port_id=74edc260-dccd-4953-9915-9b0149729ffe
+ifname=tap74edc260-dc

@@ -154,7 +154,7 @@ Enable in this order:
    ```
 
    The 2026-06-30 G4 discovery evidence is accepted with zero `fail` across
-   `ostack2/3/4`. QoS and Trunk are explicitly `unsupported` in the target
+   `compute-1/3/4`. QoS and Trunk are explicitly `unsupported` in the target
    environment. Q0 refreshed the `tc` detail: host shells lack `tc`, but the
    relevant Kolla containers include `tc` and can read qdisc; shaping still
    needs a separate write/rollback smoke before it can be claimed. UDS peercred
@@ -177,8 +177,8 @@ Enable in this order:
 
    The evidence records `neutron_aria_agent` UID/GID `42435` and groups
    `42435 42400` on all three hosts. It also includes reversible hardened
-   rollout proofs on `ostack2.bj159.net`, `ostack3.bj159.net`, and
-   `ostack4.bj159.net`: the peercred-enabled datapath image tightened the
+   rollout proofs on `compute-1.example.test`, `compute-2.example.test`, and
+   `compute-3.example.test`: the peercred-enabled datapath image tightened the
    socket to `root:42435 0660`, accepted a UDS probe from the `neutron` user,
    wrote an allow audit record, and restored the original container/config.
    Persistent hardened rollout across all target hosts remains a separate
@@ -291,7 +291,7 @@ Enable in this order:
    docs/evidence/openstack-n05-lite/2026-06-30-g7-rollback-summary.md
    ```
 
-   This closes the first external-to-VM rollback evidence on `ostack2`,
+   This closes the first external-to-VM rollback evidence on `compute-1`,
    including `neutron-aria-agent` and `aria-datapath` stop/restart connectivity;
    full N0.5 still requires VM-to-external direction, DHCP/metadata/IPv6 ND
    bypass evidence.
@@ -352,7 +352,7 @@ Field evidence from 2026-06-29 is recorded in
 This evidence advances the stage-two ACL MVP gate only. It does not complete
 full N0.5, does not enable QoS/Mirror, and does not open RabbitMQ event
 consumption. UDS peercred hooks are present as a stage-one hardening gate, and
-`ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` have
+`compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test` have
 reversible `REQUIRE_HARDENED=true` proofs. Persistent site-level enforcement
 remains closed until the peercred-enabled datapath image and hardened socket
 config are rolled out across the target hosts.
@@ -416,7 +416,7 @@ Before enabling RPC events on a production host, require all of the following:
 | --- | --- |
 | package preflight | `deploy/kolla/smoke/neutron_aria_rpc_event_smoke.sh` passes on the installed package. |
 | live fanout A/B | `rpc_events_enabled=false` ignores the test fanout and `true` consumes it. |
-| multi-host locality | Foreign-host fanout on `ostack2/3/4` does not mutate local managed ports. |
+| multi-host locality | Foreign-host fanout on `compute-1/3/4` does not mutate local managed ports. |
 | source cleanup | A previously projected local port moved to another host is deleted locally with `migration_source_cleanup`. |
 | recovery baseline | Polling full-resync, UDS status, and rollback/delete cleanup are already passing. |
 

@@ -349,7 +349,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
         plugin.report_aria_acl_port_status(None, {
             "port_id": "port-1",
-            "host": "ostack2",
+            "host": "compute-1",
             "effective_policy_id": "policy-1",
             "binding_id": "binding-1",
             "status": "ready",
@@ -361,7 +361,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "device_owner": "compute:nova",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
         }
 
         projected = plugin.extend_aria_acl_port_dict(port)
@@ -374,7 +374,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual("binding-1", projected["aria_acl_binding_id"])
         self.assertEqual(1, projected["aria_acl_effective_revision"])
         self.assertEqual("applied", projected["aria_acl_runtime_status"])
-        self.assertEqual("ostack2", projected["aria_acl_runtime_host"])
+        self.assertEqual("compute-1", projected["aria_acl_runtime_host"])
         self.assertEqual("ready", projected["aria_acl_runtime_reason"])
 
     def test_port_summary_does_not_reuse_runtime_from_previous_host(self):
@@ -430,7 +430,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
         plugin.report_aria_acl_port_status(None, {
             "port_id": "port-1",
-            "host": "ostack2",
+            "host": "compute-1",
             "effective_policy_id": "policy-1",
             "binding_id": "binding-1",
             "status": "ready",
@@ -442,13 +442,13 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "device_owner": "compute:nova",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
         }
 
         plugin.extend_aria_acl_port_dict(port)
 
         self.assertEqual("unknown", port["aria_acl_runtime_status"])
-        self.assertEqual("ostack2", port["aria_acl_runtime_host"])
+        self.assertEqual("compute-1", port["aria_acl_runtime_host"])
         self.assertEqual("status_stale", port["aria_acl_runtime_reason"])
 
     def test_port_summary_rejects_runtime_for_previous_effective_policy(self):
@@ -466,7 +466,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
         plugin.report_aria_acl_port_status(None, {
             "port_id": "port-1",
-            "host": "ostack2",
+            "host": "compute-1",
             "effective_policy_id": "old-policy",
             "binding_id": "old-binding",
             "status": "ready",
@@ -477,13 +477,13 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "device_owner": "compute:nova",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
         }
 
         plugin.extend_aria_acl_port_dict(port)
 
         self.assertEqual("pending", port["aria_acl_runtime_status"])
-        self.assertEqual("ostack2", port["aria_acl_runtime_host"])
+        self.assertEqual("compute-1", port["aria_acl_runtime_host"])
         self.assertEqual(
             "status_projection_mismatch",
             port["aria_acl_runtime_reason"],
@@ -497,7 +497,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "device_owner": "compute:nova",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
         }
 
         plugin.extend_aria_acl_port_dict(port)
@@ -533,7 +533,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "device_owner": "compute:nova",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
-                "binding:host_id": "ostack2",
+                "binding:host_id": "compute-1",
             },
             {
                 "id": "port-2",
@@ -541,7 +541,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "device_owner": "compute:nova",
                 "binding:vif_type": "ovs",
                 "binding:vnic_type": "normal",
-                "binding:host_id": "ostack3",
+                "binding:host_id": "compute-2",
             },
         ]
         core = FakeCorePlugin(ports)
@@ -592,7 +592,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "device_owner": "compute:nova",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
         }])
         install_legacy_port_projection(plugin, core_plugin=core)
 
@@ -623,7 +623,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "device_owner": "compute:nova",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
-            "binding:host_id": "ostack2",
+            "binding:host_id": "compute-1",
         }])
         install_legacy_port_projection(plugin, core_plugin=core)
 
@@ -734,7 +734,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
     def test_multi_host_legacy_status_show_is_conflict(self):
         plugin = AriaAclPlugin(now=lambda: 200.0)
-        for host in ("ostack2", "ostack3"):
+        for host in ("compute-1", "compute-2"):
             plugin.report_aria_acl_port_status(None, {
                 "aria_acl_port_status": {
                     "port_id": "port-1",
@@ -756,7 +756,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "the versioned status identity contract must exist",
         )
         plugin = AriaAclPlugin(now=lambda: 200.0)
-        for host in ("ostack2", "ostack3"):
+        for host in ("compute-1", "compute-2"):
             plugin.report_aria_acl_port_status(None, {
                 "aria_acl_port_status": {
                     "port_id": "port-1",
@@ -764,10 +764,10 @@ class AriaAclPluginTestCase(unittest.TestCase):
                     "status": "ready",
                 }
             })
-        exact_id = query_contract.encode_port_status_id("port-1", "ostack3")
+        exact_id = query_contract.encode_port_status_id("port-1", "compute-2")
         status = plugin.get_aria_acl_port_status(None, exact_id)
         self.assertIsNotNone(status)
-        self.assertEqual("ostack3", status["host"])
+        self.assertEqual("compute-2", status["host"])
 
     def test_missing_status_for_explicit_host_remains_none(self):
         plugin = AriaAclPlugin(now=lambda: 200.0)
@@ -776,7 +776,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             plugin.get_aria_acl_port_status(
                 None,
                 "port-missing",
-                host="ostack2",
+                host="compute-1",
             )
         )
 
@@ -784,7 +784,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         from neutron_aria.db.aria_acl.query import encode_port_status_id
 
         plugin = AriaAclPlugin(now=lambda: 200.0)
-        for host in ("ostack2", "ostack3"):
+        for host in ("compute-1", "compute-2"):
             plugin.report_aria_acl_port_status(None, {
                 "port_id": "port-1",
                 "host": host,
@@ -793,20 +793,20 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
         plugin.delete_aria_acl_port_status(
             None,
-            encode_port_status_id("port-1", "ostack2"),
+            encode_port_status_id("port-1", "compute-1"),
         )
 
         statuses = plugin.get_aria_acl_port_statuses(
             None,
             filters={"port_id": ["port-1"]},
         )
-        self.assertEqual(["ostack3"], [status["host"] for status in statuses])
+        self.assertEqual(["compute-2"], [status["host"] for status in statuses])
 
     def test_derived_status_id_update_changes_only_exact_host(self):
         from neutron_aria.db.aria_acl.query import encode_port_status_id
 
         plugin = AriaAclPlugin(now=lambda: 200.0)
-        for host in ("ostack2", "ostack3"):
+        for host in ("compute-1", "compute-2"):
             plugin.report_aria_acl_port_status(None, {
                 "port_id": "port-1",
                 "host": host,
@@ -815,24 +815,24 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
         updated = plugin.update_aria_acl_port_status(
             None,
-            encode_port_status_id("port-1", "ostack3"),
+            encode_port_status_id("port-1", "compute-2"),
             {"status": "degraded"},
         )
 
-        self.assertEqual("ostack3", updated["host"])
+        self.assertEqual("compute-2", updated["host"])
         self.assertEqual("degraded", updated["status"])
         self.assertEqual(
             "ready",
             plugin.get_aria_acl_port_status(
                 None,
                 "port-1",
-                host="ostack2",
+                host="compute-1",
             )["status"],
         )
 
     def test_legacy_status_delete_removes_all_hosts(self):
         plugin = AriaAclPlugin(now=lambda: 200.0)
-        for host in ("ostack2", "ostack3"):
+        for host in ("compute-1", "compute-2"):
             plugin.report_aria_acl_port_status(None, {
                 "port_id": "port-1",
                 "host": host,
@@ -956,7 +956,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "protocol": "tcp",
                 "dst_port_min": 22,
                 "dst_port_max": 22,
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             }
         })
         plugin.create_aria_acl_binding(None, {
@@ -990,7 +990,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         plugin.create_aria_acl_address_set(None, {
             "id": "set-1",
             "project_id": "project-1",
-            "members": [{"address": "10.58.159.2/32"}],
+            "members": [{"address": "192.0.2.2/32"}],
         })
         plugin.create_aria_acl_rule(None, {
             "id": "rule-1",
@@ -1014,7 +1014,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
         rule = plugin.update_aria_acl_rule(None, "rule-1", {"priority": 90})
         address_set = plugin.update_aria_acl_address_set(None, "set-1", {
-            "members": [{"address": "10.58.159.3/32"}],
+            "members": [{"address": "192.0.2.3/32"}],
         })
         binding = plugin.update_aria_acl_binding(None, "binding-1", {
             "enabled": False,
@@ -1040,7 +1040,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
         self.assertEqual("allow", result["default_action"])
         self.assertEqual(90, result["rules"][0]["priority"])
-        self.assertEqual(["10.58.159.3/32"], result["rules"][0]["src_cidrs"])
+        self.assertEqual(["192.0.2.3/32"], result["rules"][0]["src_cidrs"])
 
         plugin.delete_aria_acl_binding(None, "binding-1")
         plugin.delete_aria_acl_rule(None, "rule-1")
@@ -1135,7 +1135,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         plugin.create_aria_acl_address_set(None, {
             "id": "set-1",
             "project_id": "project-1",
-            "members": [{"address": "10.58.159.2/32"}],
+            "members": [{"address": "192.0.2.2/32"}],
         })
         plugin.create_aria_acl_rule(None, {
             "id": "rule-1",
@@ -1468,7 +1468,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "priority": 100,
                 "action": "drop",
                 "protocol": "icmp",
-                "src_cidr": "10.58.159.2/32",
+                "src_cidr": "192.0.2.2/32",
             })
             plugin.create_aria_acl_binding(None, {
                 "id": "binding-1",
@@ -1589,9 +1589,9 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
             from neutron_aria.db.aria_acl.query import PortStatusProjection
             for port_id, host in (
-                ("port-1", "ostack2"),
-                ("port-1", "ostack3"),
-                ("port-2", "ostack2"),
+                ("port-1", "compute-1"),
+                ("port-1", "compute-2"),
+                ("port-2", "compute-1"),
             ):
                 repository.upsert_port_status({
                     "port_id": port_id,
@@ -1628,7 +1628,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         try:
             repository = SqliteAriaAclRepository(path)
             plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
-            for host in ("ostack2", "ostack3"):
+            for host in ("compute-1", "compute-2"):
                 plugin.report_aria_acl_port_status(None, {
                     "port_id": "port-1",
                     "host": host,
@@ -1637,14 +1637,14 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
             with self.assertRaises(AriaAclConflict):
                 plugin.get_aria_acl_port_status(None, "port-1")
-            exact_id = encode_port_status_id("port-1", "ostack3")
+            exact_id = encode_port_status_id("port-1", "compute-2")
             self.assertEqual(
-                "ostack3",
+                "compute-2",
                 plugin.get_aria_acl_port_status(None, exact_id)["host"],
             )
             plugin.delete_aria_acl_port_status(None, exact_id)
             self.assertEqual(
-                "ostack2",
+                "compute-1",
                 plugin.get_aria_acl_port_status(None, "port-1")["host"],
             )
             repository.close()

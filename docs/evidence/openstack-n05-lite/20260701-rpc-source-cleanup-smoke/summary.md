@@ -17,17 +17,17 @@ deploy/kolla/smoke/neutron_aria_rpc_source_cleanup_smoke.sh
 
 | Host | Simulated new binding host | Result | Evidence work directory |
 | --- | --- | --- | --- |
-| `ostack2.bj159.net` | `ostack3.bj159.net` | pass | `/tmp/neutron-aria-rpc-source-cleanup-20260701174920` |
+| `compute-1.example.test` | `compute-2.example.test` | pass | `/tmp/neutron-aria-rpc-source-cleanup-20260701174920` |
 
 ## Observed Signals
 
 - Temporary agent used `rpc_events_enabled=true`, `full_resync_enabled=true`,
   and `port_source=neutronclient`.
-- Startup full-resync projected 5 local managed ports on `ostack2.bj159.net`.
+- Startup full-resync projected 5 local managed ports on `compute-1.example.test`.
 - The smoke selected local projected port
   `39adf570-1acb-4e81-9215-96744a6bf627`.
 - A real Neutron ML2 `AgentNotifierApi.port_update()` fanout was sent for that
-  port with `binding:host_id=ostack3.bj159.net`.
+  port with `binding:host_id=compute-2.example.test`.
 - The agent logged:
 
 ```text

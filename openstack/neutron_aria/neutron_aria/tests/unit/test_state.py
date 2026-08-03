@@ -22,7 +22,7 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
     def _snapshot(self, port_id="p1"):
         return {
             "generation": 999,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [{
                 "port_id": port_id,
                 "ifname": "tap%s" % port_id,
@@ -79,7 +79,7 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         store = SnapshotStateStore(self.state_dir)
         prepared = store.prepare_snapshot({
             "generation": 1,
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [
                 self._snapshot("p1")["ports"][0],
                 self._snapshot("p2")["ports"][0],
@@ -101,7 +101,7 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
     def test_pending_snapshot_records_restart_scope_and_affected_ports(self):
         store = SnapshotStateStore(self.state_dir)
         full_snapshot = {
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [
                 self._snapshot("p1")["ports"][0],
                 self._snapshot("p2")["ports"][0],
@@ -302,7 +302,7 @@ class StatusContractStateRedTestCase(unittest.TestCase):
 
     def _snapshot(self, port_ids):
         return {
-            "host": "ostack2",
+            "host": "compute-1",
             "ports": [
                 {
                     "port_id": port_id,

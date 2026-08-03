@@ -72,7 +72,7 @@ Add an `instance_info_reports_` test asserting `acl_ready == true` while `cleanu
 
 ```bash
 git add core/src/state.rs agent/src/control_plane.rs api/src/lib.rs docs/superpowers/plans/2026-07-19-acl-059-bitmap-cleanup-quarantine.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "test: define ACL bitmap cleanup recovery"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "test: define ACL bitmap cleanup recovery"
 git push origin v0.9-neutron-agent
 ```
 
@@ -184,7 +184,7 @@ Confirm there is no new generic transaction framework, no Python checker, no unr
 
 ```bash
 git add core/src/state.rs agent/src/control_plane.rs agent/src/control_plane/standalone_acl.rs agent/src/api_handlers/policies.rs api/src/lib.rs
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fix: recover standalone ACL bitmap cleanup"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "fix: recover standalone ACL bitmap cleanup"
 git push origin v0.9-neutron-agent
 ```
 
@@ -200,7 +200,7 @@ Update `REVIEW-ACL-059` only after exact-head CI is green. Record RED commit/run
 
 ```bash
 git add docs/openstack-neutron-aria-details/12-review-bug-backlog.md docs/superpowers/plans/2026-07-19-acl-059-bitmap-cleanup-quarantine.md
-git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "docs: record ACL bitmap cleanup evidence"
+git -c user.name=repository-maintainer -c user.email=maintainers@example.invalid commit -m "docs: record ACL bitmap cleanup evidence"
 git push origin v0.9-neutron-agent
 ```
 

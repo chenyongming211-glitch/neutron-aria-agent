@@ -7,18 +7,18 @@ accepted for the stage-two N0.5 gate.
 
 | Direction | Evidence Path | Result |
 | --- | --- | --- |
-| external/host -> VM | `docs/evidence/openstack-n05-lite/20260630115838-ostack2.bj159.net/` | pass |
-| VM -> external/host | `docs/evidence/openstack-n05-lite/20260630145200-ostack2.bj159.net-cirros-vm-egress-final/` | pass, with manual post-timeout verification |
+| external/host -> VM | `docs/evidence/openstack-n05-lite/20260630115838-compute-1.example.test/` | pass |
+| VM -> external/host | `docs/evidence/openstack-n05-lite/20260630145200-compute-1.example.test-cirros-vm-egress-final/` | pass, with manual post-timeout verification |
 
 The accepted rollback smoke applied an ACL full-resync to
 `86b83885-671f-474c-9556-8af98cf1cdc8` / `tap86b83885-67`, blocked ICMP from
-`10.58.159.2/32` to VM `10.58.159.26`, deleted all managed ports through UDS,
+`192.0.2.2/32` to VM `192.0.2.26`, deleted all managed ports through UDS,
 and confirmed post-rollback connectivity.
 
 The accepted VM-originated egress evidence used a temporary CirrOS raw image and
-a short-lived VM `10.58.159.35` on `ostack2.bj159.net`. SSH key injection was
-verified, a guest-side ping loop generated ICMP from `10.58.159.35` to
-`10.58.159.2`, and host-side tcpdump proved:
+a short-lived VM `192.0.2.35` on `compute-1.example.test`. SSH key injection was
+verified, a guest-side ping loop generated ICMP from `192.0.2.35` to
+`192.0.2.2`, and host-side tcpdump proved:
 
 - before ACL: ICMP echo request captured;
 - after egress ACL generation `85` reached UDS `ready`: no matching ICMP packet
@@ -35,10 +35,10 @@ files were removed after the evidence run; Nova keeps deleted audit records.
 
 | Probe | Evidence Path | Result |
 | --- | --- | --- |
-| host ping VM with `ACL_DIRECTION=egress` | `docs/evidence/openstack-n05-lite/20260630121023-ostack2.bj159.net/` | fail, not accepted as VM-to-external evidence |
+| host ping VM with `ACL_DIRECTION=egress` | `docs/evidence/openstack-n05-lite/20260630121023-compute-1.example.test/` | fail, not accepted as VM-to-external evidence |
 
 This probe successfully submitted generation `84` and installed a datapath ACL
-policy with `direction=ingress`, `dst_group=10.58.159.2/32`, then rolled back to
+policy with `direction=ingress`, `dst_group=192.0.2.2/32`, then rolled back to
 `managed_ports=[]`. The ping was not blocked.
 
 The result is not counted as VM-to-external failure of the product ACL feature.
@@ -51,14 +51,14 @@ inside the VM or from a dedicated test VM with an explicit guest execution path.
 ## Guest Access Check
 
 Detailed read-only audit:
-`docs/evidence/openstack-n05-lite/20260630134000-ostack2.bj159.net-guest-access-audit/`
+`docs/evidence/openstack-n05-lite/20260630134000-compute-1.example.test-guest-access-audit/`
 
 | Check | Result |
 | --- | --- |
-| `wp-test` / `10.58.159.26` | `waf-20250613-8.1.6.86485`, `key_name=null`, SSH timed out, QEMU guest agent not configured |
-| `test1111` / `10.58.159.27` | `icg-20230728-10.1.0`, `key_name=null`, SSH refused, console is `SecOS login:`, QEMU guest agent not configured |
-| `cym_vfw1` / `10.58.159.28` | `vfw-20250925-6.1.13.174515`, `key_name=null`, SSH reachable but existing root/admin/centos key auth denied, console is `NSG-VM Username:`, QEMU guest agent not configured |
-| `cym_hlas_test` / `10.58.159.29` | `hlas-20251025-v6.332p2`, `key_name=null`, SSH refused, console is Rocky Linux `LAS login:`, cloud-init fallback datasource, QEMU guest agent not configured |
+| `wp-test` / `192.0.2.26` | `waf-20250613-8.1.6.86485`, `key_name=null`, SSH timed out, QEMU guest agent not configured |
+| `test1111` / `192.0.2.27` | `icg-20230728-10.1.0`, `key_name=null`, SSH refused, console is `SecOS login:`, QEMU guest agent not configured |
+| `cym_vfw1` / `192.0.2.28` | `vfw-20250925-6.1.13.174515`, `key_name=null`, SSH reachable but existing root/admin/centos key auth denied, console is `NSG-VM Username:`, QEMU guest agent not configured |
+| `cym_hlas_test` / `192.0.2.29` | `hlas-20251025-v6.332p2`, `key_name=null`, SSH refused, console is Rocky Linux `LAS login:`, cloud-init fallback datasource, QEMU guest agent not configured |
 | Legacy image/keypair path | Legacy `nova`/`glance` clients can list product images and create an RSA keypair; the newer `openstack image list` path still returns HTTP 404 in this client context |
 
 No passwords were guessed and no guest disk or console injection was attempted.
@@ -66,12 +66,12 @@ No passwords were guessed and no guest disk or console injection was attempted.
 ## Short-Lived Test VM Probes
 
 Detailed evidence:
-`docs/evidence/openstack-n05-lite/20260630140500-ostack2.bj159.net-temporary-test-vm/`
+`docs/evidence/openstack-n05-lite/20260630140500-compute-1.example.test-temporary-test-vm/`
 
 | Probe | Result |
 | --- | --- |
-| `qcsp-20241205-v1.2.0.9` / `10.58.159.30` | Booted with config-drive and RSA keypair; Neutron port `5e1f1973-3df0-4cd3-9644-f11ef089cd64` was ACTIVE; `tap5e1f1973-3d` was `LOWER_UP` on `br-int`; host ping passed; SSH port stayed closed; QEMU guest agent not configured; VM deleted |
-| `hlas-20251025-v6.332p2` / `10.58.159.31` | Booted with config-drive, RSA keypair, and bounded user-data; Neutron port `8dcf87ae-c8ad-4052-b541-ddec55832c56` was ACTIVE; `tap8dcf87ae-c8` was `LOWER_UP` on `br-int`; host ping passed; console showed cloud-init fallback datasource and OpenSSH service start, but SSH port stayed closed from the cloud side; QEMU guest agent not configured; VM deleted |
+| `qcsp-20241205-v1.2.0.9` / `192.0.2.30` | Booted with config-drive and RSA keypair; Neutron port `5e1f1973-3df0-4cd3-9644-f11ef089cd64` was ACTIVE; `tap5e1f1973-3d` was `LOWER_UP` on `br-int`; host ping passed; SSH port stayed closed; QEMU guest agent not configured; VM deleted |
+| `hlas-20251025-v6.332p2` / `192.0.2.31` | Booted with config-drive, RSA keypair, and bounded user-data; Neutron port `8dcf87ae-c8ad-4052-b541-ddec55832c56` was ACTIVE; `tap8dcf87ae-c8` was `LOWER_UP` on `br-int`; host ping passed; console showed cloud-init fallback datasource and OpenSSH service start, but SSH port stayed closed from the cloud side; QEMU guest agent not configured; VM deleted |
 | Cleanup | Temporary servers, keypair, remote key files, and user-data file were removed after the probes |
 
 These probes strengthen the G4/N0.5 environment conclusion: Neutron port
@@ -82,7 +82,7 @@ channel for VM-originated traffic smoke.
 ## DHCP / Metadata / IPv6 Disposition
 
 Bounded guest evidence for DHCP, metadata, and IPv6 disposition is in
-`docs/evidence/openstack-n05-lite/20260630155334-ostack2.bj159.net-guest-bypass-probe/`.
+`docs/evidence/openstack-n05-lite/20260630155334-compute-1.example.test-guest-bypass-probe/`.
 It confirms DHCP initial lease through Neutron dnsmasq and keeps Aria UDS at
 `managed_ports=[]`. Explicit DHCP renew is `not_applicable` for this CirrOS
 image because it has no executable `udhcpc`. Metadata traffic reached the

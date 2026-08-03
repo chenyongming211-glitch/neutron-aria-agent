@@ -59,29 +59,29 @@ tap interface on br-int
 - 当前没有 `qbr/qvo/qvb` hybrid 安全组端口链路。
 - Neutron 仍然是网络配置唯一入口，Aria 不暴露独立租户 northbound。
 - 宿主机已挂载 bpffs，`/sys/fs/bpf` 可用；`/sys/kernel/btf/vmlinux` 可读。
-- 2026-07-02 Q0 刷新确认：三台宿主机 shell 当前均缺少 `tc` 命令，但 `neutron_openvswitch_agent`、`neutron_aria_agent`、`aria_datapath` 容器内存在 `/usr/sbin/tc`；`ostack2` 容器侧可以只读查看 VM tap qdisc。QoS shaping 仍未验收，必须先完成受控 qdisc 写入/回滚 smoke，或降级为 eBPF policing / unsupported。
+- 2026-07-02 Q0 刷新确认：三台宿主机 shell 当前均缺少 `tc` 命令，但 `neutron_openvswitch_agent`、`neutron_aria_agent`、`aria_datapath` 容器内存在 `/usr/sbin/tc`；`compute-1` 容器侧可以只读查看 VM tap qdisc。QoS shaping 仍未验收，必须先完成受控 qdisc 写入/回滚 smoke，或降级为 eBPF policing / unsupported。
 
 ### 2.1 真实环境探测摘要
 
 探测时间：2026-06-15；2026-06-22 重新确认三节点 root 级只读证据
-探测节点：`ostack2=10.58.159.2`、`ostack3=10.58.159.3`、`ostack4=10.58.159.4`
+探测节点：`compute-1=192.0.2.2`、`compute-2=192.0.2.3`、`compute-3=192.0.2.4`
 
 三台节点均可取得 root 级只读证据，结论如下：
 
 | 项目 | 现场结果 | 对方案的影响 |
 | --- | --- | --- |
 | 操作系统 | 三台均为 kernel `4.18.0-553.5.1.el8_10.x86_64` | eBPF 能力需按该内核验证，不按新内核特性假设 |
-| 部署形态 | Kolla 风格容器；三台均有 `neutron_openvswitch_agent`、`neutron_linuxbridge_agent`、`neutron_sriov_agent`、`nova_compute`；`ostack2`、`ostack3` 有 `neutron_server`；`ostack4` 为 compute/agent 侧 | ACL/QoS 能力必须进入产品镜像和 Kolla 配置；Neutron Server 扩展至少要覆盖控制节点容器 |
+| 部署形态 | Kolla 风格容器；三台均有 `neutron_openvswitch_agent`、`neutron_linuxbridge_agent`、`neutron_sriov_agent`、`nova_compute`；`compute-1`、`compute-2` 有 `neutron_server`；`compute-3` 为 compute/agent 侧 | ACL/QoS 能力必须进入产品镜像和 Kolla 配置；Neutron Server 扩展至少要覆盖控制节点容器 |
 | Neutron 运行时 | neutron-server 使用 Python 2 | 插件实现必须兼容 Python 2 和当前 Neutron 代码结构 |
 | Neutron 插件 | `service_plugins = router,network_ip_availability,mirror` | 当前没有 QoS API，也没有 Aria ACL，需要改 neutron-server 配置和镜像 |
 | ML2 drivers | `openvswitch,linuxbridge,l2population,sriovnicswitch` | Aria 只接管普通虚机 OVS tap，SR-IOV/LinuxBridge/Neutron 服务端口标记 unsupported 或 not_applicable |
 | ML2 type drivers | `vxlan,vlan,flat` | ACL/QoS 不改变 L2/VXLAN/VLAN 管理 |
 | OVS agent | 三台均为 `integration_bridge = br-int`、`extensions = mirror`、`l2_population = True`、`enable_security_group = False` | Aria 可作为并行增强 agent；QoS 不应开启 OVS agent 执行后端 |
 | Security Group | `enable_security_group = False` | ACL 不能走 SG projection，也不需要启用 SG |
-| tap 形态 | `ostack2` 有 VM tap `tap86b83885-67` 直接挂在 `br-int`，带 `iface-id` 和 `vm-id`；`ostack3` 当前只有 DHCP 类 OVS internal tap；`ostack4` 当前 `br-int` 无 Neutron port | 端口发现路径成立，但 agent 必须按 host 和 port 类型过滤；无 eligible port 的节点应保持 idle/ready |
+| tap 形态 | `compute-1` 有 VM tap `tap86b83885-67` 直接挂在 `br-int`，带 `iface-id` 和 `vm-id`；`compute-2` 当前只有 DHCP 类 OVS internal tap；`compute-3` 当前 `br-int` 无 Neutron port | 端口发现路径成立，但 agent 必须按 host 和 port 类型过滤；无 eligible port 的节点应保持 idle/ready |
 | QoS 代码 | 镜像中存在 Neutron QoS plugin/extension 代码，但未启用 | QoS 可复用现有模型，但需要启用 API/DB/extension，并接入 Aria 执行 |
 | bpffs/BTF | 三台 `/sys/fs/bpf` 均已挂载，`/sys/kernel/btf/vmlinux` 均可读 | Aria datapath 基础条件较好 |
-| `tc` | 宿主机 shell 未找到 `tc`；相关 Kolla 容器内存在 `tc`，且 `ostack2` 容器侧可读 VM tap qdisc | QoS shaping 不能直接承诺；第一版 QoS 应优先做 status/authority gate，再通过受控 qdisc 写入/回滚 smoke 决定 container-`tc` shaping、eBPF policing 或 unsupported |
+| `tc` | 宿主机 shell 未找到 `tc`；相关 Kolla 容器内存在 `tc`，且 `compute-1` 容器侧可读 VM tap qdisc | QoS shaping 不能直接承诺；第一版 QoS 应优先做 status/authority gate，再通过受控 qdisc 写入/回滚 smoke 决定 container-`tc` shaping、eBPF policing 或 unsupported |
 | SR-IOV | 三台均运行 SR-IOV agent，物理网卡存在 `sriov_totalvfs`，但 `physical_device_mappings` 为空且 `sriov_numvfs=0` | 当前环境未实际分配 SR-IOV VF；方案仍应把 SR-IOV direct port 标记 unsupported，不纳入第一阶段接管 |
 | LinuxBridge | 三台均运行 LinuxBridge agent，但 `enable_vxlan=false`、安全组关闭，现场未发现 `qbr/qvb/qvo` 主路径 | 第一阶段仍不接管 LinuxBridge；service/bridge 端口必须跳过 |
 
@@ -733,14 +733,14 @@ neutron port-show 2b7550c2-5378-41e9-a066-68008a35f532
 | id                           | 2b7550c2-5378-41e9-a066-68008a35f532 |
 | binding:vif_type             | ovs                                  |
 | binding:vnic_type            | normal                               |
-| binding:host_id              | ostack3.bj159.net                    |
+| binding:host_id              | compute-2.example.test                    |
 | aria_acl_enabled             | True                                 |
 | aria_acl_effective_policy_id | 5a3f3b72-1f8e-43f9-87bb-711a99c5f2f1 |
 | aria_acl_effective_source    | port                                 |
 | aria_acl_binding_id          | 37bd7c9e-0a4f-48c3-b862-4f1c60b7a270 |
 | aria_acl_effective_revision  | 18                                   |
 | aria_acl_runtime_status      | applied                              |
-| aria_acl_runtime_host        | ostack3.bj159.net                    |
+| aria_acl_runtime_host        | compute-2.example.test                    |
 | aria_acl_runtime_reason      |                                      |
 +------------------------------+--------------------------------------+
 ```
@@ -1359,7 +1359,7 @@ agent 向 aria-agent 提交声明式 snapshot：
 {
   "schema_version": "v1",
   "source": "neutron-aria-agent",
-  "host": "ostack2.bj159.net",
+  "host": "compute-1.example.test",
   "generation": 1024,
   "integration_mode": "coexist",
   "ports": [
@@ -1373,7 +1373,7 @@ agent 向 aria-agent 提交声明式 snapshot：
       "binding": {
         "vif_type": "ovs",
         "vnic_type": "normal",
-        "host_id": "ostack2.bj159.net"
+        "host_id": "compute-1.example.test"
       },
       "acl": {
         "requested": true,
@@ -1415,7 +1415,7 @@ Neutron agent heartbeat 中至少包含：
 ```json
 {
   "agent_type": "Aria ACL agent",
-  "host": "ostack2.bj159.net",
+  "host": "compute-1.example.test",
   "binary": "neutron-aria-agent",
   "configurations": {
     "integration_mode": "coexist",
@@ -1771,7 +1771,7 @@ external_ids:iface-status=active
 
 ```ini
 [agent]
-host = ostack2.bj159.net
+host = compute-1.example.test
 agent_type = Aria ACL agent
 report_interval = 30
 resync_interval = 300
@@ -1799,11 +1799,11 @@ source = neutron
 
 三节点部署注意：
 
-- `ostack2`、`ostack3`、`ostack4` 已验证 root 级只读信息。
+- `compute-1`、`compute-2`、`compute-3` 已验证 root 级只读信息。
 - 三台 OVS agent 配置一致：`integration_bridge=br-int`、`extensions=mirror`、`enable_security_group=False`。
 - 三台均已挂载 bpffs 且 BTF 可读。
 - 2026-07-02 Q0 刷新确认：宿主机 shell 缺少 `tc`，但相关 Kolla 容器内存在 `tc` 且可只读查看 qdisc；QoS shaping 不能作为第一阶段默认承诺，必须另做写入/回滚 smoke。
-- `ostack2` 当前存在 eligible VM OVS tap；`ostack3` 当前只有 DHCP 类 OVS internal port；`ostack4` 当前没有 br-int Neutron port。
+- `compute-1` 当前存在 eligible VM OVS tap；`compute-2` 当前只有 DHCP 类 OVS internal port；`compute-3` 当前没有 br-int Neutron port。
 - 上线前必须给 `aria-datapath` 容器足够权限读取 OVSDB/访问 tap，不依赖 SSH 受限命令。
 - 三台 compute 的 agent 配置、镜像 tag 和 socket 权限必须一致。
 
@@ -1830,7 +1830,7 @@ OVS/tap identity validation
 - `/run/openvswitch` 或等价 OVSDB 访问能力。
 - 访问 tap interface 和 netlink。
 
-现场已确认 `ostack2` 有 bpffs 和 BTF：
+现场已确认 `compute-1` 有 bpffs 和 BTF：
 
 ```text
 bpf on /sys/fs/bpf type bpf
@@ -2777,9 +2777,9 @@ QoS enforcement:
 
 ### 17.8 三节点一致性检查
 
-2026-06-22 已可登录 `ostack3`、`ostack4` 并完成 root 级只读确认。正式部署 smoke 仍必须通过容器和自动化脚本完成三节点一致性检查：
+2026-06-22 已可登录 `compute-2`、`compute-3` 并完成 root 级只读确认。正式部署 smoke 仍必须通过容器和自动化脚本完成三节点一致性检查：
 
-| 检查项 | ostack2 | ostack3 | ostack4 |
+| 检查项 | compute-1 | compute-2 | compute-3 |
 | --- | --- | --- | --- |
 | OVS agent 配置 | 已确认，`br-int`/`mirror`/SG off | 已确认，`br-int`/`mirror`/SG off | 已确认，`br-int`/`mirror`/SG off |
 | 当前 br-int Neutron port | 有 VM tap 和 DHCP internal port | 只有 DHCP internal port | 当前无 Neutron port |
@@ -2871,8 +2871,8 @@ ACL 失败不得影响：
 - 在测试镜像中 `python2 -c "import neutron_aria"` 成功。
 - `aria_acl` service plugin 可以被 neutron-server 加载。
 - DB migration 可以在当前 head 上 upgrade。
-- `ostack2/3/4` 均确认 `br-int` tap 带 `external_ids:iface-id`。
-- `ostack2/3/4` 均确认 `/sys/fs/bpf`、BTF、`/run/aria`、`/var/lib/aria-agent` 和 socket 权限方案。
+- `compute-1/3/4` 均确认 `br-int` tap 带 `external_ids:iface-id`。
+- `compute-1/3/4` 均确认 `/sys/fs/bpf`、BTF、`/run/aria`、`/var/lib/aria-agent` 和 socket 权限方案。
 - QoS shaping 如果纳入第一版，必须确认 `tc` 可用；否则第一版只承诺 policing 或将 shaping 标记 unsupported。
 
 ### Phase 1: Neutron 扩展骨架
@@ -3041,7 +3041,7 @@ extensions = mirror,qos
 
 ```ini
 [agent]
-host = ostack2.bj159.net
+host = compute-1.example.test
 debug = false
 report_interval = 30
 resync_interval = 300
@@ -3449,7 +3449,7 @@ neutron aria-mirror-session-create \
 ```bash
 neutron aria-mirror-session-create \
   --name span-by-prefix \
-  --source-host ostack2 \
+  --source-host compute-1 \
   --source-interface ensXfY \
   --direction ingress \
   --mirror-mode policy
@@ -3470,7 +3470,7 @@ neutron aria-mirror-rule-create $SESSION_ID \
 ```bash
 neutron aria-mirror-session-create \
   --name span-uplink-to-vm \
-  --source-host ostack2 \
+  --source-host compute-1 \
   --source-interface ensXfY \
   --target-port $ANALYZER_VM_PORT_ID \
   --direction ingress

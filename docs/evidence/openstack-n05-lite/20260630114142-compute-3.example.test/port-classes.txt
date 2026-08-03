@@ -1,0 +1,3 @@
+host=compute-3.example.test host_ports=0 compute_ports=0
+vnic_type_counts=
+unsupported_vnic_types=baremetal,direct,direct-physical,macvtap,virtio-forwarder

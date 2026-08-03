@@ -17,9 +17,9 @@ deploy/kolla/smoke/neutron_aria_rpc_foreign_host_smoke.sh
 
 | Listener host | Foreign event | Result | Evidence work directory |
 | --- | --- | --- | --- |
-| `ostack2.bj159.net` | `ostack3.bj159.net` port `3485b315-e152-42b8-aa55-75dff9d4266c` | pass | `/tmp/neutron-aria-rpc-foreign-host-20260701173603` |
-| `ostack3.bj159.net` | `ostack2.bj159.net` port `86b83885-671f-474c-9556-8af98cf1cdc8` | pass | `/tmp/neutron-aria-rpc-foreign-host-20260701173700` |
-| `ostack4.bj159.net` | `ostack2.bj159.net` port `86b83885-671f-474c-9556-8af98cf1cdc8` | pass | `/tmp/neutron-aria-rpc-foreign-host-20260701173757` |
+| `compute-1.example.test` | `compute-2.example.test` port `3485b315-e152-42b8-aa55-75dff9d4266c` | pass | `/tmp/neutron-aria-rpc-foreign-host-20260701173603` |
+| `compute-2.example.test` | `compute-1.example.test` port `86b83885-671f-474c-9556-8af98cf1cdc8` | pass | `/tmp/neutron-aria-rpc-foreign-host-20260701173700` |
+| `compute-3.example.test` | `compute-1.example.test` port `86b83885-671f-474c-9556-8af98cf1cdc8` | pass | `/tmp/neutron-aria-rpc-foreign-host-20260701173757` |
 
 ## Observed Signals
 
@@ -41,9 +41,9 @@ Post-check after all three runs:
 
 | Host | Temporary process | Temporary test agent | UDS managed ports |
 | --- | --- | --- | --- |
-| `ostack2.bj159.net` | absent | absent | `0` |
-| `ostack3.bj159.net` | absent | absent | `0` |
-| `ostack4.bj159.net` | absent | absent | `0` |
+| `compute-1.example.test` | absent | absent | `0` |
+| `compute-2.example.test` | absent | absent | `0` |
+| `compute-3.example.test` | absent | absent | `0` |
 
 ## Boundary
 

@@ -49,7 +49,7 @@ class AclSourceTestCase(unittest.TestCase):
                 port_page_size=50,
             )
             acl_source = build_acl_source(config)
-            port_source = build_port_source(config, "ostack2")
+            port_source = build_port_source(config, "compute-1")
         finally:
             neutron_client_module.build_aria_acl_client_from_env = original_acl_factory
             neutron_client_module.build_neutronclient_from_env = original_neutron_factory
@@ -76,7 +76,7 @@ class AclSourceTestCase(unittest.TestCase):
                     "priority": 100,
                     "action": "drop",
                     "protocol": "icmp",
-                    "src_cidr": "10.58.159.2/32",
+                    "src_cidr": "192.0.2.2/32",
                 }],
                 "bindings": [{
                     "id": "binding-1",
@@ -151,7 +151,7 @@ class AclSourceTestCase(unittest.TestCase):
                         "priority": 100,
                         "action": "drop",
                         "protocol": "icmp",
-                        "src_cidr": "10.58.159.2/32",
+                        "src_cidr": "192.0.2.2/32",
                     }],
                     "bindings": [{
                         "id": "binding-1",
@@ -374,7 +374,7 @@ class AclSourceTestCase(unittest.TestCase):
                         "aria_acl_port_statuses": [{
                             "id": first_id,
                             "port_id": "port-1",
-                            "host": "ostack2",
+                            "host": "compute-1",
                         }],
                         "aria_acl_port_statuses_links": [{"rel": "next"}],
                     }
@@ -382,7 +382,7 @@ class AclSourceTestCase(unittest.TestCase):
                     "aria_acl_port_statuses": [{
                         "id": second_id,
                         "port_id": "port-2",
-                        "host": "ostack2",
+                        "host": "compute-1",
                     }],
                     "aria_acl_port_statuses_links": [],
                 }
@@ -488,7 +488,7 @@ class AclSourceTestCase(unittest.TestCase):
         client = FakeNeutronClient()
         result = AriaAclRestClient(client).report_aria_acl_port_status({
             "port_id": "port-1",
-            "host": "ostack2",
+            "host": "compute-1",
             "status": "ready",
         })
 
@@ -509,7 +509,7 @@ class AclSourceTestCase(unittest.TestCase):
                 return {
                     "aria_acl_port_statuses": [{
                         "port_id": "port-1",
-                        "host": "ostack2",
+                        "host": "compute-1",
                         "status": "ready",
                     }]
                 }

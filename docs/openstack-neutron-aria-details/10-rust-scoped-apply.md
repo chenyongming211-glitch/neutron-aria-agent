@@ -237,7 +237,7 @@ Smoke tests before production enablement:
 
 Field note:
 
-- The controlled 10.58.159 ostack2 smokes on 2026-07-02 confirmed real fanout,
+- The controlled 10.58.159 compute-1 smokes on 2026-07-02 confirmed real fanout,
   full-resync apply, UDS rollback, the advertised Rust port-scoped route, P3
   experimental port-scoped apply, and default revisionless full-resync fallback.
   Because the target Neutron returns `revision_number=None` for bound ports,

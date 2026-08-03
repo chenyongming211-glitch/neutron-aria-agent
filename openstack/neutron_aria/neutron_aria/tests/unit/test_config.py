@@ -23,7 +23,7 @@ class ConfigTestCase(unittest.TestCase):
         try:
             os.write(fd, b"""
 [agent]
-host = ostack2.bj159.net
+host = compute-1.example.test
 managed_domains = acl
 resync_interval = 120
 report_interval = 15
@@ -60,7 +60,7 @@ fixture_path = /tmp/aria-acl-fixture.json
 
             config = load_config(path)
 
-            self.assertEqual("ostack2.bj159.net", config.host)
+            self.assertEqual("compute-1.example.test", config.host)
             self.assertEqual(["acl"], config.managed_domains)
             self.assertEqual(120, config.resync_interval)
             self.assertEqual(15, config.report_interval)

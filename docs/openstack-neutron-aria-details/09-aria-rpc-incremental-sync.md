@@ -42,7 +42,7 @@ Target end state:
 | --- | --- | --- | --- |
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
-| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
+| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `compute-1.example.test`; multi-host foreign filtering passed on `compute-1/3/4`; source-host cleanup passed on `compute-1` |
 | P2.5 Aria domain object RPC | P2 + Aria service-plugin object events | `aria_acl` policy/rule/binding/address-set create/update/delete -> event merge -> **full-resync**; full-resync remains recovery | accepted design on 2026-07-09 after live ACL latency testing showed policy/binding updates waited for the 60 second periodic resync |
 | P3 incremental RPC | P2/P2.5 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation and controlled test-host evidence are accepted through P3-6; packaged default remains disabled. Production P3 requires trustworthy revision data; old Neutron without `revision_number` stays on P2 fallback unless a controlled test explicitly enables revisionless experimental mode. |
 
@@ -160,20 +160,20 @@ Current evidence:
   records package-level P2 preflight success on all three 10.58.159 target
   hosts. It did not subscribe to RabbitMQ or mutate datapath state.
 - `../evidence/openstack-n05-lite/20260701-rpc-fanout-ab-smoke/summary.md`
-  records real RabbitMQ fanout A/B success on `ostack2.bj159.net`. It proves
+  records real RabbitMQ fanout A/B success on `compute-1.example.test`. It proves
   P2 fanout-triggered full-resync on one host, not P3 port-scoped incremental
   apply or multi-host rollout readiness.
 - `../evidence/openstack-n05-lite/20260701-rpc-foreign-host-smoke/summary.md`
   records real RabbitMQ foreign-host fanout filtering success across
-  `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`. It proves
+  `compute-1.example.test`, `compute-2.example.test`, and `compute-3.example.test`. It proves
   foreign-host `port.update` events are consumed but do not trigger local
   full-resync or local managed-port mutation in P2 mode.
 - `../evidence/openstack-n05-lite/20260701-rpc-source-cleanup-smoke/summary.md`
-  records the source-host cleanup branch on `ostack2.bj159.net`. It proves a
+  records the source-host cleanup branch on `compute-1.example.test`. It proves a
   projected local port receiving a foreign-host `port.update` is deleted with
   `migration_source_cleanup` without triggering another full-resync.
-- `../evidence/openstack-n05-lite/20260706-rpc-p2-canary-ostack2/summary.md`
-  records a single-host P2 canary on `ostack2.bj159.net`: package RPC smoke,
+- `../evidence/openstack-n05-lite/20260706-rpc-p2-canary-compute-1/summary.md`
+  records a single-host P2 canary on `compute-1.example.test`: package RPC smoke,
   real fanout A/B, foreign-host filtering, source-host cleanup, persistent
   `sync_mode=rpc_full_resync`, and rollback to
   `sync_mode=polling_full_resync`. It also records the stale Python
@@ -181,11 +181,11 @@ Current evidence:
   smoke convergence-wait hardening. A follow-up retest in the same evidence
   record validates automatic stale pending cleanup, startup convergence waits,
   rollback DELETE convergence retries, a three-node package rollout, and short
-  persistent P2 canary windows on `ostack2.bj159.net` and
-  `ostack4.bj159.net`. It also records a dual-host persistent P2 parallel
-  canary with `ostack2.bj159.net` and `ostack4.bj159.net` subscribed to fanout
+  persistent P2 canary windows on `compute-1.example.test` and
+  `compute-3.example.test`. It also records a dual-host persistent P2 parallel
+  canary with `compute-1.example.test` and `compute-3.example.test` subscribed to fanout
   at the same time, plus a triple-host full fanout canary that includes
-  `ostack3.bj159.net` with zero managed ports. Both canaries were followed by
+  `compute-2.example.test` with zero managed ports. Both canaries were followed by
   rollback to the default polling mode. The same evidence record also includes
   a triple-host 30-minute P2 soak gate with 60 samples per host, stable
   `managed_ports`, empty `pending_generation`, zero container restarts, zero
@@ -391,8 +391,8 @@ Soak gate:
   `Traceback`, `local_api_degraded`, heartbeat failures, and snapshot hash
   mismatch blockers.
 - The onsite 10.58.159 three-host run completed successfully:
-  `ostack2.bj159.net` stayed at 15 managed ports, `ostack3.bj159.net` stayed at
-  0 managed ports, and `ostack4.bj159.net` stayed at 3 managed ports for 60
+  `compute-1.example.test` stayed at 15 managed ports, `compute-2.example.test` stayed at
+  0 managed ports, and `compute-3.example.test` stayed at 3 managed ports for 60
   samples over 30 minutes. All three hosts restored polling mode after the
   gate.
 - For cluster promotion, run the same host-local soak in parallel on every
@@ -787,7 +787,7 @@ Field evidence:
   records the accepted three-node heartbeat/debug gate for the read-only P3-1
   projection index and last event decision summaries.
 - `docs/evidence/openstack-n05-lite/20260702-p3-incremental-revision-gate/summary.md`
-  records the controlled ostack2 P3 fanout attempt. Real RabbitMQ fanout,
+  records the controlled compute-1 P3 fanout attempt. Real RabbitMQ fanout,
   Neutron port reads, full-resync apply, and rollback worked, but the target
   Neutron returned `revision_number=None` for bound ports, so the port-scoped
   runtime gate remains not accepted for this environment.
