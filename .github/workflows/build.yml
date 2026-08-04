@@ -202,7 +202,7 @@ jobs:
 
       - name: Build eBPF
         env:
-          RUSTFLAGS: -D warnings -Z emit-stack-sizes
+          RUSTFLAGS: -D warnings
         run: |
           cd ebpf
           cargo +nightly-2026-07-14 build --release --target bpfel-unknown-none -Z build-std=core --target-dir target

@@ -155,6 +155,10 @@ The 448-byte budget avoids accepting an artifact that only happens to reach
 exactly 512 bytes with one compiler version. Stack use is an artifact property,
 so it is measured after the release eBPF object is built.
 
+The combined-path calculation matches the maintained 4.18 verifier: every
+function frame is charged as `round_up(max(frame_bytes, 1), 32)` before call
+path accumulation. Reports retain both the raw frame and verifier-charged size.
+
 The report must include at least:
 
 - `tc_ingress` worst path and total;

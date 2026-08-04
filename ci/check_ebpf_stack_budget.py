@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import argparse
+from collections import deque
 import json
 import os
 import struct
@@ -13,25 +14,129 @@ import sys
 BPF_CALL_OPCODE = 0x85
 BPF_PSEUDO_CALL = 1
 DEFAULT_ENTRIES = ("tc_ingress", "tc_egress")
+MAX_TRACKED_STACK_OFFSETS = 32
 
 
 class BudgetExceeded(ValueError):
     pass
 
 
-def decode_uleb128(data, offset):
-    value = 0
-    shift = 0
-    while offset < len(data):
-        byte = data[offset]
-        offset += 1
-        value |= (byte & 0x7F) << shift
-        if byte & 0x80 == 0:
-            return value, offset
-        shift += 7
-        if shift > 63:
-            raise ValueError("ULEB128 value exceeds 64 bits")
-    raise ValueError("truncated ULEB128 value")
+def verifier_frame_bytes(frame_bytes):
+    return ((max(frame_bytes, 1) + 31) // 32) * 32
+
+
+def analyze_function_stack(data, function_name):
+    if len(data) % 8 != 0:
+        raise ValueError("invalid BPF instruction length for %s" % function_name)
+
+    instructions = []
+    for offset in range(0, len(data), 8):
+        opcode, registers, branch_offset, immediate = struct.unpack_from(
+            "<BBhi", data, offset
+        )
+        instructions.append(
+            (
+                opcode,
+                registers & 0x0F,
+                registers >> 4,
+                branch_offset,
+                immediate,
+            )
+        )
+
+    if not instructions:
+        return 0
+
+    initial = [frozenset() for _ in range(11)]
+    initial[10] = frozenset((0,))
+    states = {0: tuple(initial)}
+    pending = deque((0,))
+    depth = 0
+
+    def record_offsets(offsets):
+        nonlocal depth
+        for stack_offset in offsets:
+            if stack_offset < 0:
+                depth = max(depth, -stack_offset)
+
+    def merge_states(current, incoming):
+        merged = []
+        for current_offsets, incoming_offsets in zip(current, incoming):
+            offsets = current_offsets | incoming_offsets
+            if len(offsets) > MAX_TRACKED_STACK_OFFSETS:
+                raise ValueError(
+                    "too many frame-pointer states while analyzing %s" % function_name
+                )
+            merged.append(frozenset(offsets))
+        return tuple(merged)
+
+    while pending:
+        pc = pending.popleft()
+        registers = list(states[pc])
+        opcode, destination, source, branch_offset, immediate = instructions[pc]
+        instruction_class = opcode & 0x07
+        operation = opcode & 0xF0
+        register_source = opcode & 0x08
+
+        base_register = None
+        if instruction_class == 0x01:  # BPF_LDX
+            base_register = source
+        elif instruction_class in (0x02, 0x03):  # BPF_ST / BPF_STX
+            base_register = destination
+        if base_register is not None:
+            record_offsets(
+                origin + branch_offset for origin in registers[base_register]
+            )
+
+        successors = []
+        if instruction_class in (0x04, 0x07):  # BPF_ALU / BPF_ALU64
+            if operation == 0xB0:  # BPF_MOV
+                registers[destination] = (
+                    registers[source] if register_source else frozenset()
+                )
+            elif operation in (0x00, 0x10) and not register_source:  # ADD / SUB imm
+                delta = immediate if operation == 0x00 else -immediate
+                registers[destination] = frozenset(
+                    value + delta for value in registers[destination]
+                )
+                record_offsets(registers[destination])
+            else:
+                registers[destination] = frozenset()
+            successors = [pc + 1]
+        elif instruction_class == 0x01:  # BPF_LDX
+            registers[destination] = frozenset()
+            successors = [pc + 1]
+        elif instruction_class == 0x00:  # BPF_LD / LD_IMM64
+            registers[destination] = frozenset()
+            successors = [pc + 2 if opcode == 0x18 else pc + 1]
+        elif instruction_class in (0x05, 0x06):  # BPF_JMP / BPF_JMP32
+            if operation == 0x80:  # BPF_CALL
+                for register in range(6):
+                    registers[register] = frozenset()
+                successors = [pc + 1]
+            elif operation == 0x90:  # BPF_EXIT
+                successors = []
+            elif operation == 0x00:  # BPF_JA
+                successors = [pc + 1 + branch_offset]
+            else:
+                successors = [pc + 1, pc + 1 + branch_offset]
+        else:
+            successors = [pc + 1]
+
+        outgoing = tuple(registers)
+        for successor in successors:
+            if successor < 0 or successor >= len(instructions):
+                continue
+            if successor not in states:
+                states[successor] = outgoing
+                pending.append(successor)
+                continue
+            merged = merge_states(states[successor], outgoing)
+            if merged != states[successor]:
+                states[successor] = merged
+                pending.append(successor)
+
+    return depth
 
 
 def longest_path(entry, frames, calls):
@@ -56,7 +161,10 @@ def longest_path(entry, frames, calls):
                 best_child_path = child_path
         visiting.remove(name)
 
-        result = (frames[name] + best_child_total, [name] + best_child_path)
+        result = (
+            verifier_frame_bytes(frames[name]) + best_child_total,
+            [name] + best_child_path,
+        )
         memo[name] = result
         return result
 
@@ -70,7 +178,11 @@ def validate_budget(entries, frames, calls, max_path_bytes):
         reports[entry] = {
             "total_bytes": total,
             "path": [
-                {"function": function, "frame_bytes": frames[function]}
+                {
+                    "function": function,
+                    "frame_bytes": frames[function],
+                    "verifier_bytes": verifier_frame_bytes(frames[function]),
+                }
                 for function in path
             ],
         }
@@ -186,70 +298,18 @@ def read_call_graph(elf, functions, by_location, relocations):
     return calls
 
 
-def read_stack_frames(elf, symtab, functions, by_location):
-    stack_section = elf.get_section_by_name(".stack_sizes")
-    if stack_section is None:
-        raise ValueError(
-            "ELF artifact has no .stack_sizes; build eBPF with -Z emit-stack-sizes"
-        )
-
-    stack_section_index = None
-    for index, section in enumerate(elf.iter_sections()):
-        if section.name == ".stack_sizes":
-            stack_section_index = index
-            break
-    if stack_section_index is None:
-        raise ValueError("failed to locate .stack_sizes section index")
-
-    relocation_section = None
-    for section in elf.iter_sections():
-        if section["sh_type"] in ("SHT_REL", "SHT_RELA") and int(
-            section["sh_info"]
-        ) == stack_section_index:
-            relocation_section = section
-            break
-    if relocation_section is None:
-        raise ValueError("ELF .stack_sizes section has no relocation section")
-
-    address_size = elf.elfclass // 8
-    byte_order = "little" if elf.little_endian else "big"
-    data = stack_section.data()
+def read_stack_frames(elf, functions):
     frames = {}
-    for relocation in sorted(
-        relocation_section.iter_relocations(), key=lambda item: int(item["r_offset"])
-    ):
-        entry_offset = int(relocation["r_offset"])
-        symbol = symtab.get_symbol(relocation["r_info_sym"])
-        symbol_type = symbol["st_info"]["type"]
-        if symbol_type == "STT_FUNC" and symbol.name:
-            function_name = symbol.name
-        elif symbol_type == "STT_SECTION":
-            section_index = symbol["st_shndx"]
-            if relocation_section["sh_type"] == "SHT_RELA":
-                address = int(relocation["r_addend"])
-            else:
-                address = int.from_bytes(
-                    data[entry_offset : entry_offset + address_size], byte_order
-                )
-            function_name = by_location.get((section_index, address))
-            if function_name is None:
-                raise ValueError(
-                    "unknown .stack_sizes section target section=%s value=%d"
-                    % (section_index, address)
-                )
-        else:
-            raise ValueError(
-                "unsupported .stack_sizes relocation symbol type %s" % symbol_type
-            )
-
-        frame_size, _ = decode_uleb128(data, entry_offset + address_size)
-        frames[function_name] = frame_size
-
-    missing = sorted(set(functions) - set(frames))
-    if missing:
-        raise ValueError(
-            ".stack_sizes is missing %d functions, including %s"
-            % (len(missing), ", ".join(missing[:5]))
+    for name, function in functions.items():
+        section = elf.get_section(function["section_index"])
+        start = function["value"]
+        end = start + function["size"]
+        data = section.data()
+        if end > len(data):
+            raise ValueError("invalid BPF function range for %s" % name)
+        frames[name] = analyze_function_stack(
+            data[start:end],
+            name,
         )
     return frames
 
@@ -266,7 +326,7 @@ def analyze_artifact(path, entries, max_path_bytes):
             raise ValueError("artifact is not an EM_BPF ELF object")
         symtab, functions, by_location = _function_symbols(elf)
         relocations = _relocations_by_target_section(elf)
-        frames = read_stack_frames(elf, symtab, functions, by_location)
+        frames = read_stack_frames(elf, functions)
         calls = read_call_graph(elf, functions, by_location, relocations)
         reports = validate_budget(entries, frames, calls, max_path_bytes)
 
