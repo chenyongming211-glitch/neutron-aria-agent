@@ -299,6 +299,22 @@ git add deploy/kolla/smoke/neutron_aria_legacy_kernel_loader_canary.sh
 git commit -m "test: gate eBPF artifacts on the maintained kernel"
 ```
 
+- [ ] **Step 6: Support the maintained kernel's legacy netlink TC link**
+
+If the exact-kernel canary loads the programs but Aya reports
+`FdLink: InvalidLink`, do not weaken dual-direction readiness. Implement the
+section 3.1 attachment contract:
+
+1. add failing tests for legacy attachment ownership and exact-name health;
+2. detach only stale `tc_ingress`/`tc_egress` netlink filters before attach;
+3. retain a successful non-TCX attachment in the kernel;
+4. verify both directions through `tc filter show`;
+5. remove exact-name legacy filters during rollback/detach;
+6. build only in GitHub Actions and rerun this same isolated canary.
+
+This step does not add a third attachment implementation and does not change
+OVS lifecycle behavior.
+
 ### Task 6: Controlled Three-Node Rollout
 
 **Files:**

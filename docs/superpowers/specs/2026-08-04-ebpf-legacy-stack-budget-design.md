@@ -69,6 +69,38 @@ and minor number. Therefore:
 - ingress and egress must be tested independently;
 - IPv4, IPv6, fragmented, and non-fragmented paths remain in scope.
 
+### 3.1 TC attachment contract on the maintained kernel
+
+Aya selects legacy netlink TC below kernel 6.6 and TCX on kernel 6.6 or newer.
+Only TCX links can be converted to `FdLink` and pinned in bpffs. Therefore TC
+readiness has two explicit implementations rather than treating a legacy
+netlink link as a failed TCX link:
+
+```text
+kernel >= 6.6: TCX attach -> exact program/link identity -> pinned link
+kernel <  6.6: detach stale exact-name Aria filter -> netlink attach ->
+               kernel-owned filter -> exact-name tc health check
+```
+
+The legacy path is constrained as follows:
+
+- cleanup targets only the exact Aria program names `tc_ingress` and
+  `tc_egress` on the selected interface and direction;
+- a missing prior filter is an idempotent success;
+- non-missing netlink or query errors fail the attach transaction;
+- the successfully attached legacy link is deliberately handed to the kernel
+  instead of being dropped by Aya and detached immediately;
+- graceful rollback and detach remove the exact-name legacy filters;
+- after an agent crash, the next attach first removes any stale exact-name
+  filter, preventing duplicate filters before reattachment;
+- readiness requires both directions to be observed in `tc filter show`; an
+  in-memory attach flag alone is not sufficient;
+- any attach or health uncertainty leaves ACL/CT bypassed and OVS forwarding
+  untouched.
+
+Aria does not add, delete, or restart OVS bridges, OVS processes, or the
+Neutron OVS agent while managing either TC attachment mode.
+
 ## 4. Stack Architecture
 
 ### 4.1 Per-CPU scratch ownership
@@ -217,6 +249,10 @@ The canary passes only when:
 - allow traffic passes;
 - a minimum ACL drop case drops;
 - cleanup removes every temporary link, namespace, pin, and state directory.
+
+On the maintained 4.18 kernel, the canary expects legacy netlink TC health and
+does not require impossible TCX link pins. It still requires both exact Aria
+program names to be live and both traffic verdicts to pass.
 
 The canary artifact and the deployable artifact must have identical SHA-256
 hashes.
