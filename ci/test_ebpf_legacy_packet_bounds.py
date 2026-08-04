@@ -16,6 +16,7 @@ FRAGMENT = os.path.join(ROOT, "ebpf", "src", "fragment.rs")
 LIB = os.path.join(ROOT, "ebpf", "src", "lib.rs")
 MAPS = os.path.join(ROOT, "ebpf", "src", "maps.rs")
 TCPRT = os.path.join(ROOT, "ebpf", "src", "tcprt.rs")
+POLICY = os.path.join(ROOT, "ebpf", "src", "policy.rs")
 INVENTORY = os.path.join(ROOT, "core", "src", "ebpf_ops", "inventory.rs")
 
 
@@ -32,6 +33,8 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             cls.maps_source = handle.read()
         with open(TCPRT, "r", encoding="utf-8") as handle:
             cls.tcprt_source = handle.read()
+        with open(POLICY, "r", encoding="utf-8") as handle:
+            cls.policy_source = handle.read()
         with open(INVENTORY, "r", encoding="utf-8") as handle:
             cls.inventory_source = handle.read()
 
@@ -131,6 +134,20 @@ class LegacyPacketBoundsTest(unittest.TestCase):
         )
         self.assertNotIn("track_tcp_rt_v4_rev(tap_id", self.tcprt_source)
         self.assertNotIn("track_tcp_rt_v6_rev(tap_id", self.tcprt_source)
+
+    def test_tc_policy_uses_map_backed_pipeline_state(self):
+        self.assertNotIn("pub struct PolicyArgs", self.policy_source)
+        self.assertIn(
+            "pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32",
+            self.policy_source,
+        )
+        self.assertIn("p.matched_src_id = s;", self.policy_source)
+        self.assertIn("p.flags |= FLAG_POLICY_HIT;", self.policy_source)
+        self.assertNotIn("let args = policy::PolicyArgs", self.lib_source)
+        self.assertIn(
+            "let result = policy::evaluate_policy(p, info.dst_port);",
+            self.lib_source,
+        )
 
 
 if __name__ == "__main__":
