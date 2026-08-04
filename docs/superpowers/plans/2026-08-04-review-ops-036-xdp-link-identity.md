@@ -47,7 +47,7 @@
 - Consumes: no production identity API; the RED tests express the required API.
 - Produces: required types `XdpPinnedLinkIdentity`, `XdpLinkHealth`, `XdpLinkHealthReason`, `ExistingXdpPinDisposition`; required functions `classify_xdp_link_identity(...)` and `existing_xdp_pin_disposition(...)`.
 
-- [ ] **Step 1: Declare the focused module**
+- [x] **Step 1: Declare the focused module**
 
 Add next to the existing agent modules in `agent/src/main.rs`:
 
@@ -55,7 +55,7 @@ Add next to the existing agent modules in `agent/src/main.rs`:
 mod xdp_link_health;
 ```
 
-- [ ] **Step 2: Add test-only RED contracts**
+- [x] **Step 2: Add test-only RED contracts**
 
 Create `agent/src/xdp_link_health.rs` with only this test module so normal source exists but the Rust test build fails on the deliberately missing production API:
 
@@ -134,7 +134,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Put the contract in the maintained hosted lane**
+- [x] **Step 3: Put the contract in the maintained hosted lane**
 
 Add this entry to `RUST_TESTS` in `ci/check_neutron_stage1.py` next to the existing TC health filters:
 
@@ -142,7 +142,7 @@ Add this entry to `RUST_TESTS` in `ci/check_neutron_stage1.py` next to the exist
     ["test", "--locked", "-p", "aria-agent", "xdp_link_identity_"],
 ```
 
-- [ ] **Step 4: Verify non-Cargo structure locally**
+- [x] **Step 4: Verify non-Cargo structure locally**
 
 Run:
 
@@ -154,7 +154,7 @@ git diff --check
 
 Expected: every command exits 0. Do not run Cargo locally.
 
-- [ ] **Step 5: Commit, push, and prove RED in hosted CI**
+- [x] **Step 5: Commit, push, and prove RED in hosted CI**
 
 ```bash
 git add agent/src/main.rs agent/src/xdp_link_health.rs ci/check_neutron_stage1.py
@@ -177,7 +177,7 @@ Expected: the exact-head Build reaches `rust-behavior` and fails because the req
 - Consumes: the Task 1 types/functions and the existing `xdp_firewall`, `xdp_link`, and `<iface>_xdp_link` pin conventions.
 - Produces: `exact_xdp_link_health(iface: &str, program_pin: &Path, link_pin: &Path) -> XdpLinkHealth` and conservative startup disposition shared by standalone and managed paths.
 
-- [ ] **Step 1: Implement the pure identity model before the RED tests**
+- [x] **Step 1: Implement the pure identity model before the RED tests**
 
 Add above the tests in `agent/src/xdp_link_health.rs`:
 
@@ -270,7 +270,7 @@ pub(crate) fn classify_xdp_link_identity(
 }
 ```
 
-- [ ] **Step 2: Implement the bounded Linux observation adapter**
+- [x] **Step 2: Implement the bounded Linux observation adapter**
 
 In the same module, implement:
 
@@ -352,7 +352,7 @@ pub(crate) fn exact_xdp_link_health(iface: &str, program_pin: &Path, link_pin: &
 
 During implementation, keep the code equivalent to this contract while adapting only compiler-required Aya generated-field syntax. Do not broaden the behavior.
 
-- [ ] **Step 3: Replace `FirewallInstance` path-only health**
+- [x] **Step 3: Replace `FirewallInstance` path-only health**
 
 Import `exact_xdp_link_health`, `existing_xdp_pin_disposition`, and
 `ExistingXdpPinDisposition` in `agent/src/instance.rs`. Add a private detailed
@@ -377,7 +377,7 @@ the disposition decision. `Claim` sets `ClaimedExisting`; `Attach` calls the
 existing attach transaction; `PreserveDegraded` logs the stable health reason
 and performs neither claim nor attachment.
 
-- [ ] **Step 4: Apply the same disposition to standalone startup**
+- [x] **Step 4: Apply the same disposition to standalone startup**
 
 In `agent/src/system_manager.rs`, use
 `existing_xdp_pin_disposition(xdp_link_preexisting,
@@ -390,7 +390,7 @@ preexisting_health.xdp_ready())`:
 
 Do not modify the TCX reuse decision or `system_acl_activation()`.
 
-- [ ] **Step 5: Verify GREEN in hosted CI**
+- [x] **Step 5: Verify GREEN in hosted CI**
 
 Run only non-Cargo local checks:
 
@@ -424,13 +424,13 @@ Expected exact-head Build: `fast-contracts`, `rust-behavior`, and warning-denied
 - Consumes: existing root/bpffs fixture, HTTP instance status, mode-specific XDP link paths, and `bpftool link detach pinned`.
 - Produces: opt-in `XDP_IDENTITY_SMOKE=1` evidence plus summary fields `xdp_link_identity.status`, `detached_pin_retained`, `reported_not_ready`, and `tc_acl_independent`.
 
-- [ ] **Step 1: Add explicit field state and input validation**
+- [x] **Step 1: Add explicit field state and input validation**
 
 Default `XDP_IDENTITY_SMOKE=0`. Validate it is exactly `0` or `1`. Initialize
 three evidence booleans to false. Disabled execution prints
 `SKIP: XDP link identity field smoke disabled` and records `status=skipped`.
 
-- [ ] **Step 2: Add the field action**
+- [x] **Step 2: Add the field action**
 
 When enabled, derive the exact link pin from `MODE`, require initial
 `xdp_ready=true` and `acl_ready=true`, detach it with:
@@ -451,7 +451,7 @@ assert item["acl_ready"] is True, item
 Record each evidence boolean only after its assertion succeeds. Do not label a
 disabled or incomplete case passed.
 
-- [ ] **Step 3: Add stable summary output**
+- [x] **Step 3: Add stable summary output**
 
 Emit:
 
@@ -467,20 +467,20 @@ Emit:
 
 The summary may use `passed` only when enabled and all three booleans are true.
 
-- [ ] **Step 4: Verify smoke structure without executing privileges**
+- [x] **Step 4: Verify smoke structure without executing privileges**
 
 Run:
 
 ```bash
 bash -n deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh
-python3 ci/check_smoke_python_blocks.py
+python3 ci/check_smoke_python_blocks.py deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh
 python3 ci/check_blocked_terms.py
 git diff --check
 ```
 
 Expected: every command exits 0. No privileged packet or BPF command runs.
 
-- [ ] **Step 5: Commit and push field wiring**
+- [x] **Step 5: Commit and push field wiring**
 
 ```bash
 git add deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh
@@ -504,7 +504,7 @@ say the privileged scenario was not executed.
 - Consumes: exact RED commit/build, GREEN commit/build, field-wiring commit/build, and current git state.
 - Produces: authoritative status `implementation and hosted CI complete; privileged field evidence deferred`.
 
-- [ ] **Step 1: Record exact evidence without overstating field readiness**
+- [x] **Step 1: Record exact evidence without overstating field readiness**
 
 Update the design status and OPS-036 register row with:
 
@@ -516,24 +516,24 @@ Update the design status and OPS-036 register row with:
 - explicit statement that full DDoS readiness still requires attach-mode and
   domain-generation/map validation.
 
-- [ ] **Step 2: Mark every completed plan step accurately**
+- [x] **Step 2: Mark every completed plan step accurately**
 
 Change only steps actually evidenced by commits/CI to `[x]`. Leave privileged
 field execution outside the hosted completion claim.
 
-- [ ] **Step 3: Run final non-Cargo checks**
+- [x] **Step 3: Run final non-Cargo checks**
 
 ```bash
 python3 ci/check_blocked_terms.py
 python3 -m unittest ci.test_ci_lane_contract
 bash -n deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh
-python3 ci/check_smoke_python_blocks.py
+python3 ci/check_smoke_python_blocks.py deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh
 git diff --check
 ```
 
 Expected: every command exits 0.
 
-- [ ] **Step 4: Commit, push, and verify the documentation head**
+- [x] **Step 4: Commit, push, and verify the documentation head**
 
 ```bash
 git add docs/superpowers/specs/2026-08-04-review-ops-036-xdp-link-identity-design.md \

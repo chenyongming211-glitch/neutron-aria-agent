@@ -1,8 +1,15 @@
 # REVIEW-OPS-036 Exact XDP Link Identity Design
 
-**Status:** written design awaiting review. No RED test or production
-implementation has been committed. No privileged or target-environment evidence
-is claimed.
+**Status:** source implementation and hosted CI complete; privileged
+target-kernel evidence deferred. RED commit `c82e18e` exposed the missing exact
+identity boundary in Build
+[`30872857520`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30872857520).
+Production commit `31dcf49` passed the focused behavior tests and all
+warning-denied Rust/eBPF/static builds in exact-head Build
+[`30873163705`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30873163705).
+Field-wiring commit `6548272` passed hosted Build
+[`30873611591`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30873611591),
+but the opt-in privileged scenario has not run and is not claimed as passing.
 
 ## Problem
 
