@@ -235,6 +235,14 @@ jobs:
             --max-path-bytes 448 \
             --report ebpf-artifacts/stack-budget.json
 
+      - name: Upload eBPF stack diagnostics
+        if: ${{ always() && env.PUBLISH_BUILD_ARTIFACTS == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ebpf-stack-diagnostics-${{ github.sha }}
+          path: ebpf-artifacts/
+          retention-days: 14
+
       - name: Build userspace (static)
         env:
           RUSTFLAGS: -D warnings

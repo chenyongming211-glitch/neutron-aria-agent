@@ -187,9 +187,18 @@ def validate_budget(entries, frames, calls, max_path_bytes):
             ],
         }
         if total > max_path_bytes:
+            rendered_path = " -> ".join(
+                "%s(raw=%d, verifier=%d)"
+                % (
+                    frame["function"],
+                    frame["frame_bytes"],
+                    frame["verifier_bytes"],
+                )
+                for frame in reports[entry]["path"]
+            )
             raise BudgetExceeded(
-                "%s call path uses %d bytes exceeds %d byte budget"
-                % (entry, total, max_path_bytes)
+                "%s call path uses %d bytes exceeds %d byte budget: %s"
+                % (entry, total, max_path_bytes, rendered_path)
             )
     return reports
 

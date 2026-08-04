@@ -60,7 +60,12 @@ class EbpfStackBudgetTest(unittest.TestCase):
         frames = {"tc_ingress": 32, "parse": 96, "policy": 80}
         calls = {"tc_ingress": {"parse"}, "parse": {"policy"}, "policy": set()}
 
-        with self.assertRaisesRegex(BudgetExceeded, "224 bytes exceeds 192"):
+        with self.assertRaisesRegex(
+            BudgetExceeded,
+            r"224 bytes exceeds 192.*tc_ingress\(raw=32, verifier=32\)"
+            r" -> parse\(raw=96, verifier=96\)"
+            r" -> policy\(raw=80, verifier=96\)",
+        ):
             validate_budget(("tc_ingress",), frames, calls, 192)
 
     def test_validate_budget_returns_entry_report(self):
