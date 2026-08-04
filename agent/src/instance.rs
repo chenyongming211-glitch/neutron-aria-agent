@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
@@ -22,6 +23,8 @@ pub struct FirewallInstance {
     pub shared_runtime: bool,
     trace_map_mode: TraceMapMode,
     fragment_tracking: FragmentTrackingSettings,
+    legacy_tc_ingress_attached: AtomicBool,
+    legacy_tc_egress_attached: AtomicBool,
     /// Whether FQ qdisc (EDT) was successfully configured.
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
@@ -131,6 +134,30 @@ fn tcx_query_contains_expected_program(
     attached_program_ids.contains(&expected_program_id)
 }
 
+fn tc_attachment_ready(tcx_live: bool, legacy_owned: bool, legacy_observed: bool) -> bool {
+    tcx_live || (legacy_owned && legacy_observed)
+}
+
+fn tc_filter_output_contains_program(output: &str, prog_name: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.split_whitespace().any(|field| field == prog_name))
+}
+
+fn classify_legacy_tc_cleanup(
+    result: std::io::Result<()>,
+    prog_name: &str,
+) -> Result<bool, String> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "failed to remove legacy {} TC filter: {}",
+            prog_name, error
+        )),
+    }
+}
+
 pub(crate) fn preexisting_tc_acl_runtime_is_healthy(
     enforcement_required: bool,
     preexisting_live_links: bool,
@@ -179,6 +206,12 @@ enum LinkOwnership {
     Absent,
     ClaimedExisting,
     AttachedNow,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TcAttachOutcome {
+    Pinned,
+    Legacy { priority: u16, handle: u32 },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -429,7 +462,7 @@ impl FirewallInstance {
         }
 
         Err(format!(
-            "missing pinned TC ACL links: {}",
+            "missing live TC ACL links: {}",
             health.missing_tc().join(", ")
         ))
     }
@@ -437,7 +470,10 @@ impl FirewallInstance {
     pub fn require_tc_acl_runtime(&self) -> Result<(), String> {
         let mut missing = Vec::new();
         for prog_name in ["tc_ingress", "tc_egress"] {
-            if !Path::new(&self.tc_link_pin_path(prog_name)).exists() {
+            let legacy_live = Self::tc_attach_type(prog_name)
+                .map(|attach_type| self.legacy_tc_attachment_is_live(prog_name, attach_type))
+                .unwrap_or(false);
+            if !Path::new(&self.tc_link_pin_path(prog_name)).exists() && !legacy_live {
                 missing.push(format!("{} link", prog_name));
             }
             if !self.pin_path.join(prog_name).exists() {
@@ -489,6 +525,69 @@ impl FirewallInstance {
         tcx_query_contains_expected_program(program_info.id(), &attached_program_ids)
     }
 
+    fn tc_attach_type(prog_name: &str) -> Option<aya::programs::tc::TcAttachType> {
+        match prog_name {
+            "tc_ingress" => Some(aya::programs::tc::TcAttachType::Ingress),
+            "tc_egress" => Some(aya::programs::tc::TcAttachType::Egress),
+            _ => None,
+        }
+    }
+
+    fn legacy_tc_attached(&self, prog_name: &str) -> Option<&AtomicBool> {
+        match prog_name {
+            "tc_ingress" => Some(&self.legacy_tc_ingress_attached),
+            "tc_egress" => Some(&self.legacy_tc_egress_attached),
+            _ => None,
+        }
+    }
+
+    fn legacy_tc_attachment_is_live(
+        &self,
+        prog_name: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> bool {
+        let owned = self
+            .legacy_tc_attached(prog_name)
+            .map(|attached| attached.load(Ordering::Acquire))
+            .unwrap_or(false);
+        if !owned {
+            return false;
+        }
+        let direction = match attach_type {
+            aya::programs::tc::TcAttachType::Ingress => "ingress",
+            aya::programs::tc::TcAttachType::Egress => "egress",
+            _ => return false,
+        };
+        let observed = std::process::Command::new("tc")
+            .args(["filter", "show", "dev", &self.iface, direction])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                tc_filter_output_contains_program(
+                    &String::from_utf8_lossy(&output.stdout),
+                    prog_name,
+                )
+            })
+            .unwrap_or(false);
+        tc_attachment_ready(false, owned, observed)
+    }
+
+    fn detach_legacy_tc_program(
+        &self,
+        prog_name: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> Result<bool, String> {
+        let removed = classify_legacy_tc_cleanup(
+            aya::programs::tc::qdisc_detach_program(&self.iface, attach_type, prog_name),
+            prog_name,
+        )?;
+        if let Some(attached) = self.legacy_tc_attached(prog_name) {
+            attached.store(false, Ordering::Release);
+        }
+        Ok(removed)
+    }
+
     fn xdp_link_health_detail(&self) -> XdpLinkHealth {
         exact_xdp_link_health(
             &self.iface,
@@ -502,14 +601,30 @@ impl FirewallInstance {
     }
 
     pub fn tc_acl_link_health(&self) -> TcAclLinkHealth {
+        let ingress_tcx = self.tcx_attachment_is_live(
+            "tc_ingress",
+            aya::programs::tc::TcAttachType::Ingress,
+        );
+        let egress_tcx = self.tcx_attachment_is_live(
+            "tc_egress",
+            aya::programs::tc::TcAttachType::Egress,
+        );
         TcAclLinkHealth::new(
-            self.tcx_attachment_is_live(
-                "tc_ingress",
-                aya::programs::tc::TcAttachType::Ingress,
+            tc_attachment_ready(
+                ingress_tcx,
+                self.legacy_tc_ingress_attached.load(Ordering::Acquire),
+                self.legacy_tc_attachment_is_live(
+                    "tc_ingress",
+                    aya::programs::tc::TcAttachType::Ingress,
+                ),
             ),
-            self.tcx_attachment_is_live(
-                "tc_egress",
-                aya::programs::tc::TcAttachType::Egress,
+            tc_attachment_ready(
+                egress_tcx,
+                self.legacy_tc_egress_attached.load(Ordering::Acquire),
+                self.legacy_tc_attachment_is_live(
+                    "tc_egress",
+                    aya::programs::tc::TcAttachType::Egress,
+                ),
             ),
             self.xdp_link_health(),
         )
@@ -563,6 +678,21 @@ impl FirewallInstance {
             }
         }
 
+        for (prog_name, attach_type) in [
+            (
+                "tc_ingress",
+                aya::programs::tc::TcAttachType::Ingress,
+            ),
+            (
+                "tc_egress",
+                aya::programs::tc::TcAttachType::Egress,
+            ),
+        ] {
+            if let Err(error) = self.detach_legacy_tc_program(prog_name, attach_type) {
+                errors.push(error);
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -605,6 +735,8 @@ impl FirewallInstance {
             shared_runtime,
             trace_map_mode,
             fragment_tracking: FragmentTrackingSettings::default(),
+            legacy_tc_ingress_attached: AtomicBool::new(false),
+            legacy_tc_egress_attached: AtomicBool::new(false),
             edt_available: false,
         }
     }
@@ -1492,6 +1624,9 @@ impl FirewallInstance {
                         )
                     })?;
                 }
+                if let Some(attach_type) = Self::tc_attach_type(prog_name) {
+                    self.detach_legacy_tc_program(prog_name, attach_type)?;
+                }
                 info!(instance = %self.iface, program = %prog_name, "rolled back newly attached TC link");
                 Ok(())
             }
@@ -1644,10 +1779,29 @@ impl FirewallInstance {
                 continue;
             }
 
-            if let Err(e) = self.try_attach_tc_from_pin(prog_name, &prog_pin, attach_type) {
-                warn!(instance = %self.iface, purpose = %purpose, error = %e, "failed to recover TC runtime");
-            } else {
-                Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::AttachedNow);
+            match self.try_attach_tc_from_pin(prog_name, &prog_pin, attach_type) {
+                Ok(TcAttachOutcome::Pinned) => {
+                    if let Some(legacy_attached) = self.legacy_tc_attached(prog_name) {
+                        legacy_attached.store(false, Ordering::Release);
+                    }
+                    Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::AttachedNow);
+                }
+                Ok(TcAttachOutcome::Legacy { priority, handle }) => {
+                    if let Some(legacy_attached) = self.legacy_tc_attached(prog_name) {
+                        legacy_attached.store(true, Ordering::Release);
+                    }
+                    Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::AttachedNow);
+                    info!(
+                        instance = %self.iface,
+                        program = %prog_name,
+                        priority,
+                        handle,
+                        "recovered kernel-owned legacy TC filter"
+                    );
+                }
+                Err(e) => {
+                    warn!(instance = %self.iface, purpose = %purpose, error = %e, "failed to recover TC runtime");
+                }
             }
         }
     }
@@ -1743,7 +1897,7 @@ impl FirewallInstance {
         prog_name: &str,
         prog_pin: &str,
         attach_type: aya::programs::tc::TcAttachType,
-    ) -> Result<(), String> {
+    ) -> Result<TcAttachOutcome, String> {
         if let Err(e) = aya::programs::tc::qdisc_add_clsact(&self.iface) {
             let err_str = format!("{:?}", e);
             if !err_str.contains("File exists") {
@@ -1753,6 +1907,8 @@ impl FirewallInstance {
 
         let mut tc = aya::programs::SchedClassifier::from_pin(prog_pin)
             .map_err(|e| format!("{} from_pin: {:?}", prog_name, e))?;
+
+        self.detach_legacy_tc_program(prog_name, attach_type)?;
 
         let dir_str = match attach_type {
             aya::programs::tc::TcAttachType::Ingress => "ingress",
@@ -1767,14 +1923,39 @@ impl FirewallInstance {
         let tc_link = tc
             .take_link(link_id)
             .map_err(|e| format!("take_link: {:?}", e))?;
-        let fd_link: aya::programs::links::FdLink = tc_link
-            .try_into()
-            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
-        let link_pin = self.tc_link_pin_path(prog_name);
-        fd_link.pin(&link_pin).map_err(|e| format!("pin: {:?}", e))?;
-        info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime");
+        let fd_backed = match <&aya::programs::links::FdLink>::try_from(&tc_link) {
+            Ok(_) => true,
+            Err(aya::programs::links::LinkError::InvalidLink) => false,
+            Err(error) => {
+                return Err(format!(
+                    "{} inspect TC link type: {:?}",
+                    prog_name, error
+                ));
+            }
+        };
 
-        Ok(())
+        if fd_backed {
+            let fd_link: aya::programs::links::FdLink = tc_link
+                .try_into()
+                .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+            let link_pin = self.tc_link_pin_path(prog_name);
+            fd_link.pin(&link_pin).map_err(|e| format!("pin: {:?}", e))?;
+            info!(instance = %self.iface, direction = %dir_str, "TCX program reattached from pinned runtime");
+            Ok(TcAttachOutcome::Pinned)
+        } else {
+            let priority = tc_link
+                .priority()
+                .map_err(|e| format!("{} legacy priority: {:?}", prog_name, e))?;
+            let handle = tc_link
+                .handle()
+                .map_err(|e| format!("{} legacy handle: {:?}", prog_name, e))?;
+
+            // Legacy netlink TC links cannot be pinned. Keep the filter attached and
+            // manage it by exact program name for health, rollback, and detach.
+            std::mem::forget(tc_link);
+            info!(instance = %self.iface, direction = %dir_str, priority, handle, "legacy TC program reattached from pinned runtime");
+            Ok(TcAttachOutcome::Legacy { priority, handle })
+        }
     }
 
     fn detach_with_cleanup(&self, remove_pin_path: bool) -> Result<(), String> {
@@ -1800,6 +1981,11 @@ impl FirewallInstance {
                         "[{}] Failed to remove pinned {} link: {}",
                         self.iface, prog_name, error
                     )),
+                }
+            }
+            if let Some(attach_type) = Self::tc_attach_type(prog_name) {
+                if let Err(error) = self.detach_legacy_tc_program(prog_name, attach_type) {
+                    errors.push(error);
                 }
             }
         }
