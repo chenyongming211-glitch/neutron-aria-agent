@@ -13,6 +13,9 @@ from ci.check_tc_acl_datapath import function_body
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 PARSER = os.path.join(ROOT, "ebpf", "src", "parser.rs")
 FRAGMENT = os.path.join(ROOT, "ebpf", "src", "fragment.rs")
+LIB = os.path.join(ROOT, "ebpf", "src", "lib.rs")
+MAPS = os.path.join(ROOT, "ebpf", "src", "maps.rs")
+INVENTORY = os.path.join(ROOT, "core", "src", "ebpf_ops", "inventory.rs")
 
 
 class LegacyPacketBoundsTest(unittest.TestCase):
@@ -22,6 +25,12 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             cls.source = handle.read()
         with open(FRAGMENT, "r", encoding="utf-8") as handle:
             cls.fragment_source = handle.read()
+        with open(LIB, "r", encoding="utf-8") as handle:
+            cls.lib_source = handle.read()
+        with open(MAPS, "r", encoding="utf-8") as handle:
+            cls.maps_source = handle.read()
+        with open(INVENTORY, "r", encoding="utf-8") as handle:
+            cls.inventory_source = handle.read()
 
     def test_ipv4_wire_length_is_not_added_to_packet_pointer(self):
         body = function_body(self.source, "parse_eth_ipv4")
@@ -73,6 +82,25 @@ class LegacyPacketBoundsTest(unittest.TestCase):
                 body,
                 re.compile(r"(?:FRAGMENT_CONFIG|FRAG_CONTEXT_V[46])\.get\([^;]+\)\.copied\(\)"),
                 "%s must not copy large map values onto the legacy verifier stack" % name,
+            )
+
+    def test_tc_connection_keys_use_per_cpu_scratch(self):
+        self.assertIn('map(name = "CT_KEY4_SCRATCH")', self.maps_source)
+        self.assertIn('map(name = "CT_KEY6_SCRATCH")', self.maps_source)
+        self.assertNotRegex(
+            self.lib_source,
+            re.compile(r"let\s+ct_key\s*=\s*CtKey[46]\s*\{"),
+            "TC connection keys must not remain live on the BPF stack",
+        )
+        self.assertEqual(self.lib_source.count("CT_KEY4_SCRATCH.get_ptr_mut(0)"), 2)
+        self.assertEqual(self.lib_source.count("CT_KEY6_SCRATCH.get_ptr_mut(0)"), 2)
+
+    def test_ct_key_scratch_is_not_persistent_inventory(self):
+        for name in ("CT_KEY4_SCRATCH", "CT_KEY6_SCRATCH"):
+            self.assertNotIn(
+                '"%s"' % name,
+                self.inventory_source,
+                "%s is packet scratch, not persistent runtime state" % name,
             )
 
 
