@@ -2,7 +2,14 @@
 
 Date: 2026-07-19
 
-Status: recorded design baseline; implementation not yet approved
+Status: retained low-level datapath baseline; implementation not yet approved
+
+Product scope, Neutron resources, node API, status semantics, delivery order,
+and release gates are superseded by
+[`2026-08-04-xdp-storm-ddos-product-integration-design.md`](2026-08-04-xdp-storm-ddos-product-integration-design.md).
+The ABI, parser, policer, map-isolation, and kernel-verification details in this
+document remain the technical baseline where the newer specification does not
+explicitly replace them.
 
 Analyzed target: `origin/v0.9-neutron-agent@96ee460`
 
