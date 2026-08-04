@@ -14,12 +14,20 @@ CANARY = os.path.join(
     "smoke",
     "neutron_aria_legacy_kernel_loader_canary.sh",
 )
+STANDALONE = os.path.join(
+    ROOT,
+    "deploy",
+    "smoke",
+    "aria_standalone_acl_tc_datapath_smoke.sh",
+)
 
 
 class LegacyKernelCanaryContractTest(unittest.TestCase):
     def setUp(self):
         with open(CANARY, "r", encoding="utf-8") as handle:
             self.source = handle.read()
+        with open(STANDALONE, "r", encoding="utf-8") as handle:
+            self.standalone_source = handle.read()
 
     def test_requires_exact_kernel_and_artifact_hashes(self):
         self.assertIn("4.18.0-553.5.1.el8_10.x86_64", self.source)
@@ -45,6 +53,12 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
             "neutron-openvswitch-agent",
         ):
             self.assertNotIn(command, lowered)
+
+    def test_dual_tc_readiness_accepts_exact_legacy_filters_without_link_pins(self):
+        self.assertIn('TC_ATTACH_MODE="legacy"', self.standalone_source)
+        self.assertIn('"tc_ingress"', self.standalone_source)
+        self.assertIn('"tc_egress"', self.standalone_source)
+        self.assertIn("assert_exact_legacy_tc_filter", self.standalone_source)
 
 
 if __name__ == "__main__":

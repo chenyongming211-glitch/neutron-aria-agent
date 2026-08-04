@@ -52,6 +52,7 @@ TC_INGRESS_LINK=""
 TC_EGRESS_LINK=""
 TC_INGRESS_PROG=""
 TC_EGRESS_PROG=""
+TC_ATTACH_MODE=""
 PRIVATE_BPFFS_MOUNTED=false
 PIN_ROOT_CREATED=false
 NETNS_CREATED=false
@@ -581,14 +582,44 @@ capture_links() {
     bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json"
 }
 
+assert_exact_legacy_tc_filter() {
+    local filter_json="$1" program_json="$2" expected_name="$3"
+    python3 - "${filter_json}" "${program_json}" "${expected_name}" <<'PY'
+import json,sys
+
+filters=json.load(open(sys.argv[1],encoding="utf-8"))
+program=json.load(open(sys.argv[2],encoding="utf-8"))
+expected_name=sys.argv[3]
+expected_id=program.get("id")
+assert isinstance(expected_id,int),(expected_name,program)
+
+def contains_exact_program(value):
+    if isinstance(value,dict):
+        if value.get("name")==expected_name and value.get("id")==expected_id:
+            return True
+        return any(contains_exact_program(child) for child in value.values())
+    if isinstance(value,list):
+        return any(contains_exact_program(child) for child in value)
+    return False
+
+assert contains_exact_program(filters),(expected_name,expected_id,filters)
+PY
+}
+
 assert_dual_tc_ready() {
-    [ -e "${TC_INGRESS_LINK}" ]
-    [ -e "${TC_EGRESS_LINK}" ]
+    if [ -e "${TC_INGRESS_LINK}" ] && [ -e "${TC_EGRESS_LINK}" ]; then
+        TC_ATTACH_MODE="tcx"
+    elif [ ! -e "${TC_INGRESS_LINK}" ] && [ ! -e "${TC_EGRESS_LINK}" ]; then
+        TC_ATTACH_MODE="legacy"
+    else
+        die "mixed TC attachment state: exactly one link pin exists"
+    fi
     capture_links dual-tc-ready
-    python3 - "${WORK_DIR}/dual-tc-ready-tc-ingress-link.json" \
-        "${WORK_DIR}/dual-tc-ready-tc-egress-link.json" \
-        "${WORK_DIR}/dual-tc-ready-tc-ingress-prog.json" \
-        "${WORK_DIR}/dual-tc-ready-tc-egress-prog.json" <<'PY'
+    if [ "${TC_ATTACH_MODE}" = tcx ]; then
+        python3 - "${WORK_DIR}/dual-tc-ready-tc-ingress-link.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-egress-link.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-ingress-prog.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-egress-prog.json" <<'PY'
 import json,sys
 ingress=json.load(open(sys.argv[1],encoding="utf-8"))
 egress=json.load(open(sys.argv[2],encoding="utf-8"))
@@ -597,6 +628,16 @@ egress_prog=json.load(open(sys.argv[4],encoding="utf-8"))
 assert ingress.get("prog_id")==ingress_prog.get("id"),(ingress,ingress_prog,"tc_ingress")
 assert egress.get("prog_id")==egress_prog.get("id"),(egress,egress_prog,"tc_egress")
 PY
+    else
+        assert_exact_legacy_tc_filter \
+            "${WORK_DIR}/dual-tc-ready-tc-ingress.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-ingress-prog.json" \
+            "tc_ingress"
+        assert_exact_legacy_tc_filter \
+            "${WORK_DIR}/dual-tc-ready-tc-egress.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-egress-prog.json" \
+            "tc_egress"
+    fi
     curl -fsS "${HTTP}/api/v1/instances" | python3 -c '
 import json,sys
 name=sys.argv[1]
@@ -792,10 +833,16 @@ assert len(value)==8 and value[7]==1,value
 }
 
 assert_health_poll_degrades() {
-    local lost_link="${TC_EGRESS_LINK}"
-    bpftool link detach pinned "${lost_link}"
-    [ -e "${lost_link}" ]
-    bpftool -j link show pinned "${lost_link}" >"${WORK_DIR}/detached-but-pinned-link.json"
+    if [ "${TC_ATTACH_MODE}" = legacy ]; then
+        tc filter del dev "${HOST_IF}" egress
+        tc -j filter show dev "${HOST_IF}" egress \
+            >"${WORK_DIR}/detached-legacy-egress-filter.json"
+    else
+        local lost_link="${TC_EGRESS_LINK}"
+        bpftool link detach pinned "${lost_link}"
+        [ -e "${lost_link}" ]
+        bpftool -j link show pinned "${lost_link}" >"${WORK_DIR}/detached-but-pinned-link.json"
+    fi
     sleep "${TC_HEALTH_WAIT_SECS}"
     curl -fsS "${HTTP}/api/v1/instances" >"${WORK_DIR}/health-degraded-instances.json"
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/config" >"${WORK_DIR}/health-degraded-config.json"
@@ -811,6 +858,20 @@ assert config["acl"] is False,config
 assert config["conntrack"] is False,config
 PY
     HEALTH_POLL_DEGRADED=true
+}
+
+recover_missing_legacy_tc_runtime() {
+    crash_agent_bounded || die "legacy TC recovery crash did not terminate cleanly"
+    SYSTEM_STARTED=false
+    restart_agent_preserving_bpffs || die "legacy TC recovery agent restart failed"
+    if [ "${MODE}" = system ]; then
+        start_system_mode
+    else
+        start_tap_mode
+    fi
+    assert_dual_tc_ready
+    [ "${TC_ATTACH_MODE}" = legacy ] || die "legacy TC recovery changed attachment mode"
+    assert_recovery_verified
 }
 
 assert_missing_tc_rejected() {
@@ -1159,6 +1220,7 @@ verify_cleanup() {
 write_summary() {
     printf '%s\n' "${cleanup_errors[@]:-}" >"${WORK_DIR}/cleanup-errors.txt" || return 1
     MODE="${MODE}" RESULT="${RESULT}" FAILURE_REASON="${FAILURE_REASON}" \
+    TC_ATTACH_MODE="${TC_ATTACH_MODE}" \
     WORK_DIR="${WORK_DIR}" DUAL_TC_READY="${DUAL_TC_READY}" \
     XDP_NEUTRAL="${XDP_NEUTRAL}" MISSING_TC_REJECTED="${MISSING_TC_REJECTED}" \
     HEALTH_POLL_DEGRADED="${HEALTH_POLL_DEGRADED}" RECOVERY_VERIFIED="${RECOVERY_VERIFIED}" \
@@ -1194,7 +1256,8 @@ elif (os.environ["XDP_DETACHED_PIN_RETAINED"].lower()=="true" and
     xdp_identity_status="passed"
 else:
     xdp_identity_status="failed"
-out={"mode":os.environ["MODE"],"dual_tc_ready":os.environ["DUAL_TC_READY"].lower()=="true",
+out={"mode":os.environ["MODE"],"tc_attach_mode":os.environ["TC_ATTACH_MODE"],
+     "dual_tc_ready":os.environ["DUAL_TC_READY"].lower()=="true",
      "xdp_neutral":os.environ["XDP_NEUTRAL"].lower()=="true",
      "missing_tc_rejected":os.environ["MISSING_TC_REJECTED"].lower()=="true",
      "health_poll_degraded":os.environ["HEALTH_POLL_DEGRADED"].lower()=="true",
@@ -1339,7 +1402,11 @@ run_denied_flow denied
 restart_healthy_pinned_runtime
 assert_health_poll_degrades
 assert_missing_tc_rejected
-recover_incomplete_pinned_runtime
+if [ "${TC_ATTACH_MODE}" = legacy ]; then
+    recover_missing_legacy_tc_runtime
+else
+    recover_incomplete_pinned_runtime
+fi
 run_fragment_tracking_field_smoke
 run_xdp_link_identity_field_smoke
 
