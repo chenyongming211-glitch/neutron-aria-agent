@@ -154,6 +154,11 @@ fn classify_map_delete(
     match result {
         Ok(()) => Ok(true),
         Err(aya::maps::MapError::KeyNotFound) => Ok(false),
+        Err(aya::maps::MapError::SyscallError(error))
+            if error.io_error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(false)
+        }
         Err(error) => Err(format!("{}: {}", context, error)),
     }
 }

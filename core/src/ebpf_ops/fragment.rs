@@ -15,6 +15,19 @@ pub(super) enum FragmentRemoveOutcome {
     Missing,
 }
 
+fn classify_fragment_remove(
+    result: Result<(), aya::maps::MapError>,
+    context: &str,
+) -> Result<FragmentRemoveOutcome, String> {
+    super::classify_map_delete(result, context).map(|removed| {
+        if removed {
+            FragmentRemoveOutcome::Removed
+        } else {
+            FragmentRemoveOutcome::Missing
+        }
+    })
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) enum FragmentRuntimeMapKind {
     ContextV4Lru,
@@ -579,11 +592,7 @@ fn scrub_fragment_context_v4(pin_path: &str, tap_id: Option<u32>) -> Result<u64,
                 .map(|expected| fragment_v4_key_matches_tap(key, expected))
                 .unwrap_or(true)
         },
-        |key| match map.borrow_mut().remove(key) {
-            Ok(()) => Ok(FragmentRemoveOutcome::Removed),
-            Err(aya::maps::MapError::KeyNotFound) => Ok(FragmentRemoveOutcome::Missing),
-            Err(error) => Err(format!("remove entry: {:?}", error)),
-        },
+        |key| classify_fragment_remove(map.borrow_mut().remove(key), "remove FRAG_CONTEXT_V4"),
         || {
             for item in map.borrow().keys() {
                 let key = item.map_err(|error| format!("verify FRAG_CONTEXT_V4: {:?}", error))?;
@@ -614,11 +623,7 @@ fn scrub_fragment_context_v6(pin_path: &str, tap_id: Option<u32>) -> Result<u64,
                 .map(|expected| fragment_v6_key_matches_tap(key, expected))
                 .unwrap_or(true)
         },
-        |key| match map.borrow_mut().remove(key) {
-            Ok(()) => Ok(FragmentRemoveOutcome::Removed),
-            Err(aya::maps::MapError::KeyNotFound) => Ok(FragmentRemoveOutcome::Missing),
-            Err(error) => Err(format!("remove entry: {:?}", error)),
-        },
+        |key| classify_fragment_remove(map.borrow_mut().remove(key), "remove FRAG_CONTEXT_V6"),
         || {
             for item in map.borrow().keys() {
                 let key = item.map_err(|error| format!("verify FRAG_CONTEXT_V6: {:?}", error))?;
@@ -640,14 +645,10 @@ pub fn scrub_fragment_contexts_strict(runtime: TapMapRuntime<'_>) -> Result<u64,
         || scrub_fragment_context_v6(runtime.pin_path, Some(runtime.tap_id)),
         || {
             let mut epoch_map = open_fragment_epoch(runtime.pin_path)?;
-            match epoch_map.remove(&runtime.tap_id) {
-                Ok(()) => Ok(FragmentRemoveOutcome::Removed),
-                Err(aya::maps::MapError::KeyNotFound) => Ok(FragmentRemoveOutcome::Missing),
-                Err(error) => Err(format!(
-                    "remove FRAGMENT_EPOCH for tap_id {}: {:?}",
-                    runtime.tap_id, error
-                )),
-            }
+            classify_fragment_remove(
+                epoch_map.remove(&runtime.tap_id),
+                &format!("remove FRAGMENT_EPOCH for tap_id {}", runtime.tap_id),
+            )
         },
     )
 }
