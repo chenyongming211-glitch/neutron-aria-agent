@@ -1838,6 +1838,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tc_attachment_readiness_accepts_tcx_or_observed_owned_legacy_link() {
+        assert!(tc_attachment_ready(true, false, false));
+        assert!(tc_attachment_ready(false, true, true));
+        assert!(!tc_attachment_ready(false, true, false));
+        assert!(!tc_attachment_ready(false, false, true));
+        assert!(!tc_attachment_ready(false, false, false));
+    }
+
+    #[test]
+    fn legacy_tc_health_matches_only_the_exact_program_name() {
+        let output = concat!(
+            "filter protocol all pref 49152 bpf chain 0\n",
+            "filter protocol all pref 49152 bpf chain 0 handle 0x1 tc_ingress direct-action id 77\n",
+        );
+
+        assert!(tc_filter_output_contains_program(output, "tc_ingress"));
+        assert!(!tc_filter_output_contains_program(output, "tc_egress"));
+        assert!(!tc_filter_output_contains_program(
+            "handle 0x1 tc_ingress_backup direct-action",
+            "tc_ingress"
+        ));
+    }
+
+    #[test]
+    fn legacy_tc_cleanup_treats_only_missing_filter_as_idempotent() {
+        assert!(classify_legacy_tc_cleanup(Ok(()), "tc_ingress").unwrap());
+        assert!(!classify_legacy_tc_cleanup(
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "tc_ingress"
+        )
+        .unwrap());
+
+        let error = classify_legacy_tc_cleanup(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            "tc_ingress",
+        )
+        .unwrap_err();
+        assert!(error.contains("tc_ingress"));
+        assert!(error.contains("permission denied"));
+    }
+
+    #[test]
     fn tc_acl_link_health_requires_both_directions_but_not_xdp() {
         assert!(TcAclLinkHealth::new(true, true, false).acl_ready());
         assert!(!TcAclLinkHealth::new(true, false, true).acl_ready());
