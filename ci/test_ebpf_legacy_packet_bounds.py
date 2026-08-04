@@ -61,6 +61,20 @@ class LegacyPacketBoundsTest(unittest.TestCase):
                 "%s must unwrap map values before forwarding their references" % name,
             )
 
+    def test_fragment_hot_paths_borrow_large_map_values_in_place(self):
+        for name in (
+            "resolve_v4",
+            "resolve_v6",
+            "install_allowed_v4",
+            "install_allowed_v6",
+        ):
+            body = function_body(self.fragment_source, name)
+            self.assertNotRegex(
+                body,
+                re.compile(r"(?:FRAGMENT_CONFIG|FRAG_CONTEXT_V[46])\.get\([^;]+\)\.copied\(\)"),
+                "%s must not copy large map values onto the legacy verifier stack" % name,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

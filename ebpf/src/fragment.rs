@@ -117,14 +117,14 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_NON_INITIAL);
 
     let key = resolve_v4_key(info, p);
-    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY) {
         Some(config) => config,
         None => {
             record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_CONFIG_MISSING);
             return ResolveOutcome::Drop;
         }
     };
-    let authority = config_authority_drop_reason(p, false, &config);
+    let authority = config_authority_drop_reason(p, false, config);
     if authority != 0 {
         record_drop(p, FRAGMENT_FAMILY_IPV4, authority);
         return ResolveOutcome::Drop;
@@ -136,7 +136,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
             return ResolveOutcome::Drop;
         }
     };
-    let value = match FRAG_CONTEXT_V4.get(&key).copied() {
+    let value = match FRAG_CONTEXT_V4.get(&key) {
         Some(value) => value,
         None => {
             record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_CONTEXT_MISSING);
@@ -146,9 +146,9 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     let decision = fragment_resolve_decision(
         p.tap_id,
         false,
-        Some(&config),
+        Some(config),
         Some(&epoch),
-        Some(&value),
+        Some(value),
         p.acl_bank_snapshot,
         p.now,
         info.fragment_offset,
@@ -159,7 +159,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         return ResolveOutcome::Drop;
     }
 
-    let proto = match fragment_context_l4_proto(&value) {
+    let proto = match fragment_context_l4_proto(value) {
         Some(proto) => proto,
         None => {
             p.drop_reason = DROP_FRAGMENT_CONTEXT_INVALID;
@@ -182,14 +182,14 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_NON_INITIAL);
 
     let key = resolve_v6_key(info, p);
-    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY) {
         Some(config) => config,
         None => {
             record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_CONFIG_MISSING);
             return ResolveOutcome::Drop;
         }
     };
-    let authority = config_authority_drop_reason(p, true, &config);
+    let authority = config_authority_drop_reason(p, true, config);
     if authority != 0 {
         record_drop(p, FRAGMENT_FAMILY_IPV6, authority);
         return ResolveOutcome::Drop;
@@ -201,7 +201,7 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
             return ResolveOutcome::Drop;
         }
     };
-    let value = match FRAG_CONTEXT_V6.get(&key).copied() {
+    let value = match FRAG_CONTEXT_V6.get(&key) {
         Some(value) => value,
         None => {
             record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_CONTEXT_MISSING);
@@ -211,9 +211,9 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     let decision = fragment_resolve_decision(
         p.tap_id,
         true,
-        Some(&config),
+        Some(config),
         Some(&epoch),
-        Some(&value),
+        Some(value),
         p.acl_bank_snapshot,
         p.now,
         info.fragment_offset,
@@ -224,7 +224,7 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         return ResolveOutcome::Drop;
     }
 
-    let proto = match fragment_context_l4_proto(&value) {
+    let proto = match fragment_context_l4_proto(value) {
         Some(proto) => proto,
         None => {
             p.drop_reason = DROP_FRAGMENT_CONTEXT_INVALID;
@@ -273,14 +273,14 @@ pub unsafe fn install_allowed_v4(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false) {
         return FragmentInstallDecision::Pass;
     }
-    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY) {
         Some(config) => config,
         None => {
             record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_CONFIG_MISSING);
             return fragment_install_result(false);
         }
     };
-    let authority = config_authority_drop_reason(p, false, &config);
+    let authority = config_authority_drop_reason(p, false, config);
     if authority != 0 {
         record_drop(p, FRAGMENT_FAMILY_IPV4, authority);
         return fragment_install_result(false);
@@ -337,14 +337,14 @@ pub unsafe fn install_allowed_v6(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true) {
         return FragmentInstallDecision::Pass;
     }
-    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY) {
         Some(config) => config,
         None => {
             record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_CONFIG_MISSING);
             return fragment_install_result(false);
         }
     };
-    let authority = config_authority_drop_reason(p, true, &config);
+    let authority = config_authority_drop_reason(p, true, config);
     if authority != 0 {
         record_drop(p, FRAGMENT_FAMILY_IPV6, authority);
         return fragment_install_result(false);
