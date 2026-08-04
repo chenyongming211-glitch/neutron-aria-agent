@@ -15,10 +15,11 @@ use aria_ebpf_abi::FragmentEpochValue;
 
 const FRAGMENT_CONFIG_KEY: u32 = 0;
 
+#[repr(u8)]
 pub enum ResolveOutcome {
-    NotRequired,
-    Resolved(u8),
-    Drop,
+    NotRequired = 0,
+    Resolved = 1,
+    Drop = 2,
 }
 
 #[inline(always)]
@@ -149,7 +150,8 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     };
     info.src_port = value.src_port;
     info.dst_port = value.dst_port;
-    ResolveOutcome::Resolved(proto)
+    info.proto = proto;
+    ResolveOutcome::Resolved
 }
 
 #[inline(never)]
@@ -197,7 +199,8 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     };
     info.src_port = value.src_port;
     info.dst_port = value.dst_port;
-    ResolveOutcome::Resolved(proto)
+    info.proto = proto;
+    ResolveOutcome::Resolved
 }
 
 #[inline(never)]

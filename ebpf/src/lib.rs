@@ -167,8 +167,8 @@ unsafe fn try_tc_egress_v4(
 ) -> i32 {
     match fragment::resolve_v4(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => {
-            p.proto = proto;
+        fragment::ResolveOutcome::Resolved => {
+            p.proto = info.proto;
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
@@ -234,8 +234,8 @@ unsafe fn try_tc_egress_v6(
 ) -> i32 {
     match fragment::resolve_v6(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => {
-            p.proto = proto;
+        fragment::ResolveOutcome::Resolved => {
+            p.proto = info.proto;
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
@@ -360,8 +360,8 @@ unsafe fn try_tc_ingress_v4(
 ) -> i32 {
     match fragment::resolve_v4(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => {
-            p.proto = proto;
+        fragment::ResolveOutcome::Resolved => {
+            p.proto = info.proto;
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
@@ -427,8 +427,8 @@ unsafe fn try_tc_ingress_v6(
 ) -> i32 {
     match fragment::resolve_v6(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => {
-            p.proto = proto;
+        fragment::ResolveOutcome::Resolved => {
+            p.proto = info.proto;
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
