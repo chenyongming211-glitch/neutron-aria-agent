@@ -106,9 +106,7 @@ class _AriaAclList(_AriaAclCommandMixin, extension.ClientExtensionList):
 
     def call_server(self, neutron_client, search_opts, parsed_args):
         return neutron_client.list_ext(
-            self.collection,
             self.path,
-            True,
             **search_opts
         )
 

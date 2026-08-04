@@ -80,8 +80,8 @@ class AriaAclCliTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def list_ext(self, collection, path, retrieve_all, **kwargs):
-                self.calls.append((collection, path, retrieve_all, kwargs))
+            def list_ext(self, path, **kwargs):
+                self.calls.append((path, kwargs))
                 return {"aria_acl_policies": []}
 
         client = FakeClient()
@@ -99,7 +99,7 @@ class AriaAclCliTest(unittest.TestCase):
         self.assertTrue(command.pagination_support)
         self.assertTrue(command.sorting_support)
         self.assertEqual(
-            ("aria_acl_policies", "/aria-acl-policies", True, {
+            ("/aria-acl-policies", {
                 "limit": 25,
                 "sort_key": ["name"],
                 "sort_dir": ["desc"],
