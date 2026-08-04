@@ -186,6 +186,7 @@ where
 mod map_delete_tests {
     use super::{classify_map_delete, execute_map_delete_batch};
     use aya::maps::MapError;
+    use aya::sys::SyscallError;
 
     #[test]
     fn map_delete_classifier_only_treats_key_not_found_as_idempotent_success() {
@@ -202,6 +203,16 @@ mod map_delete_tests {
         .unwrap_err();
         assert!(error.contains("delete test key"));
         assert!(error.contains("invalid key size"));
+    }
+
+    #[test]
+    fn map_delete_classifier_treats_el8_syscall_enoent_as_idempotent_success() {
+        let missing = MapError::SyscallError(SyscallError {
+            call: "bpf_map_delete_elem",
+            io_error: std::io::Error::from(std::io::ErrorKind::NotFound),
+        });
+
+        assert!(!classify_map_delete(Err(missing), "delete test key").unwrap());
     }
 
     #[test]
