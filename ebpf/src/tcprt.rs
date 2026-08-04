@@ -4,7 +4,10 @@ use crate::common::{
     TCPRT_STATE_FIN_WAIT, TCPRT_STATE_RST, TCPRT_STATE_SYN_SENT, TCPRT_STATE_TIME_WAIT,
     TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_RST, TCP_FLAG_SYN,
 };
-use crate::maps::{TCPRT_TABLE_V4, TCPRT_TABLE_V6, TCPRT_VALUE_BUF};
+use crate::maps::{
+    CT_KEY4_SCRATCH, CT_KEY6_SCRATCH, CT_KEY_DERIVED_SLOT, TCPRT_TABLE_V4, TCPRT_TABLE_V6,
+    TCPRT_VALUE_BUF,
+};
 use crate::parser::PacketInfo;
 
 #[inline(always)]
@@ -248,16 +251,18 @@ pub unsafe fn track_tcp_rt_v4_rev(
     now: u64,
     from_ingress_hook: bool,
 ) {
-    let fwd_key = CtKey4 {
-        tap_id,
-        src_ip: info.dst_ip,
-        dst_ip: info.src_ip,
-        src_port: info.dst_port,
-        dst_port: info.src_port,
-        proto: info.proto,
-        pad: [0; 3],
+    let key_ptr = match CT_KEY4_SCRATCH.get_ptr_mut(CT_KEY_DERIVED_SLOT) {
+        Some(ptr) => ptr,
+        None => return,
     };
-    track_tcp_rt_v4(&fwd_key, info, now, false, from_ingress_hook);
+    (*key_ptr).tap_id = tap_id;
+    (*key_ptr).src_ip = info.dst_ip;
+    (*key_ptr).dst_ip = info.src_ip;
+    (*key_ptr).src_port = info.dst_port;
+    (*key_ptr).dst_port = info.src_port;
+    (*key_ptr).proto = info.proto;
+    (*key_ptr).pad = [0; 3];
+    track_tcp_rt_v4(&*key_ptr, info, now, false, from_ingress_hook);
 }
 
 /// Track TCP-RT for either direction without relying on conntrack direction hints.
@@ -271,46 +276,43 @@ pub unsafe fn track_tcp_rt_v4_auto(
 ) {
     let is_syn = (info.tcp_flags & TCP_FLAG_SYN) != 0;
     let is_ack = (info.tcp_flags & TCP_FLAG_ACK) != 0;
-    let fwd_key = CtKey4 {
-        tap_id,
-        src_ip: info.src_ip,
-        dst_ip: info.dst_ip,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: info.proto,
-        pad: [0; 3],
+    let key_ptr = match CT_KEY4_SCRATCH.get_ptr_mut(CT_KEY_DERIVED_SLOT) {
+        Some(ptr) => ptr,
+        None => return,
     };
+    (*key_ptr).tap_id = tap_id;
+    (*key_ptr).src_ip = info.src_ip;
+    (*key_ptr).dst_ip = info.dst_ip;
+    (*key_ptr).src_port = info.src_port;
+    (*key_ptr).dst_port = info.dst_port;
+    (*key_ptr).proto = info.proto;
+    (*key_ptr).pad = [0; 3];
 
     if is_syn && !is_ack {
         // Degraded auto-path cannot distinguish a true second-hook observation
         // from a client SYN retransmission. Keep the first SYN timestamp stable,
         // but allow a previously closed slot to be reinitialized for a new flow.
         if TCPRT_TABLE_V4
-            .get(&fwd_key)
+            .get(&*key_ptr)
             .map(|entry| entry.close_ts > 0)
             .unwrap_or(true)
         {
-            track_tcp_rt_v4(&fwd_key, info, now, true, from_ingress_hook);
+            track_tcp_rt_v4(&*key_ptr, info, now, true, from_ingress_hook);
         }
         return;
     }
 
-    if TCPRT_TABLE_V4.get(&fwd_key).is_some() {
-        track_tcp_rt_v4(&fwd_key, info, now, true, from_ingress_hook);
+    if TCPRT_TABLE_V4.get(&*key_ptr).is_some() {
+        track_tcp_rt_v4(&*key_ptr, info, now, true, from_ingress_hook);
         return;
     }
 
-    let rev_key = CtKey4 {
-        tap_id,
-        src_ip: info.dst_ip,
-        dst_ip: info.src_ip,
-        src_port: info.dst_port,
-        dst_port: info.src_port,
-        proto: info.proto,
-        pad: [0; 3],
-    };
-    if TCPRT_TABLE_V4.get(&rev_key).is_some() {
-        track_tcp_rt_v4_rev(tap_id, info, now, from_ingress_hook);
+    (*key_ptr).src_ip = info.dst_ip;
+    (*key_ptr).dst_ip = info.src_ip;
+    (*key_ptr).src_port = info.dst_port;
+    (*key_ptr).dst_port = info.src_port;
+    if TCPRT_TABLE_V4.get(&*key_ptr).is_some() {
+        track_tcp_rt_v4(&*key_ptr, info, now, false, from_ingress_hook);
     }
 }
 
@@ -481,16 +483,18 @@ pub unsafe fn track_tcp_rt_v6_rev(
     now: u64,
     from_ingress_hook: bool,
 ) {
-    let fwd_key = CtKey6 {
-        tap_id,
-        src_ip: info.dst_ip_v6,
-        dst_ip: info.src_ip_v6,
-        src_port: info.dst_port,
-        dst_port: info.src_port,
-        proto: info.proto,
-        pad: [0; 3],
+    let key_ptr = match CT_KEY6_SCRATCH.get_ptr_mut(CT_KEY_DERIVED_SLOT) {
+        Some(ptr) => ptr,
+        None => return,
     };
-    track_tcp_rt_v6(&fwd_key, info, now, false, from_ingress_hook);
+    (*key_ptr).tap_id = tap_id;
+    (*key_ptr).src_ip = info.dst_ip_v6;
+    (*key_ptr).dst_ip = info.src_ip_v6;
+    (*key_ptr).src_port = info.dst_port;
+    (*key_ptr).dst_port = info.src_port;
+    (*key_ptr).proto = info.proto;
+    (*key_ptr).pad = [0; 3];
+    track_tcp_rt_v6(&*key_ptr, info, now, false, from_ingress_hook);
 }
 
 /// Track TCP-RT for either direction without relying on conntrack direction hints.
@@ -503,42 +507,39 @@ pub unsafe fn track_tcp_rt_v6_auto(
 ) {
     let is_syn = (info.tcp_flags & TCP_FLAG_SYN) != 0;
     let is_ack = (info.tcp_flags & TCP_FLAG_ACK) != 0;
-    let fwd_key = CtKey6 {
-        tap_id,
-        src_ip: info.src_ip_v6,
-        dst_ip: info.dst_ip_v6,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: info.proto,
-        pad: [0; 3],
+    let key_ptr = match CT_KEY6_SCRATCH.get_ptr_mut(CT_KEY_DERIVED_SLOT) {
+        Some(ptr) => ptr,
+        None => return,
     };
+    (*key_ptr).tap_id = tap_id;
+    (*key_ptr).src_ip = info.src_ip_v6;
+    (*key_ptr).dst_ip = info.dst_ip_v6;
+    (*key_ptr).src_port = info.src_port;
+    (*key_ptr).dst_port = info.dst_port;
+    (*key_ptr).proto = info.proto;
+    (*key_ptr).pad = [0; 3];
 
     if is_syn && !is_ack {
         if TCPRT_TABLE_V6
-            .get(&fwd_key)
+            .get(&*key_ptr)
             .map(|entry| entry.close_ts > 0)
             .unwrap_or(true)
         {
-            track_tcp_rt_v6(&fwd_key, info, now, true, from_ingress_hook);
+            track_tcp_rt_v6(&*key_ptr, info, now, true, from_ingress_hook);
         }
         return;
     }
 
-    if TCPRT_TABLE_V6.get(&fwd_key).is_some() {
-        track_tcp_rt_v6(&fwd_key, info, now, true, from_ingress_hook);
+    if TCPRT_TABLE_V6.get(&*key_ptr).is_some() {
+        track_tcp_rt_v6(&*key_ptr, info, now, true, from_ingress_hook);
         return;
     }
 
-    let rev_key = CtKey6 {
-        tap_id,
-        src_ip: info.dst_ip_v6,
-        dst_ip: info.src_ip_v6,
-        src_port: info.dst_port,
-        dst_port: info.src_port,
-        proto: info.proto,
-        pad: [0; 3],
-    };
-    if TCPRT_TABLE_V6.get(&rev_key).is_some() {
-        track_tcp_rt_v6_rev(tap_id, info, now, from_ingress_hook);
+    (*key_ptr).src_ip = info.dst_ip_v6;
+    (*key_ptr).dst_ip = info.src_ip_v6;
+    (*key_ptr).src_port = info.dst_port;
+    (*key_ptr).dst_port = info.src_port;
+    if TCPRT_TABLE_V6.get(&*key_ptr).is_some() {
+        track_tcp_rt_v6(&*key_ptr, info, now, false, from_ingress_hook);
     }
 }

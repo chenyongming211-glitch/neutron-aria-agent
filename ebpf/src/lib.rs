@@ -176,7 +176,7 @@ unsafe fn try_tc_egress_v4(
             return p.action as i32;
         }
     }
-    let ct_key_ptr = match maps::CT_KEY4_SCRATCH.get_ptr_mut(0) {
+    let ct_key_ptr = match maps::CT_KEY4_SCRATCH.get_ptr_mut(maps::CT_KEY_PRIMARY_SLOT) {
         Some(ptr) => ptr,
         None => return TC_ACT_OK,
     };
@@ -246,7 +246,7 @@ unsafe fn try_tc_egress_v6(
             return p.action as i32;
         }
     }
-    let ct_key_ptr = match maps::CT_KEY6_SCRATCH.get_ptr_mut(0) {
+    let ct_key_ptr = match maps::CT_KEY6_SCRATCH.get_ptr_mut(maps::CT_KEY_PRIMARY_SLOT) {
         Some(ptr) => ptr,
         None => return TC_ACT_OK,
     };
@@ -375,7 +375,7 @@ unsafe fn try_tc_ingress_v4(
             return p.action as i32;
         }
     }
-    let ct_key_ptr = match maps::CT_KEY4_SCRATCH.get_ptr_mut(0) {
+    let ct_key_ptr = match maps::CT_KEY4_SCRATCH.get_ptr_mut(maps::CT_KEY_PRIMARY_SLOT) {
         Some(ptr) => ptr,
         None => return TC_ACT_OK,
     };
@@ -445,7 +445,7 @@ unsafe fn try_tc_ingress_v6(
             return p.action as i32;
         }
     }
-    let ct_key_ptr = match maps::CT_KEY6_SCRATCH.get_ptr_mut(0) {
+    let ct_key_ptr = match maps::CT_KEY6_SCRATCH.get_ptr_mut(maps::CT_KEY_PRIMARY_SLOT) {
         Some(ptr) => ptr,
         None => return TC_ACT_OK,
     };
