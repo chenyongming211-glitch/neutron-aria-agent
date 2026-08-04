@@ -35,6 +35,7 @@ mod ssl_support;
 mod system_manager;
 mod tap_registry;
 mod trace_backend;
+mod xdp_link_health;
 
 #[derive(Parser)]
 #[command(name = "aria-agent")]
