@@ -201,7 +201,8 @@ def check_production_acl_smoke():
         "POLICY_FILE",
         "install_policy_rules",
         "policy.json.latest.bak",
-        "from neutron_aria.policies.aria_acl import list_rules",
+        "policy.json.latest.meta",
+        "from neutron_aria.policies.aria_acl import merge_policy_file",
     ):
         if term not in _read(os.path.join(
             "deploy", "kolla", "smoke", "neutron_aria_acl_plugin_load_smoke.sh"

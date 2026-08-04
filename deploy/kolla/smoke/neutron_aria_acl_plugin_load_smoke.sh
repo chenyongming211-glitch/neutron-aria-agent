@@ -59,6 +59,7 @@ backup_current_state() {
     local conf_backup="${STATE_DIR}/neutron.conf.${ts}.bak"
     local package_backup="${STATE_DIR}/neutron_aria.${ts}.tgz"
     local policy_backup="${STATE_DIR}/policy.json.${ts}.bak"
+    local policy_meta="${STATE_DIR}/policy.json.${ts}.meta"
     local policy_marker="${STATE_DIR}/policy.json.${ts}.none"
 
     cp -a "${NEUTRON_CONF}" "${conf_backup}"
@@ -66,10 +67,14 @@ backup_current_state() {
 
     if docker exec -u 0 "${CONTAINER}" test -f "${POLICY_FILE}"; then
         docker cp "${CONTAINER}:${POLICY_FILE}" "${policy_backup}"
+        docker exec -u 0 "${CONTAINER}" stat -c '%u:%g %a' "${POLICY_FILE}" \
+            > "${policy_meta}"
         ln -sfn "${policy_backup}" "${STATE_DIR}/policy.json.latest.bak"
+        ln -sfn "${policy_meta}" "${STATE_DIR}/policy.json.latest.meta"
     else
         : > "${policy_marker}"
         ln -sfn "${policy_marker}" "${STATE_DIR}/policy.json.latest.bak"
+        rm -f "${STATE_DIR}/policy.json.latest.meta"
         log "No existing policy file found; rollback will remove the installation"
     fi
 
@@ -166,35 +171,12 @@ install_policy_rules() {
     docker exec -i -u 0 "${CONTAINER}" python - "${POLICY_FILE}" <<'PY'
 from __future__ import print_function
 
-import json
-import os
 import sys
 
-from neutron_aria.policies.aria_acl import list_rules
+from neutron_aria.policies.aria_acl import merge_policy_file
 
 path = sys.argv[1]
-if os.path.exists(path):
-    with open(path, "r") as handle:
-        try:
-            data = json.load(handle)
-        except ValueError:
-            data = {}
-else:
-    data = {}
-
-changed = False
-for key, value in list_rules().items():
-    if data.get(key) != value:
-        data[key] = value
-        changed = True
-
-if changed or not os.path.exists(path):
-    tmp = "%s.tmp" % path
-    with open(tmp, "w") as handle:
-        json.dump(data, handle, indent=4, sort_keys=True)
-        handle.write("\n")
-    os.rename(tmp, path)
-
+changed = merge_policy_file(path)
 print("policy_changed=%s" % changed)
 PY
 }
@@ -265,7 +247,15 @@ rollback() {
             *.bak)
                 log "Restoring ${POLICY_FILE}"
                 docker cp "${policy_target}" "${CONTAINER}:${POLICY_FILE}"
-                docker exec -u 0 "${CONTAINER}" chmod 0640 "${POLICY_FILE}" || true
+                local policy_meta="${STATE_DIR}/policy.json.latest.meta"
+                if [ -e "${policy_meta}" ]; then
+                    local policy_owner policy_mode
+                    read -r policy_owner policy_mode < "$(readlink -f "${policy_meta}")"
+                    docker exec -u 0 "${CONTAINER}" chown \
+                        "${policy_owner}" "${POLICY_FILE}"
+                    docker exec -u 0 "${CONTAINER}" chmod \
+                        "${policy_mode}" "${POLICY_FILE}"
+                fi
                 ;;
             *.none)
                 log "Removing smoke-installed ${POLICY_FILE}"

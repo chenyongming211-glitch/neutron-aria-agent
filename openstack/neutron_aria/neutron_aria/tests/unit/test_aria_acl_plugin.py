@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import inspect
+import json
 import os
 import sys
 import tempfile
@@ -1039,6 +1040,29 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "role:admin or role:service",
             rules["delete_aria_acl_port_status"],
         )
+
+    def test_policy_merge_preserves_existing_file_mode(self):
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            with open(path, "w") as handle:
+                json.dump({"existing:rule": "role:admin"}, handle)
+            os.chmod(path, 0o644)
+
+            changed = aria_acl_policy.merge_policy_file(path)
+
+            self.assertTrue(changed)
+            self.assertEqual(0o644, os.stat(path).st_mode & 0o777)
+            with open(path, "r") as handle:
+                merged = json.load(handle)
+            self.assertEqual("role:admin", merged["existing:rule"])
+            self.assertEqual(
+                "role:admin",
+                merged["create_aria_acl_policy"],
+            )
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_policy_rule_binding_effective_read(self):
         plugin = AriaAclPlugin()
