@@ -13,6 +13,7 @@ from ci.check_tc_acl_datapath import function_body
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 PARSER = os.path.join(ROOT, "ebpf", "src", "parser.rs")
 FRAGMENT = os.path.join(ROOT, "ebpf", "src", "fragment.rs")
+EBPF_LIB = os.path.join(ROOT, "ebpf", "src", "lib.rs")
 
 
 class LegacyPacketBoundsTest(unittest.TestCase):
@@ -22,6 +23,8 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             cls.source = handle.read()
         with open(FRAGMENT, "r", encoding="utf-8") as handle:
             cls.fragment_source = handle.read()
+        with open(EBPF_LIB, "r", encoding="utf-8") as handle:
+            cls.lib_source = handle.read()
 
     def test_ipv4_wire_length_is_not_added_to_packet_pointer(self):
         body = function_body(self.source, "parse_eth_ipv4")
@@ -74,6 +77,17 @@ class LegacyPacketBoundsTest(unittest.TestCase):
                 re.compile(r"(?:FRAGMENT_CONFIG|FRAG_CONTEXT_V[46])\.get\([^;]+\)\.copied\(\)"),
                 "%s must not copy large map values onto the legacy verifier stack" % name,
             )
+
+    def test_ct_miss_fallbacks_are_inlined_for_legacy_stack_budget(self):
+        for direction in ("ingress", "egress"):
+            for family in ("v4", "v6"):
+                name = "phase_ct_miss_tc_%s_%s" % (direction, family)
+                self.assertRegex(
+                    self.lib_source,
+                    re.compile(r"#\[inline\(always\)\]\s*unsafe fn %s\b" % name),
+                    "%s must share its caller frame on kernels with a 512-byte call-chain budget"
+                    % name,
+                )
 
 
 if __name__ == "__main__":

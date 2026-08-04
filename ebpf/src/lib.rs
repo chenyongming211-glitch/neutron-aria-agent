@@ -726,7 +726,7 @@ unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 20], u32>, tap_id: u32, ip: [u8; 16]) -
     map.get(&key).copied()
 }
 
-// --- Phase functions (each is #[inline(never)] to isolate stack frames) ---
+// --- Phase functions ---
 
 /// Phase: CT lookup for IPv4. Sets p.ct_state, p.matched_*, p.flags (CT_HIT, IS_FORWARD).
 #[inline(never)]
@@ -996,7 +996,7 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
 }
 
 /// CT miss fallback for TC ingress IPv4.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_ct_miss_tc_ingress_v4(
     ctx: &TcContext,
     info: &parser::PacketInfo,
@@ -1028,7 +1028,7 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
 }
 
 /// CT miss fallback for TC ingress IPv6.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_ct_miss_tc_ingress_v6(
     ctx: &TcContext,
     info: &parser::PacketInfo,
@@ -1142,7 +1142,7 @@ unsafe fn phase_ct_fastpath_tc_egress_v6(
 }
 
 /// CT miss fallback for TC egress IPv4.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_ct_miss_tc_egress_v4(
     ctx: &TcContext,
     info: &parser::PacketInfo,
@@ -1174,7 +1174,7 @@ unsafe fn phase_ct_miss_tc_egress_v4(
 }
 
 /// CT miss fallback for TC egress IPv6.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_ct_miss_tc_egress_v6(
     ctx: &TcContext,
     info: &parser::PacketInfo,
