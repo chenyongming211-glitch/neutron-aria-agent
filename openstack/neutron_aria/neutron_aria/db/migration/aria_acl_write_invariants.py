@@ -9,6 +9,7 @@ depends_on = None
 
 RULE_INDEX = "uq_aria_acl_rules_enabled_priority"
 BINDING_INDEX = "uq_aria_acl_bindings_enabled_target"
+GUARD_TABLES = ("aria_acl_rules", "aria_acl_bindings")
 
 
 def _load_alembic_modules():
@@ -168,6 +169,54 @@ def upgrade(op_handle=None, sa_module=None):
         ["target_type", "target_id", "enabled_guard"],
         unique=True,
     )
+
+
+def upgrade_existing_schema(
+        bind,
+        op_handle=None,
+        sa_module=None,
+        inspector=None):
+    """Apply the write-invariant migration to an existing product schema.
+
+    The legacy Kolla environment does not discover this package through
+    neutron-db-manage. Keep that compatibility bridge explicit and idempotent
+    while still using the authoritative Alembic migration above.
+    """
+    if sa_module is None:
+        try:
+            import sqlalchemy as sa_module
+        except Exception:
+            raise RuntimeError("sqlalchemy is required for aria_acl migration")
+    if inspector is None:
+        inspector = sa_module.inspect(bind)
+
+    migrated = []
+    for table_name in GUARD_TABLES:
+        columns = set(
+            column["name"]
+            for column in inspector.get_columns(table_name)
+        )
+        if "enabled_guard" in columns:
+            migrated.append(table_name)
+
+    if len(migrated) == len(GUARD_TABLES):
+        return False
+    if migrated:
+        raise RuntimeError(
+            "aria_acl_partial_write_invariant_schema: migrated=%s"
+            % ",".join(sorted(migrated))
+        )
+
+    if op_handle is None:
+        try:
+            from alembic.migration import MigrationContext
+            from alembic.operations import Operations
+        except Exception:
+            raise RuntimeError("alembic is required for aria_acl migration")
+        op_handle = Operations(MigrationContext.configure(bind))
+
+    upgrade(op_handle=op_handle, sa_module=sa_module)
+    return True
 
 
 def downgrade(op_handle=None):

@@ -6,3 +6,4 @@ from neutron_aria.db.migration.aria_acl_write_invariants import downgrade
 from neutron_aria.db.migration.aria_acl_write_invariants import down_revision
 from neutron_aria.db.migration.aria_acl_write_invariants import revision
 from neutron_aria.db.migration.aria_acl_write_invariants import upgrade
+from neutron_aria.db.migration.aria_acl_write_invariants import upgrade_existing_schema

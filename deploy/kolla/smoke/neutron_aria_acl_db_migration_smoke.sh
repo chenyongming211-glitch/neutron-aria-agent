@@ -38,6 +38,9 @@ cfg.CONF(args=[
 
 from neutron import context
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
+from neutron_aria.db.migration.aria_acl_write_invariants import (
+    upgrade_existing_schema,
+)
 
 
 ACTION = sys.argv[1]
@@ -67,7 +70,12 @@ ctx = context.get_admin_context()
 repo = NeutronDbAriaAclRepository(ctx, auto_create=False)
 
 if ACTION == "upgrade":
+    changed = upgrade_existing_schema(
+        repo.session.get_bind(),
+        sa_module=repo.sa,
+    )
     repo.ensure_schema()
+    print("write_invariants_upgraded=%s" % changed)
     print("upgraded=%s" % ",".join(existing_tables(repo)))
 elif ACTION == "check":
     expected = sorted(table.name for table in repo.tables.values())

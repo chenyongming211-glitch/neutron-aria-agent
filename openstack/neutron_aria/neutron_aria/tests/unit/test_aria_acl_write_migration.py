@@ -74,6 +74,17 @@ class FakeMigrationBind(object):
         raise AssertionError("unexpected migration query: %s" % statement)
 
 
+class FakeInspector(object):
+    def __init__(self, columns):
+        self.columns = columns
+
+    def get_columns(self, table_name):
+        return [
+            {"name": name}
+            for name in self.columns.get(table_name, ())
+        ]
+
+
 class FakeNotifier(object):
     def __init__(self):
         self.events = []
@@ -282,6 +293,66 @@ class AriaAclWriteMigrationTestCase(unittest.TestCase):
         self.assertEqual([], op.added_columns)
         self.assertEqual([], op.created_indexes)
         self.assertEqual([], op.executed)
+
+    def test_runtime_upgrade_applies_missing_write_invariants(self):
+        migration = self._load_write_invariant_migration()
+        bind = FakeMigrationBind()
+        op = FakeAlembicOp(bind=bind)
+        inspector = FakeInspector({
+            "aria_acl_rules": ("id", "enabled"),
+            "aria_acl_bindings": ("id", "enabled"),
+        })
+
+        changed = migration.upgrade_existing_schema(
+            bind,
+            op_handle=op,
+            sa_module=FakeSqlAlchemy(),
+            inspector=inspector,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(2, len(op.added_columns))
+        self.assertEqual(2, len(op.created_indexes))
+
+    def test_runtime_upgrade_is_idempotent_after_migration(self):
+        migration = self._load_write_invariant_migration()
+        bind = FakeMigrationBind()
+        op = FakeAlembicOp(bind=bind)
+        inspector = FakeInspector({
+            "aria_acl_rules": ("id", "enabled", "enabled_guard"),
+            "aria_acl_bindings": ("id", "enabled", "enabled_guard"),
+        })
+
+        changed = migration.upgrade_existing_schema(
+            bind,
+            op_handle=op,
+            sa_module=FakeSqlAlchemy(),
+            inspector=inspector,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual([], op.added_columns)
+        self.assertEqual([], op.created_indexes)
+
+    def test_runtime_upgrade_rejects_partially_migrated_schema(self):
+        migration = self._load_write_invariant_migration()
+        bind = FakeMigrationBind()
+        op = FakeAlembicOp(bind=bind)
+        inspector = FakeInspector({
+            "aria_acl_rules": ("id", "enabled", "enabled_guard"),
+            "aria_acl_bindings": ("id", "enabled"),
+        })
+
+        with self.assertRaises(RuntimeError) as raised:
+            migration.upgrade_existing_schema(
+                bind,
+                op_handle=op,
+                sa_module=FakeSqlAlchemy(),
+                inspector=inspector,
+            )
+
+        self.assertIn("aria_acl_partial_write_invariant_schema", str(raised.exception))
+        self.assertEqual([], op.added_columns)
 
     def _load_write_invariant_migration(self):
         module_name = (
