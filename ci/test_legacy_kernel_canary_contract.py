@@ -33,6 +33,7 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         self.assertIn('rm -rf -- "${WORK_DIR}"', self.source)
         self.assertIn("ip netns", self.source)
         self.assertIn("tc qdisc", self.source)
+        self.assertIn('for diagnostic in agent.stdout agent.log', self.source)
 
     def test_does_not_manage_ovs_lifecycle(self):
         lowered = self.source.lower()

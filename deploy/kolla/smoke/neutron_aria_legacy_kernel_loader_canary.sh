@@ -101,6 +101,11 @@ XDP_IDENTITY_SMOKE=0 \
 smoke_rc=$?
 set -e
 
+for diagnostic in agent.stdout agent.log; do
+    if [ -r "${WORK_DIR}/${diagnostic}" ]; then
+        cp "${WORK_DIR}/${diagnostic}" "${EVIDENCE_DIR}/${diagnostic}"
+    fi
+done
 [ -r "${SMOKE_SUMMARY}" ] || die "standalone smoke did not produce summary.json"
 cp "${SMOKE_SUMMARY}" "${EVIDENCE_DIR}/standalone-summary.json"
 
