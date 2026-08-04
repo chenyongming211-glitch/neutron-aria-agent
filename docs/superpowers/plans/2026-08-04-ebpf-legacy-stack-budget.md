@@ -4,7 +4,7 @@
 
 **Goal:** Make the current TC ingress and egress artifact load on the maintained 4.18 kernel while keeping the worst BPF call path at or below 448 bytes and preserving fail-open OVS forwarding.
 
-**Architecture:** Move connection keys from stack-local aggregates into non-persistent one-entry per-CPU scratch maps, then measure the linked artifact rather than trusting source shape. GitHub Actions remains the only Rust/eBPF compiler, and the exact maintained kernel remains the final release authority through an isolated veth/netns canary.
+**Architecture:** Move primary and TCP-RT-derived connection keys from stack-local aggregates into two-slot, non-persistent per-CPU scratch maps, then measure the linked artifact rather than trusting source shape. GitHub Actions remains the only Rust/eBPF compiler, and the exact maintained kernel remains the final release authority through an isolated veth/netns canary.
 
 **Tech Stack:** Rust 2021, Aya eBPF 0.1, Python 3 `unittest`, final-ELF BPF instruction analysis, pyelftools 0.32, GitHub Actions, Rocky Linux 8 kernel `4.18.0-553.5.1.el8_10.x86_64`.
 
@@ -88,14 +88,15 @@ git commit -m "test: require stackless TC connection keys"
 
 - [ ] **Step 1: Add the non-persistent scratch maps**
 
-Add beside `PKT_SCRATCH` and `PIPE_SCRATCH`:
+Add beside `PKT_SCRATCH` and `PIPE_SCRATCH`. Slot 0 is the primary TC key and
+slot 1 is the derived TCP-RT key:
 
 ```rust
 #[map(name = "CT_KEY4_SCRATCH")]
-pub static CT_KEY4_SCRATCH: PerCpuArray<CtKey4> = PerCpuArray::with_max_entries(1, 0);
+pub static CT_KEY4_SCRATCH: PerCpuArray<CtKey4> = PerCpuArray::with_max_entries(2, 0);
 
 #[map(name = "CT_KEY6_SCRATCH")]
-pub static CT_KEY6_SCRATCH: PerCpuArray<CtKey6> = PerCpuArray::with_max_entries(1, 0);
+pub static CT_KEY6_SCRATCH: PerCpuArray<CtKey6> = PerCpuArray::with_max_entries(2, 0);
 ```
 
 Do not add either name to any inventory or critical map list.

@@ -13,7 +13,8 @@ call graph, and an exact maintained-kernel load gate.
 
 The immediate implementation will:
 
-- move `CtKey4` and `CtKey6` construction out of BPF function stack frames;
+- move primary and TCP-RT-derived `CtKey4` and `CtKey6` construction out of
+  BPF function stack frames;
 - retain the existing `PKT_SCRATCH` and `PIPE_SCRATCH` model;
 - keep the worst analyzed BPF call path at or below 448 bytes;
 - require both TC entry programs to load on the maintained Rocky Linux 8
@@ -72,16 +73,25 @@ and minor number. Therefore:
 
 ### 4.1 Per-CPU scratch ownership
 
-Add two one-entry per-CPU scratch maps:
+Use two two-entry per-CPU scratch maps:
 
 ```text
 CT_KEY4_SCRATCH: PerCpuArray<CtKey4>
 CT_KEY6_SCRATCH: PerCpuArray<CtKey6>
 ```
 
-Only the map matching the packet family is accessed. The TC family wrapper
-writes the key fields directly into the map value and passes that map-value
-reference to conntrack, flow statistics, and TCP-RT helpers.
+Only the map matching the packet family is accessed. Slot ownership is fixed:
+
+```text
+slot 0: primary ACL/conntrack key owned by the TC family wrapper
+slot 1: derived TCP-RT forward/reverse key owned by TCP-RT helpers
+```
+
+The owner writes key fields directly into the map value and passes that
+map-value reference to conntrack, flow statistics, or TCP-RT helpers. TCP-RT
+auto-direction handling reuses slot 1 sequentially and calls the TCP-RT core
+directly; it must not nest through a reverse-key constructor that reuses the
+same slot.
 
 The implementation must not first construct a local `CtKey4` or `CtKey6` and
 then copy it into the map because that can preserve the same stack temporary.
@@ -95,6 +105,12 @@ The scratch maps are execution-local infrastructure:
   map list;
 - their value ABI may change with the eBPF artifact because no persistent data
   depends on them.
+
+The first linked-artifact measurement after moving only the primary keys was
+576 verifier-charged bytes. Its worst path included 160 bytes for the TCP-RT
+auto frame and 96 bytes for the nested reverse-key frame. This evidence is why
+slot 1 and the direct auto-to-core path are part of the baseline rather than a
+separate feature expansion.
 
 Existing map-backed packet contexts remain unchanged in the first pass. The
 implementation must not enlarge `PipelineCtx` merely to absorb every future
