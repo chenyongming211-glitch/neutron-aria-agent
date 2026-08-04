@@ -86,6 +86,7 @@ jobs:
           python3 -m unittest ci.test_rust_build_required
           python3 -m unittest ci.test_rust_warning_hygiene
           python3 -m unittest ci.test_ebpf_legacy_packet_bounds
+          python3 -m unittest ci.test_ebpf_stack_budget
           python3 ci/check_rust_warning_hygiene.py
 
       - name: Check public Neutron contracts
@@ -201,7 +202,7 @@ jobs:
 
       - name: Build eBPF
         env:
-          RUSTFLAGS: -D warnings
+          RUSTFLAGS: -D warnings -Z emit-stack-sizes
         run: |
           cd ebpf
           cargo +nightly-2026-07-14 build --release --target bpfel-unknown-none -Z build-std=core --target-dir target
@@ -224,6 +225,15 @@ jobs:
         run: |
           ls -lh ebpf-artifacts/
           file ebpf-artifacts/libebpf_firewall.so
+
+      - name: Enforce legacy eBPF stack budget
+        run: |
+          python3 -m pip install --disable-pip-version-check pyelftools==0.32
+          python3 -m unittest ci.test_ebpf_stack_budget
+          python3 ci/check_ebpf_stack_budget.py \
+            --artifact ebpf-artifacts/libebpf_firewall.so \
+            --max-path-bytes 448 \
+            --report ebpf-artifacts/stack-budget.json
 
       - name: Build userspace (static)
         env:
@@ -249,6 +259,7 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/aria-agent release/
           cp ebpf-artifacts/libebpf_firewall.so release/libebpf_firewall.so
           cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
+          cp ebpf-artifacts/stack-budget.json release/stack-budget.json
           echo "=== release contents ==="
           ls -la release/
 
