@@ -22,6 +22,29 @@ PORT_SUMMARY_FIELDS = (
 )
 
 
+def install_legacy_port_projection_from_manager(service_type="aria_acl"):
+    """Install projection only after NeutronManager construction completes."""
+
+    try:
+        from neutron import manager
+    except ImportError:
+        return False
+
+    neutron_manager = manager.NeutronManager
+    has_instance = getattr(neutron_manager, "has_instance", None)
+    if callable(has_instance) and not has_instance():
+        return False
+
+    service_plugin = neutron_manager.get_service_plugins().get(service_type)
+    core_plugin = neutron_manager.get_plugin()
+    if service_plugin is None or core_plugin is None:
+        return False
+    return install_legacy_port_projection(
+        service_plugin,
+        core_plugin=core_plugin,
+    )
+
+
 class PortSummarySnapshot(object):
     """One immutable desired/runtime view shared by a port read operation."""
 

@@ -2,7 +2,9 @@ from __future__ import absolute_import
 
 import inspect
 import os
+import sys
 import tempfile
+import types
 import unittest
 
 from neutron_aria.db.aria_acl.api import AriaAclNotFound
@@ -15,6 +17,7 @@ from neutron_aria.policies import aria_acl as aria_acl_policy
 from neutron_aria.services.aria_acl.exceptions import AriaAclBadRequest
 from neutron_aria.services.aria_acl.exceptions import AriaAclConflict
 from neutron_aria.services.aria_acl.exceptions import map_repository_error
+from neutron_aria.services.aria_acl import port_projection
 from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
 from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
@@ -205,6 +208,108 @@ class FakeCorePlugin(object):
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
+    def test_plugin_constructor_does_not_reenter_neutron_manager(self):
+        fake_neutron = types.ModuleType("neutron")
+        fake_manager = types.ModuleType("neutron.manager")
+
+        class ReentrantManager(object):
+            calls = 0
+
+            @classmethod
+            def get_plugin(cls):
+                cls.calls += 1
+                raise AssertionError("service plugin constructor re-entered manager")
+
+        fake_manager.NeutronManager = ReentrantManager
+        fake_neutron.manager = fake_manager
+        saved_neutron = sys.modules.get("neutron")
+        saved_manager = sys.modules.get("neutron.manager")
+        sys.modules["neutron"] = fake_neutron
+        sys.modules["neutron.manager"] = fake_manager
+        try:
+            AriaAclPlugin(notifier=FakeNotifier())
+        finally:
+            if saved_neutron is None:
+                sys.modules.pop("neutron", None)
+            else:
+                sys.modules["neutron"] = saved_neutron
+            if saved_manager is None:
+                sys.modules.pop("neutron.manager", None)
+            else:
+                sys.modules["neutron.manager"] = saved_manager
+
+        self.assertEqual(0, ReentrantManager.calls)
+
+    def test_manager_projection_install_waits_until_manager_is_ready(self):
+        plugin = AriaAclPlugin(notifier=FakeNotifier())
+        core = FakeCorePlugin([])
+        fake_neutron = types.ModuleType("neutron")
+        fake_manager = types.ModuleType("neutron.manager")
+
+        class ReadyManager(object):
+            ready = False
+
+            @classmethod
+            def has_instance(cls):
+                return cls.ready
+
+            @classmethod
+            def get_plugin(cls):
+                return core
+
+            @classmethod
+            def get_service_plugins(cls):
+                return {"aria_acl": plugin}
+
+        fake_manager.NeutronManager = ReadyManager
+        fake_neutron.manager = fake_manager
+        saved_neutron = sys.modules.get("neutron")
+        saved_manager = sys.modules.get("neutron.manager")
+        sys.modules["neutron"] = fake_neutron
+        sys.modules["neutron.manager"] = fake_manager
+        try:
+            self.assertFalse(
+                port_projection.install_legacy_port_projection_from_manager()
+            )
+            ReadyManager.ready = True
+            self.assertTrue(
+                port_projection.install_legacy_port_projection_from_manager()
+            )
+        finally:
+            if saved_neutron is None:
+                sys.modules.pop("neutron", None)
+            else:
+                sys.modules["neutron"] = saved_neutron
+            if saved_manager is None:
+                sys.modules.pop("neutron.manager", None)
+            else:
+                sys.modules["neutron.manager"] = saved_manager
+
+        self.assertTrue(core._aria_acl_port_projection_installed)
+
+    def test_extension_resource_registration_installs_port_projection(self):
+        calls = []
+        original = getattr(
+            aria_acl,
+            "install_legacy_port_projection_from_manager",
+            None,
+        )
+        aria_acl.install_legacy_port_projection_from_manager = (
+            lambda: calls.append(True)
+        )
+        try:
+            aria_acl.get_resources()
+        finally:
+            if original is None:
+                delattr(
+                    aria_acl,
+                    "install_legacy_port_projection_from_manager",
+                )
+            else:
+                aria_acl.install_legacy_port_projection_from_manager = original
+
+        self.assertEqual([True], calls)
+
     def test_repository_errors_map_to_legacy_http_semantics(self):
         bad_request = map_repository_error(AriaAclValidationError("invalid"))
         not_found = map_repository_error(AriaAclNotFound("missing"))

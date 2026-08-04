@@ -13,7 +13,6 @@ from neutron_aria.db.aria_acl.query import decode_port_status_id
 from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
 from neutron_aria.services.aria_acl.port_projection import PortSummarySnapshot
-from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
 
 
 LOG = logging.getLogger(__name__)
@@ -39,7 +38,6 @@ class AriaAclPlugin(object):
         self.port_status_stale_seconds = port_status_stale_seconds
         self.now = now or time.time
         self.notifier = notifier if notifier is not None else build_aria_acl_notifier()
-        install_legacy_port_projection(self)
 
     def get_plugin_type(self):
         return PLUGIN_TYPE

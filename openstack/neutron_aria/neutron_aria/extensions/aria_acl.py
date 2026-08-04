@@ -1,5 +1,9 @@
 from __future__ import absolute_import
 
+from neutron_aria.services.aria_acl.port_projection import (
+    install_legacy_port_projection_from_manager,
+)
+
 
 ALIAS = "aria-acl"
 SERVICE_TYPE = "aria_acl"
@@ -183,6 +187,7 @@ def get_updated():
 
 
 def get_resources():
+    install_legacy_port_projection_from_manager()
     if resource_helper is not None:
         special_mappings = {
             RESOURCE_COLLECTIONS["port_statuses"]: "aria_acl_port_status",
