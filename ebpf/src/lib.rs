@@ -1218,7 +1218,7 @@ unsafe fn phase_ct_miss_tc_egress_v6(
 }
 
 /// Phase: Policy evaluation for TC.
-#[inline(always)]
+#[inline(never)]
 unsafe fn phase_policy_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
     let args = policy::PolicyArgs {
         tap_id: p.tap_id,
