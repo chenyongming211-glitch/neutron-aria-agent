@@ -588,6 +588,20 @@ impl FirewallInstance {
         Ok(removed)
     }
 
+    fn detach_owned_legacy_tc_program(
+        &self,
+        prog_name: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> Result<bool, String> {
+        let Some(attached) = self.legacy_tc_attached(prog_name) else {
+            return Ok(false);
+        };
+        if !attached.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        self.detach_legacy_tc_program(prog_name, attach_type)
+    }
+
     fn xdp_link_health_detail(&self) -> XdpLinkHealth {
         exact_xdp_link_health(
             &self.iface,
@@ -688,7 +702,7 @@ impl FirewallInstance {
                 aya::programs::tc::TcAttachType::Egress,
             ),
         ] {
-            if let Err(error) = self.detach_legacy_tc_program(prog_name, attach_type) {
+            if let Err(error) = self.detach_owned_legacy_tc_program(prog_name, attach_type) {
                 errors.push(error);
             }
         }
@@ -1625,7 +1639,7 @@ impl FirewallInstance {
                     })?;
                 }
                 if let Some(attach_type) = Self::tc_attach_type(prog_name) {
-                    self.detach_legacy_tc_program(prog_name, attach_type)?;
+                    self.detach_owned_legacy_tc_program(prog_name, attach_type)?;
                 }
                 info!(instance = %self.iface, program = %prog_name, "rolled back newly attached TC link");
                 Ok(())
@@ -1984,7 +1998,7 @@ impl FirewallInstance {
                 }
             }
             if let Some(attach_type) = Self::tc_attach_type(prog_name) {
-                if let Err(error) = self.detach_legacy_tc_program(prog_name, attach_type) {
+                if let Err(error) = self.detach_owned_legacy_tc_program(prog_name, attach_type) {
                     errors.push(error);
                 }
             }
