@@ -6,7 +6,7 @@
 
 **Architecture:** Move connection keys from stack-local aggregates into non-persistent one-entry per-CPU scratch maps, then measure the linked artifact rather than trusting source shape. GitHub Actions remains the only Rust/eBPF compiler, and the exact maintained kernel remains the final release authority through an isolated veth/netns canary.
 
-**Tech Stack:** Rust 2021, Aya eBPF 0.1, Python 3 `unittest`, LLVM object tools, GitHub Actions, Rocky Linux 8 kernel `4.18.0-553.5.1.el8_10.x86_64`.
+**Tech Stack:** Rust 2021, Aya eBPF 0.1, Python 3 `unittest`, LLVM `.stack_sizes`, pyelftools 0.32, GitHub Actions, Rocky Linux 8 kernel `4.18.0-553.5.1.el8_10.x86_64`.
 
 ## Global Constraints
 
@@ -149,15 +149,15 @@ git commit -m "fix: move TC connection keys off the BPF stack"
 - Modify: `.github/workflows/build.yml`
 
 **Interfaces:**
-- Consumes: linked `ebpf-artifacts/libebpf_firewall.so`, `llvm-objdump`, TC entry names, and a numeric `--max-path-bytes` argument.
+- Consumes: linked `ebpf-artifacts/libebpf_firewall.so` built with `-Z emit-stack-sizes`, TC entry names, and a numeric `--max-path-bytes` argument.
 - Produces: a text/JSON report containing each TC entry's worst path, per-function frames, and total; exits nonzero above 448 bytes.
 
 - [ ] **Step 1: Write failing analyzer unit tests**
 
-Use a synthetic LLVM disassembly fixture with three functions and explicit
-`r10` stack accesses. Assert that the parser computes frames `32`, `96`, and
-`80`, follows pseudo-calls, reports a 208-byte path, detects recursion, and
-fails a 192-byte budget.
+Use a synthetic frame/call graph with frames `32`, `96`, and `80`. Assert that
+the analyzer follows pseudo-call edges, reports a 208-byte path, detects
+recursion, rejects unknown targets, decodes ULEB128 stack sizes, and fails a
+192-byte budget.
 
 - [ ] **Step 2: Run the analyzer test and prove RED**
 
@@ -169,20 +169,18 @@ Expected: import failure because `ci.check_ebpf_stack_budget` does not exist.
 
 - [ ] **Step 3: Implement the analyzer**
 
-The script must:
+The script must use pyelftools 0.32 and:
 
 ```text
-invoke llvm-objdump --disassemble --no-show-raw-insn <artifact>
-parse function labels and BPF instructions
-derive each frame from the deepest r10-relative stack access
-resolve BPF-to-BPF call targets
+read function frames from the linked ELF .stack_sizes section
+resolve BPF-to-BPF pseudo-calls from ELF instructions and relocations
 compute the maximum acyclic call path from tc_ingress and tc_egress
 print the path and total
 exit 1 when either total exceeds --max-path-bytes
 ```
 
-Unknown call targets, malformed disassembly, missing entries, or a recursive
-cycle are errors rather than an implicit pass.
+Unknown pseudo-call targets, malformed ELF, missing stack-size entries, or a
+recursive cycle are errors rather than an implicit pass.
 
 - [ ] **Step 4: Prove the analyzer unit tests GREEN**
 
@@ -197,6 +195,7 @@ Immediately after `Find eBPF artifacts`, run:
 ```yaml
 - name: Enforce legacy eBPF stack budget
   run: |
+    python3 -m pip install --disable-pip-version-check pyelftools==0.32
     python3 -m unittest ci.test_ebpf_stack_budget
     python3 ci/check_ebpf_stack_budget.py \
       --artifact ebpf-artifacts/libebpf_firewall.so \
@@ -205,6 +204,9 @@ Immediately after `Find eBPF artifacts`, run:
 ```
 
 Include `stack-budget.json` in the Rust artifact payload.
+
+The eBPF build step sets `RUSTFLAGS: -D warnings -Z emit-stack-sizes` so the
+linked artifact contains the normative frame-size section.
 
 - [ ] **Step 6: Run local workflow contracts**
 
