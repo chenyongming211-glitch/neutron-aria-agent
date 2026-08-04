@@ -30,6 +30,7 @@ DENIED_PACKETS="${DENIED_PACKETS:-2}"
 PING_PAYLOAD_BYTES="${PING_PAYLOAD_BYTES:-56}"
 PACKET_BYTES=$((PING_PAYLOAD_BYTES + 42))
 FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE:-0}"
+XDP_IDENTITY_SMOKE="${XDP_IDENTITY_SMOKE:-0}"
 FRAGMENT_DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/fragment_tracking_field_driver.py"
 FRAGMENT_VLAN_A="${FRAGMENT_VLAN_A:-203}"
 FRAGMENT_VLAN_B="${FRAGMENT_VLAN_B:-204}"
@@ -74,6 +75,10 @@ HEALTHY_PINNED_RESTART=false
 INCOMPLETE_PINNED_QUIESCED=false
 FRAGMENT_BODY_SUCCEEDED=false
 FRAGMENT_TRANSITIONS_VERIFIED=false
+XDP_DETACHED_PIN_RETAINED=false
+XDP_REPORTED_NOT_READY=false
+XDP_STALE_PIN_NOT_CLAIMED=false
+XDP_TC_ACL_INDEPENDENT=false
 cleanup_errors=()
 
 die() {
@@ -118,6 +123,10 @@ PY
 }
 
 preflight_fixture() {
+    case "${XDP_IDENTITY_SMOKE}" in
+        0|1) ;;
+        *) die "XDP_IDENTITY_SMOKE must be 0 or 1" ;;
+    esac
     [ "${#HOST_IF}" -le 15 ] || die "HOST_IF exceeds Linux interface-name limit: ${HOST_IF}"
     [ "${#PEER_IF}" -le 15 ] || die "PEER_IF exceeds Linux interface-name limit: ${PEER_IF}"
     [ "${#SECOND_HOST_IF}" -le 15 ] || die "SECOND_HOST_IF exceeds Linux interface-name limit"
@@ -141,8 +150,7 @@ preflight_fixture() {
         python3 - "${FRAGMENT_VLAN_A}" "${FRAGMENT_VLAN_B}" \
             "${FRAGMENT_IPV4_HOST}" "${FRAGMENT_IPV4_PEER}" \
             "${FRAGMENT_IPV6_HOST}" "${FRAGMENT_IPV6_PEER}" \
-            "${FRAGMENT_BASE_IPV6_HOST}" "${FRAGMENT_BASE_IPV6_PEER}" <<'PY' \
-            || die "invalid fragment fixture VLAN/address contract"
+            "${FRAGMENT_BASE_IPV6_HOST}" "${FRAGMENT_BASE_IPV6_PEER}" <<'PY' || die "invalid fragment fixture VLAN/address contract"
 import ipaddress,sys
 vlan_a,vlan_b=map(int,sys.argv[1:3])
 assert 1 <= vlan_a <= 4094 and 1 <= vlan_b <= 4094 and vlan_a != vlan_b
@@ -1054,6 +1062,76 @@ recover_incomplete_pinned_runtime() {
     assert_recovery_verified
 }
 
+run_xdp_link_identity_field_smoke() {
+    local xdp_link
+    if [ "${XDP_IDENTITY_SMOKE}" != 1 ]; then
+        echo "SKIP: XDP link identity field smoke disabled"
+        return 0
+    fi
+
+    case "${MODE}" in
+        system) xdp_link="${PIN_ROOT}/system/xdp_link" ;;
+        tap) xdp_link="${PIN_ROOT}/global-v2/${HOST_IF}_xdp_link" ;;
+    esac
+    [ -e "${xdp_link}" ] || die "XDP identity smoke requires a pinned XDP link"
+
+    curl -fsS "${HTTP}/api/v1/instances" >"${WORK_DIR}/xdp-identity-before.json"
+    python3 - "${WORK_DIR}/xdp-identity-before.json" "${INSTANCE}" <<'PY' || die "XDP identity smoke requires initial XDP and TC ACL readiness"
+import json,sys
+item=next(i for i in json.load(open(sys.argv[1],encoding="utf-8"))["instances"]
+          if i["name"]==sys.argv[2])
+assert item["xdp_ready"] is True,item
+assert item["acl_ready"] is True,item
+PY
+
+    bpftool link detach pinned "${xdp_link}" \
+        || die "failed to detach pinned XDP link"
+    [ -e "${xdp_link}" ] || die "detached XDP link pin disappeared"
+    bpftool -j link show pinned "${xdp_link}" \
+        >"${WORK_DIR}/xdp-detached-but-pinned.json" \
+        || die "detached XDP link pin is no longer readable"
+    XDP_DETACHED_PIN_RETAINED=true
+
+    sleep "${TC_HEALTH_WAIT_SECS}"
+    curl -fsS "${HTTP}/api/v1/instances" \
+        >"${WORK_DIR}/xdp-identity-detached.json"
+    python3 - "${WORK_DIR}/xdp-identity-detached.json" "${INSTANCE}" <<'PY' || die "detached XDP link did not degrade independently"
+import json,sys
+item=next(i for i in json.load(open(sys.argv[1],encoding="utf-8"))["instances"]
+          if i["name"]==sys.argv[2])
+assert item["xdp_ready"] is False,item
+assert item["acl_ready"] is True,item
+PY
+    XDP_REPORTED_NOT_READY=true
+
+    crash_agent_bounded || die "XDP identity restart crash did not terminate cleanly"
+    SYSTEM_STARTED=false
+    restart_agent_preserving_bpffs || die "XDP identity agent restart failed"
+    if [ "${MODE}" = system ]; then
+        start_system_mode
+    else
+        start_tap_mode
+    fi
+    [ -e "${xdp_link}" ] || die "restart removed the unverified XDP pin"
+    sleep "${TC_HEALTH_WAIT_SECS}"
+    curl -fsS "${HTTP}/api/v1/instances" \
+        >"${WORK_DIR}/xdp-identity-after-restart.json"
+    python3 - "${WORK_DIR}/xdp-identity-after-restart.json" "${INSTANCE}" <<'PY' || die "restart claimed or replaced the detached XDP pin"
+import json,sys
+item=next(i for i in json.load(open(sys.argv[1],encoding="utf-8"))["instances"]
+          if i["name"]==sys.argv[2])
+assert item["xdp_ready"] is False,item
+assert item["acl_ready"] is True,item
+PY
+    XDP_STALE_PIN_NOT_CLAIMED=true
+
+    run_observed_allowed_flow xdp-identity-allowed \
+        || die "TC allowed flow failed after XDP identity degradation"
+    run_denied_flow xdp-identity-denied \
+        || die "TC denied flow failed after XDP identity degradation"
+    XDP_TC_ACL_INDEPENDENT=true
+}
+
 verify_cleanup() {
     if [ -n "${AGENT_PID}" ] && kill -0 "${AGENT_PID}" 2>/dev/null; then
         return 1
@@ -1089,6 +1167,11 @@ write_summary() {
     FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE}" \
     FRAGMENT_BODY_SUCCEEDED="${FRAGMENT_BODY_SUCCEEDED}" \
     FRAGMENT_TRANSITIONS_VERIFIED="${FRAGMENT_TRANSITIONS_VERIFIED}" \
+    XDP_IDENTITY_SMOKE="${XDP_IDENTITY_SMOKE}" \
+    XDP_DETACHED_PIN_RETAINED="${XDP_DETACHED_PIN_RETAINED}" \
+    XDP_REPORTED_NOT_READY="${XDP_REPORTED_NOT_READY}" \
+    XDP_STALE_PIN_NOT_CLAIMED="${XDP_STALE_PIN_NOT_CLAIMED}" \
+    XDP_TC_ACL_INDEPENDENT="${XDP_TC_ACL_INDEPENDENT}" \
     RUN_ID="${RUN_ID}" HOST_IF="${HOST_IF}" NETNS="${NETNS}" HTTP_ADDR="${HTTP_ADDR}" \
         python3 >"${WORK_DIR}/summary.json.tmp" <<'PY' || return 1
 import json,os
@@ -1101,6 +1184,16 @@ elif (os.environ["FRAGMENT_BODY_SUCCEEDED"].lower()=="true" and
     fragment_status="pass"
 else:
     fragment_status="fail"
+if os.environ["XDP_IDENTITY_SMOKE"] != "1":
+    xdp_identity_status="skipped"
+elif (os.environ["XDP_DETACHED_PIN_RETAINED"].lower()=="true" and
+      os.environ["XDP_REPORTED_NOT_READY"].lower()=="true" and
+      os.environ["XDP_STALE_PIN_NOT_CLAIMED"].lower()=="true" and
+      os.environ["XDP_TC_ACL_INDEPENDENT"].lower()=="true" and
+      os.environ["RESULT"]=="pass" and not cleanup_errors):
+    xdp_identity_status="passed"
+else:
+    xdp_identity_status="failed"
 out={"mode":os.environ["MODE"],"dual_tc_ready":os.environ["DUAL_TC_READY"].lower()=="true",
      "xdp_neutral":os.environ["XDP_NEUTRAL"].lower()=="true",
      "missing_tc_rejected":os.environ["MISSING_TC_REJECTED"].lower()=="true",
@@ -1112,6 +1205,12 @@ out={"mode":os.environ["MODE"],"dual_tc_ready":os.environ["DUAL_TC_READY"].lower
                           "enabled":os.environ["FRAGMENT_TRACKING_SMOKE"]=="1",
                           "body_succeeded":os.environ["FRAGMENT_BODY_SUCCEEDED"].lower()=="true",
                           "transitions_verified":os.environ["FRAGMENT_TRANSITIONS_VERIFIED"].lower()=="true"},
+     "xdp_link_identity":{"status":xdp_identity_status,
+                          "enabled":os.environ["XDP_IDENTITY_SMOKE"]=="1",
+                          "detached_pin_retained":os.environ["XDP_DETACHED_PIN_RETAINED"].lower()=="true",
+                          "reported_not_ready":os.environ["XDP_REPORTED_NOT_READY"].lower()=="true",
+                          "stale_pin_not_claimed":os.environ["XDP_STALE_PIN_NOT_CLAIMED"].lower()=="true",
+                          "tc_acl_independent":os.environ["XDP_TC_ACL_INDEPENDENT"].lower()=="true"},
      "cleanup_errors":cleanup_errors,"result":os.environ["RESULT"],
      "failure_reason":os.environ["FAILURE_REASON"],"work_dir":os.environ["WORK_DIR"],
      "run_id":os.environ["RUN_ID"],"host_if":os.environ["HOST_IF"],
@@ -1242,6 +1341,7 @@ assert_health_poll_degrades
 assert_missing_tc_rejected
 recover_incomplete_pinned_runtime
 run_fragment_tracking_field_smoke
+run_xdp_link_identity_field_smoke
 
 BODY_SUCCEEDED=true
 FAILURE_REASON=""
