@@ -85,6 +85,7 @@ jobs:
           python3 -m unittest ci.test_ci001_trusted_gates
           python3 -m unittest ci.test_rust_build_required
           python3 -m unittest ci.test_rust_warning_hygiene
+          python3 -m unittest ci.test_ebpf_legacy_packet_bounds
           python3 ci/check_rust_warning_hygiene.py
 
       - name: Check public Neutron contracts

@@ -119,15 +119,19 @@ unsafe fn read_be32(data: usize, offset: usize) -> u32 {
 unsafe fn parse_transport(
     proto: u8,
     transport_offset: usize,
-    packet_end: usize,
+    transport_len: usize,
+    data_end: usize,
 ) -> Option<(u16, u16, u8, u32, u16)> {
     if proto == IPPROTO_TCP {
-        if transport_offset + 20 > packet_end {
+        if transport_len < 20 || transport_offset + 20 > data_end {
             return None;
         }
 
         let data_offset = (read8(transport_offset, 12) >> 4) as usize * 4;
-        if data_offset < 20 || transport_offset + data_offset > packet_end {
+        if data_offset < 20
+            || data_offset > transport_len
+            || transport_offset + data_offset > data_end
+        {
             return None;
         }
 
@@ -136,10 +140,10 @@ unsafe fn parse_transport(
             read_be16(transport_offset, 2),
             read8(transport_offset, 13),
             read_be32(transport_offset, 4),
-            (packet_end - transport_offset - data_offset) as u16,
+            (transport_len - data_offset) as u16,
         ))
     } else if proto == IPPROTO_UDP {
-        if transport_offset + 8 > packet_end {
+        if transport_len < 8 || transport_offset + 8 > data_end {
             return None;
         }
 
@@ -202,10 +206,10 @@ pub unsafe fn parse_eth_ipv4(
     }
 
     let ip_total_len = read_be16(ip_offset, 2) as usize;
-    if ip_total_len < ihl || ip_offset + ip_total_len > data_end {
+    let available_ip_len = data_end - ip_offset;
+    if ip_total_len < ihl || ip_total_len > available_ip_len {
         return false;
     }
-    let packet_end = ip_offset + ip_total_len;
     let proto = read8(ip_offset, 9);
 
     let src_ip = read_be32(ip_offset, 12);
@@ -223,6 +227,7 @@ pub unsafe fn parse_eth_ipv4(
     };
 
     let transport_offset = ip_offset + ihl;
+    let transport_len = ip_total_len - ihl;
     let l4_offset = transport_offset - data;
     if l4_offset > u16::MAX as usize {
         return false;
@@ -230,7 +235,9 @@ pub unsafe fn parse_eth_ipv4(
     let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) =
         if fragment_kind == FragmentKind::NonInitial {
             (0, 0, 0, 0, 0)
-        } else if let Some(parsed) = parse_transport(proto, transport_offset, packet_end) {
+        } else if let Some(parsed) =
+            parse_transport(proto, transport_offset, transport_len, data_end)
+        {
             parsed
         } else {
             if fragment_kind == FragmentKind::First && matches!(proto, IPPROTO_TCP | IPPROTO_UDP) {
@@ -318,28 +325,30 @@ pub unsafe fn parse_eth_ipv6(
         return false;
     }
     let ipv6_payload_len = read_be16(ip_offset, 4) as usize;
-    if ip_offset + 40 + ipv6_payload_len > data_end {
+    let payload_offset = ip_offset + 40;
+    let available_payload_len = data_end - payload_offset;
+    if ipv6_payload_len > available_payload_len {
         return false;
     }
-    let packet_end = ip_offset + 40 + ipv6_payload_len;
     let mut next_header = read8(ip_offset, 6);
 
     // 跳过 IPv6 扩展头（最多跳过 4 层，防止 BPF 验证器拒绝无界循环）
-    let mut transport_offset = ip_offset + 40;
+    let mut transport_offset = payload_offset;
+    let mut transport_len = ipv6_payload_len;
     let mut fragment_kind = FragmentKind::Unfragmented;
     let mut fragment_id = 0;
     let mut fragment_offset = 0;
     let mut more_fragments = false;
     let mut fragment_proto = next_header;
-    let mut fragment_payload_offset = 0;
+    let mut fragment_payload_len = 0;
     let mut i = 0u8;
     while i < 4 && is_ipv6_extension_header(next_header) {
-        if transport_offset + 2 > packet_end {
+        if transport_len < 2 || transport_offset + 2 > data_end {
             return false;
         }
 
         if next_header == IPPROTO_FRAGMENT {
-            if transport_offset + 8 > packet_end {
+            if transport_len < 8 || transport_offset + 8 > data_end {
                 return false;
             }
             let frag_off_flags = read_be16(transport_offset, 2);
@@ -356,17 +365,19 @@ pub unsafe fn parse_eth_ipv6(
             };
             next_header = read8(transport_offset, 0);
             transport_offset += 8;
-            fragment_payload_offset = transport_offset;
+            transport_len -= 8;
+            fragment_payload_len = transport_len;
         } else {
             next_header = read8(transport_offset, 0);
             if fragment_kind == FragmentKind::Unfragmented {
                 fragment_proto = next_header;
             }
             let ext_len = (read8(transport_offset, 1) as usize + 1) * 8;
-            if transport_offset + ext_len > packet_end {
+            if ext_len > transport_len || transport_offset + ext_len > data_end {
                 return false;
             }
             transport_offset += ext_len;
+            transport_len -= ext_len;
         }
 
         i += 1;
@@ -388,7 +399,9 @@ pub unsafe fn parse_eth_ipv6(
         == FragmentKind::NonInitial
     {
         (0, 0, 0, 0, 0)
-    } else if let Some(parsed) = parse_transport(next_header, transport_offset, packet_end) {
+    } else if let Some(parsed) =
+        parse_transport(next_header, transport_offset, transport_len, data_end)
+    {
         parsed
     } else {
         if fragment_kind == FragmentKind::First && matches!(next_header, IPPROTO_TCP | IPPROTO_UDP)
@@ -411,7 +424,7 @@ pub unsafe fn parse_eth_ipv6(
     (*out).fragment_proto = fragment_proto;
     (*out).l4_offset = l4_offset as u16;
     (*out).first_payload_end = if fragment_kind == FragmentKind::First {
-        (packet_end - fragment_payload_offset) as u16
+        fragment_payload_len as u16
     } else {
         0
     };
