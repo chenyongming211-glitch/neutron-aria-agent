@@ -132,6 +132,13 @@ class LegacyPacketBoundsTest(unittest.TestCase):
         self.assertNotIn("track_tcp_rt_v4_rev(tap_id", self.tcprt_source)
         self.assertNotIn("track_tcp_rt_v6_rev(tap_id", self.tcprt_source)
 
+    def test_tc_policy_evaluation_is_a_bounded_call_frame(self):
+        self.assertIn(
+            "#[inline(never)]\nunsafe fn phase_policy_tc",
+            self.lib_source,
+            "policy evaluation must not share a stack frame with CT-miss ID lookup",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
