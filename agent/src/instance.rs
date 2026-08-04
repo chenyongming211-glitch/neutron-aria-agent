@@ -1,4 +1,8 @@
 use crate::FragmentTrackingSettings;
+use crate::xdp_link_health::{
+    exact_xdp_link_health, existing_xdp_pin_disposition, ExistingXdpPinDisposition,
+    XdpLinkHealth,
+};
 use aria_core::ebpf_ops::{
     critical_network_map_names, FragmentRuntimeRecoveryError, TraceMapMode, NETWORK_MAP_NAMES,
 };
@@ -485,8 +489,16 @@ impl FirewallInstance {
         tcx_query_contains_expected_program(program_info.id(), &attached_program_ids)
     }
 
+    fn xdp_link_health_detail(&self) -> XdpLinkHealth {
+        exact_xdp_link_health(
+            &self.iface,
+            Path::new(&self.tc_prog_pin_path("xdp_firewall")),
+            Path::new(&self.xdp_link_pin_path()),
+        )
+    }
+
     pub fn xdp_link_health(&self) -> bool {
-        Path::new(&self.xdp_link_pin_path()).exists()
+        self.xdp_link_health_detail().is_ready()
     }
 
     pub fn tc_acl_link_health(&self) -> TcAclLinkHealth {
@@ -1393,29 +1405,46 @@ impl FirewallInstance {
         self.ensure_tc_runtime(&mut attached);
 
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
-        if pin_state.preexisting_xdp_link {
-            attached.xdp = LinkOwnership::ClaimedExisting;
-        } else if !std::path::Path::new(&xdp_prog_pin).exists() {
-            warn!(instance = %self.iface, prog_pin = %xdp_prog_pin, "pinned XDP DDoS program missing; TC ACL remains independent");
-        } else {
-            match self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin) {
-                Ok(()) => attached.xdp = LinkOwnership::AttachedNow,
-                Err(error) if error.attachment_may_remain() => {
-                    attached.xdp = LinkOwnership::AttachedNow;
-                    let rollback_error = self.rollback_attached_links(&attached, false).err();
-                    return Err(match rollback_error {
-                        Some(rollback_error) => format!(
-                            "XDP attachment may remain after pin failure: {}; rollback failed: {}",
-                            error, rollback_error
-                        ),
-                        None => format!(
-                            "XDP attachment pin failed and required transaction rollback: {}",
-                            error
-                        ),
-                    });
-                }
-                Err(error) => {
-                    warn!(instance = %self.iface, error = %error, "XDP DDoS hook unavailable; TC ACL remains independent");
+        let xdp_health = self.xdp_link_health_detail();
+        match existing_xdp_pin_disposition(
+            pin_state.preexisting_xdp_link,
+            xdp_health.is_ready(),
+        ) {
+            ExistingXdpPinDisposition::Claim => {
+                attached.xdp = LinkOwnership::ClaimedExisting;
+            }
+            ExistingXdpPinDisposition::PreserveDegraded => {
+                warn!(
+                    instance = %self.iface,
+                    reason = ?xdp_health.reason(),
+                    "preexisting XDP link identity is not verified; preserving pin without claiming or replacing it"
+                );
+            }
+            ExistingXdpPinDisposition::Attach => {
+                if !std::path::Path::new(&xdp_prog_pin).exists() {
+                    warn!(instance = %self.iface, prog_pin = %xdp_prog_pin, "pinned XDP DDoS program missing; TC ACL remains independent");
+                } else {
+                    match self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin) {
+                        Ok(()) => attached.xdp = LinkOwnership::AttachedNow,
+                        Err(error) if error.attachment_may_remain() => {
+                            attached.xdp = LinkOwnership::AttachedNow;
+                            let rollback_error =
+                                self.rollback_attached_links(&attached, false).err();
+                            return Err(match rollback_error {
+                                Some(rollback_error) => format!(
+                                    "XDP attachment may remain after pin failure: {}; rollback failed: {}",
+                                    error, rollback_error
+                                ),
+                                None => format!(
+                                    "XDP attachment pin failed and required transaction rollback: {}",
+                                    error
+                                ),
+                            });
+                        }
+                        Err(error) => {
+                            warn!(instance = %self.iface, error = %error, "XDP DDoS hook unavailable; TC ACL remains independent");
+                        }
+                    }
                 }
             }
         }

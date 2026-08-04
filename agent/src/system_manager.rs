@@ -3,6 +3,9 @@ use crate::instance::{
     configure_fragment_context_capacity, finalize_fragment_recovery_with_tc_fallback,
     preexisting_tc_acl_runtime_is_healthy, FirewallInstance, TcAclLinkHealth,
 };
+use crate::xdp_link_health::{
+    existing_xdp_pin_disposition, ExistingXdpPinDisposition,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -739,19 +742,30 @@ pub async fn system_start(
 
     let xdp_link_pin = Path::new(pin_path).join("xdp_link");
     let xdp_link_preexisting = xdp_link_pin.exists();
-    if xdp_link_preexisting && preexisting_health.xdp_ready() {
-        ownership.xdp_link = true;
-        info!(iface = %iface, "claimed preexisting XDP DDoS hook");
-    } else {
-        match attach_xdp_program(&mut bpf, iface, pin_path) {
-            Ok(()) => {
-                ownership.xdp_link = true;
-                if !xdp_link_preexisting {
+    match existing_xdp_pin_disposition(
+        xdp_link_preexisting,
+        preexisting_health.xdp_ready(),
+    ) {
+        ExistingXdpPinDisposition::Claim => {
+            ownership.xdp_link = true;
+            info!(iface = %iface, "claimed exact preexisting XDP DDoS hook");
+        }
+        ExistingXdpPinDisposition::PreserveDegraded => {
+            warn!(
+                iface = %iface,
+                reason = "identity_unverified",
+                "preexisting XDP link identity is not verified; preserving pin without claiming or replacing it"
+            );
+        }
+        ExistingXdpPinDisposition::Attach => {
+            match attach_xdp_program(&mut bpf, iface, pin_path) {
+                Ok(()) => {
+                    ownership.xdp_link = true;
                     ownership.owned_link_pins.push(xdp_link_pin);
                 }
-            }
-            Err(error) => {
-                warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
+                Err(error) => {
+                    warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
+                }
             }
         }
     }
