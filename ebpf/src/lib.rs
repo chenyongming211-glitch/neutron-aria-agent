@@ -176,20 +176,23 @@ unsafe fn try_tc_egress_v4(
             return p.action as i32;
         }
     }
-    let ct_key = CtKey4 {
-        tap_id: p.tap_id,
-        src_ip: info.src_ip,
-        dst_ip: info.dst_ip,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: p.proto,
-        pad: [0; 3],
+    let ct_key_ptr = match maps::CT_KEY4_SCRATCH.get_ptr_mut(0) {
+        Some(ptr) => ptr,
+        None => return TC_ACT_OK,
     };
-    let miss_reason = phase_ct_v4(info, p, &ct_key);
+    (*ct_key_ptr).tap_id = p.tap_id;
+    (*ct_key_ptr).src_ip = info.src_ip;
+    (*ct_key_ptr).dst_ip = info.dst_ip;
+    (*ct_key_ptr).src_port = info.src_port;
+    (*ct_key_ptr).dst_port = info.dst_port;
+    (*ct_key_ptr).proto = p.proto;
+    (*ct_key_ptr).pad = [0; 3];
+    let ct_key = &*ct_key_ptr;
+    let miss_reason = phase_ct_v4(info, p, ct_key);
     let ct_hit = (p.flags & FLAG_CT_HIT) != 0;
     let create_point = fragment_ct_create_point(info.fragment_kind);
     if ct_hit {
-        phase_ct_fastpath_tc_egress_v4(ctx, info, p, &ct_key);
+        phase_ct_fastpath_tc_egress_v4(ctx, info, p, ct_key);
     } else {
         phase_ct_miss_tc_egress_v4(ctx, info, p, miss_reason);
     }
@@ -197,7 +200,7 @@ unsafe fn try_tc_egress_v4(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterPolicyQos {
-        phase_ct_create_v4(p, &ct_key);
+        phase_ct_create_v4(p, ct_key);
     }
     let install = fragment::install_allowed_v4(info, p);
     if install != FragmentInstallDecision::Pass {
@@ -205,9 +208,9 @@ unsafe fn try_tc_egress_v4(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterContextInstall {
-        phase_ct_create_v4(p, &ct_key);
+        phase_ct_create_v4(p, ct_key);
     }
-    stats::update_flow_stats_v4(&ct_key, p.pkt_len, p.now);
+    stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
     phase_post_accept_tc_egress(ctx, info, p);
     if (p.flags & FLAG_TCPRT_ON) != 0
         && p.proto == IPPROTO_TCP
@@ -215,7 +218,7 @@ unsafe fn try_tc_egress_v4(
     {
         if ct_hit {
             if (p.flags & FLAG_IS_FORWARD) != 0 {
-                tcprt::track_tcp_rt_v4(&ct_key, info, p.now, true, false);
+                tcprt::track_tcp_rt_v4(ct_key, info, p.now, true, false);
             } else {
                 tcprt::track_tcp_rt_v4_rev(p.tap_id, info, p.now, false);
             }
@@ -243,20 +246,23 @@ unsafe fn try_tc_egress_v6(
             return p.action as i32;
         }
     }
-    let ct_key = CtKey6 {
-        tap_id: p.tap_id,
-        src_ip: info.src_ip_v6,
-        dst_ip: info.dst_ip_v6,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: p.proto,
-        pad: [0; 3],
+    let ct_key_ptr = match maps::CT_KEY6_SCRATCH.get_ptr_mut(0) {
+        Some(ptr) => ptr,
+        None => return TC_ACT_OK,
     };
-    let miss_reason = phase_ct_v6(info, p, &ct_key);
+    (*ct_key_ptr).tap_id = p.tap_id;
+    (*ct_key_ptr).src_ip = info.src_ip_v6;
+    (*ct_key_ptr).dst_ip = info.dst_ip_v6;
+    (*ct_key_ptr).src_port = info.src_port;
+    (*ct_key_ptr).dst_port = info.dst_port;
+    (*ct_key_ptr).proto = p.proto;
+    (*ct_key_ptr).pad = [0; 3];
+    let ct_key = &*ct_key_ptr;
+    let miss_reason = phase_ct_v6(info, p, ct_key);
     let ct_hit = (p.flags & FLAG_CT_HIT) != 0;
     let create_point = fragment_ct_create_point(info.fragment_kind);
     if ct_hit {
-        phase_ct_fastpath_tc_egress_v6(ctx, info, p, &ct_key);
+        phase_ct_fastpath_tc_egress_v6(ctx, info, p, ct_key);
     } else {
         phase_ct_miss_tc_egress_v6(ctx, info, p, miss_reason);
     }
@@ -264,7 +270,7 @@ unsafe fn try_tc_egress_v6(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterPolicyQos {
-        phase_ct_create_v6(p, &ct_key);
+        phase_ct_create_v6(p, ct_key);
     }
     let install = fragment::install_allowed_v6(info, p);
     if install != FragmentInstallDecision::Pass {
@@ -272,9 +278,9 @@ unsafe fn try_tc_egress_v6(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterContextInstall {
-        phase_ct_create_v6(p, &ct_key);
+        phase_ct_create_v6(p, ct_key);
     }
-    stats::update_flow_stats_v6(&ct_key, p.pkt_len, p.now);
+    stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
     phase_post_accept_tc_egress(ctx, info, p);
     if (p.flags & FLAG_TCPRT_ON) != 0
         && p.proto == IPPROTO_TCP
@@ -282,7 +288,7 @@ unsafe fn try_tc_egress_v6(
     {
         if ct_hit {
             if (p.flags & FLAG_IS_FORWARD) != 0 {
-                tcprt::track_tcp_rt_v6(&ct_key, info, p.now, true, false);
+                tcprt::track_tcp_rt_v6(ct_key, info, p.now, true, false);
             } else {
                 tcprt::track_tcp_rt_v6_rev(p.tap_id, info, p.now, false);
             }
@@ -369,20 +375,23 @@ unsafe fn try_tc_ingress_v4(
             return p.action as i32;
         }
     }
-    let ct_key = CtKey4 {
-        tap_id: p.tap_id,
-        src_ip: info.src_ip,
-        dst_ip: info.dst_ip,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: p.proto,
-        pad: [0; 3],
+    let ct_key_ptr = match maps::CT_KEY4_SCRATCH.get_ptr_mut(0) {
+        Some(ptr) => ptr,
+        None => return TC_ACT_OK,
     };
-    let miss_reason = phase_ct_v4(info, p, &ct_key);
+    (*ct_key_ptr).tap_id = p.tap_id;
+    (*ct_key_ptr).src_ip = info.src_ip;
+    (*ct_key_ptr).dst_ip = info.dst_ip;
+    (*ct_key_ptr).src_port = info.src_port;
+    (*ct_key_ptr).dst_port = info.dst_port;
+    (*ct_key_ptr).proto = p.proto;
+    (*ct_key_ptr).pad = [0; 3];
+    let ct_key = &*ct_key_ptr;
+    let miss_reason = phase_ct_v4(info, p, ct_key);
     let ct_hit = (p.flags & FLAG_CT_HIT) != 0;
     let create_point = fragment_ct_create_point(info.fragment_kind);
     if ct_hit {
-        phase_ct_fastpath_tc_ingress_v4(ctx, info, p, &ct_key);
+        phase_ct_fastpath_tc_ingress_v4(ctx, info, p, ct_key);
     } else {
         phase_ct_miss_tc_ingress_v4(ctx, info, p, miss_reason);
     }
@@ -390,7 +399,7 @@ unsafe fn try_tc_ingress_v4(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterPolicyQos {
-        phase_ct_create_v4(p, &ct_key);
+        phase_ct_create_v4(p, ct_key);
     }
     let install = fragment::install_allowed_v4(info, p);
     if install != FragmentInstallDecision::Pass {
@@ -398,9 +407,9 @@ unsafe fn try_tc_ingress_v4(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterContextInstall {
-        phase_ct_create_v4(p, &ct_key);
+        phase_ct_create_v4(p, ct_key);
     }
-    stats::update_flow_stats_v4(&ct_key, p.pkt_len, p.now);
+    stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
     phase_post_accept_tc_ingress(ctx, info, p);
     if (p.flags & FLAG_TCPRT_ON) != 0
         && p.proto == IPPROTO_TCP
@@ -408,7 +417,7 @@ unsafe fn try_tc_ingress_v4(
     {
         if ct_hit {
             if (p.flags & FLAG_IS_FORWARD) != 0 {
-                tcprt::track_tcp_rt_v4(&ct_key, info, p.now, true, true);
+                tcprt::track_tcp_rt_v4(ct_key, info, p.now, true, true);
             } else {
                 tcprt::track_tcp_rt_v4_rev(p.tap_id, info, p.now, true);
             }
@@ -436,20 +445,23 @@ unsafe fn try_tc_ingress_v6(
             return p.action as i32;
         }
     }
-    let ct_key = CtKey6 {
-        tap_id: p.tap_id,
-        src_ip: info.src_ip_v6,
-        dst_ip: info.dst_ip_v6,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: p.proto,
-        pad: [0; 3],
+    let ct_key_ptr = match maps::CT_KEY6_SCRATCH.get_ptr_mut(0) {
+        Some(ptr) => ptr,
+        None => return TC_ACT_OK,
     };
-    let miss_reason = phase_ct_v6(info, p, &ct_key);
+    (*ct_key_ptr).tap_id = p.tap_id;
+    (*ct_key_ptr).src_ip = info.src_ip_v6;
+    (*ct_key_ptr).dst_ip = info.dst_ip_v6;
+    (*ct_key_ptr).src_port = info.src_port;
+    (*ct_key_ptr).dst_port = info.dst_port;
+    (*ct_key_ptr).proto = p.proto;
+    (*ct_key_ptr).pad = [0; 3];
+    let ct_key = &*ct_key_ptr;
+    let miss_reason = phase_ct_v6(info, p, ct_key);
     let ct_hit = (p.flags & FLAG_CT_HIT) != 0;
     let create_point = fragment_ct_create_point(info.fragment_kind);
     if ct_hit {
-        phase_ct_fastpath_tc_ingress_v6(ctx, info, p, &ct_key);
+        phase_ct_fastpath_tc_ingress_v6(ctx, info, p, ct_key);
     } else {
         phase_ct_miss_tc_ingress_v6(ctx, info, p, miss_reason);
     }
@@ -457,7 +469,7 @@ unsafe fn try_tc_ingress_v6(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterPolicyQos {
-        phase_ct_create_v6(p, &ct_key);
+        phase_ct_create_v6(p, ct_key);
     }
     let install = fragment::install_allowed_v6(info, p);
     if install != FragmentInstallDecision::Pass {
@@ -465,9 +477,9 @@ unsafe fn try_tc_ingress_v6(
         return p.action as i32;
     }
     if !ct_hit && create_point == FragmentCtCreatePoint::AfterContextInstall {
-        phase_ct_create_v6(p, &ct_key);
+        phase_ct_create_v6(p, ct_key);
     }
-    stats::update_flow_stats_v6(&ct_key, p.pkt_len, p.now);
+    stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
     phase_post_accept_tc_ingress(ctx, info, p);
     if (p.flags & FLAG_TCPRT_ON) != 0
         && p.proto == IPPROTO_TCP
@@ -475,7 +487,7 @@ unsafe fn try_tc_ingress_v6(
     {
         if ct_hit {
             if (p.flags & FLAG_IS_FORWARD) != 0 {
-                tcprt::track_tcp_rt_v6(&ct_key, info, p.now, true, true);
+                tcprt::track_tcp_rt_v6(ct_key, info, p.now, true, true);
             } else {
                 tcprt::track_tcp_rt_v6_rev(p.tap_id, info, p.now, true);
             }

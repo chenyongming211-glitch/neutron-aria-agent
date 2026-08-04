@@ -25,6 +25,14 @@ pub static PKT_SCRATCH: PerCpuArray<PacketInfo> = PerCpuArray::with_max_entries(
 #[map(name = "PIPE_SCRATCH")]
 pub static PIPE_SCRATCH: PerCpuArray<PipelineCtx> = PerCpuArray::with_max_entries(1, 0);
 
+// --- Connection-key scratch buffers (packet-local, never persisted) ---
+
+#[map(name = "CT_KEY4_SCRATCH")]
+pub static CT_KEY4_SCRATCH: PerCpuArray<CtKey4> = PerCpuArray::with_max_entries(1, 0);
+
+#[map(name = "CT_KEY6_SCRATCH")]
+pub static CT_KEY6_SCRATCH: PerCpuArray<CtKey6> = PerCpuArray::with_max_entries(1, 0);
+
 #[map(name = "IFACE_CTX_MAP")]
 pub static IFACE_CTX_MAP: HashMap<u32, IfaceCtx> = HashMap::with_max_entries(1024, 0);
 
