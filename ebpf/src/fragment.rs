@@ -2,10 +2,12 @@ use crate::common::{
     fragment_authority_drop_reason, fragment_context_flags_for_l4, fragment_context_l4_proto,
     fragment_first_observation_metric, fragment_install_result, fragment_metric_for_drop_reason,
     fragment_metric_index, fragment_resolve_decision, fragment_tracking_required,
-    FragmentContextKey4, FragmentContextKey6, FragmentContextValue, FragmentInstallDecision,
-    FragmentKind, PipelineCtx, DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_EXPIRY_OVERFLOW,
-    FRAGMENT_CONTEXT_VERSION, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
-    FRAGMENT_METRIC_EXPIRY_OVERFLOW, FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
+    FragmentConfig, FragmentContextKey4, FragmentContextKey6, FragmentContextValue,
+    FragmentInstallDecision, FragmentKind, PipelineCtx, DROP_FRAGMENT_CONFIG_MISSING,
+    DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_EPOCH_MISSING,
+    DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION, FRAGMENT_FAMILY_IPV4,
+    FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW, FRAGMENT_METRIC_INVALID_L4,
+    FRAGMENT_METRIC_NON_INITIAL,
 };
 use crate::maps::{
     FRAGMENT_CONFIG, FRAGMENT_EPOCH, FRAGMENT_METRICS, FRAG_CONTEXT_V4, FRAG_CONTEXT_V6,
@@ -115,15 +117,38 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_NON_INITIAL);
 
     let key = resolve_v4_key(info, p);
-    let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = packet_epoch(p);
-    let value = FRAG_CONTEXT_V4.get(&key).copied();
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+        Some(config) => config,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_CONFIG_MISSING);
+            return ResolveOutcome::Drop;
+        }
+    };
+    let authority = config_authority_drop_reason(p, false, &config);
+    if authority != 0 {
+        record_drop(p, FRAGMENT_FAMILY_IPV4, authority);
+        return ResolveOutcome::Drop;
+    }
+    let epoch = match packet_epoch(p) {
+        Some(epoch) => epoch,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_EPOCH_MISSING);
+            return ResolveOutcome::Drop;
+        }
+    };
+    let value = match FRAG_CONTEXT_V4.get(&key).copied() {
+        Some(value) => value,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_CONTEXT_MISSING);
+            return ResolveOutcome::Drop;
+        }
+    };
     let decision = fragment_resolve_decision(
         p.tap_id,
         false,
-        config.as_ref(),
-        epoch.as_ref(),
-        value.as_ref(),
+        Some(&config),
+        Some(&epoch),
+        Some(&value),
         p.acl_bank_snapshot,
         p.now,
         info.fragment_offset,
@@ -134,13 +159,6 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         return ResolveOutcome::Drop;
     }
 
-    let value = match value {
-        Some(value) => value,
-        None => {
-            p.drop_reason = DROP_FRAGMENT_CONTEXT_INVALID;
-            return ResolveOutcome::Drop;
-        }
-    };
     let proto = match fragment_context_l4_proto(&value) {
         Some(proto) => proto,
         None => {
@@ -164,15 +182,38 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_NON_INITIAL);
 
     let key = resolve_v6_key(info, p);
-    let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = packet_epoch(p);
-    let value = FRAG_CONTEXT_V6.get(&key).copied();
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+        Some(config) => config,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_CONFIG_MISSING);
+            return ResolveOutcome::Drop;
+        }
+    };
+    let authority = config_authority_drop_reason(p, true, &config);
+    if authority != 0 {
+        record_drop(p, FRAGMENT_FAMILY_IPV6, authority);
+        return ResolveOutcome::Drop;
+    }
+    let epoch = match packet_epoch(p) {
+        Some(epoch) => epoch,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_EPOCH_MISSING);
+            return ResolveOutcome::Drop;
+        }
+    };
+    let value = match FRAG_CONTEXT_V6.get(&key).copied() {
+        Some(value) => value,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_CONTEXT_MISSING);
+            return ResolveOutcome::Drop;
+        }
+    };
     let decision = fragment_resolve_decision(
         p.tap_id,
         true,
-        config.as_ref(),
-        epoch.as_ref(),
-        value.as_ref(),
+        Some(&config),
+        Some(&epoch),
+        Some(&value),
         p.acl_bank_snapshot,
         p.now,
         info.fragment_offset,
@@ -183,13 +224,6 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         return ResolveOutcome::Drop;
     }
 
-    let value = match value {
-        Some(value) => value,
-        None => {
-            p.drop_reason = DROP_FRAGMENT_CONTEXT_INVALID;
-            return ResolveOutcome::Drop;
-        }
-    };
     let proto = match fragment_context_l4_proto(&value) {
         Some(proto) => proto,
         None => {
@@ -201,6 +235,27 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     info.dst_port = value.dst_port;
     info.proto = proto;
     ResolveOutcome::Resolved
+}
+
+#[inline(always)]
+unsafe fn record_drop(p: &mut PipelineCtx, family: u8, drop_reason: u8) {
+    p.drop_reason = drop_reason;
+    record_metric(p, family, fragment_metric_for_drop_reason(drop_reason));
+}
+
+#[inline(always)]
+fn config_authority_drop_reason(
+    p: &PipelineCtx,
+    is_ipv6: bool,
+    config: &FragmentConfig,
+) -> u8 {
+    let present_epoch = FragmentEpochValue { epoch: 0 };
+    fragment_authority_drop_reason(
+        p.tap_id,
+        is_ipv6,
+        Some(config),
+        Some(&present_epoch),
+    )
 }
 
 #[inline(never)]
@@ -218,26 +273,24 @@ pub unsafe fn install_allowed_v4(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false) {
         return FragmentInstallDecision::Pass;
     }
-    let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = packet_epoch(p);
-    let authority =
-        fragment_authority_drop_reason(p.tap_id, false, config.as_ref(), epoch.as_ref());
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+        Some(config) => config,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_CONFIG_MISSING);
+            return fragment_install_result(false);
+        }
+    };
+    let authority = config_authority_drop_reason(p, false, &config);
     if authority != 0 {
-        p.drop_reason = authority;
-        record_metric(
-            p,
-            FRAGMENT_FAMILY_IPV4,
-            fragment_metric_for_drop_reason(authority),
-        );
+        record_drop(p, FRAGMENT_FAMILY_IPV4, authority);
         return fragment_install_result(false);
     }
-    let config = match config {
-        Some(config) => config,
-        None => return fragment_install_result(false),
-    };
-    let epoch = match epoch {
+    let epoch = match packet_epoch(p) {
         Some(epoch) => epoch,
-        None => return fragment_install_result(false),
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV4, DROP_FRAGMENT_EPOCH_MISSING);
+            return fragment_install_result(false);
+        }
     };
     let expires_at_ns = match p.now.checked_add(config.ipv4_timeout_ns) {
         Some(expires_at_ns) => expires_at_ns,
@@ -284,25 +337,24 @@ pub unsafe fn install_allowed_v6(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true) {
         return FragmentInstallDecision::Pass;
     }
-    let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = packet_epoch(p);
-    let authority = fragment_authority_drop_reason(p.tap_id, true, config.as_ref(), epoch.as_ref());
+    let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied() {
+        Some(config) => config,
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_CONFIG_MISSING);
+            return fragment_install_result(false);
+        }
+    };
+    let authority = config_authority_drop_reason(p, true, &config);
     if authority != 0 {
-        p.drop_reason = authority;
-        record_metric(
-            p,
-            FRAGMENT_FAMILY_IPV6,
-            fragment_metric_for_drop_reason(authority),
-        );
+        record_drop(p, FRAGMENT_FAMILY_IPV6, authority);
         return fragment_install_result(false);
     }
-    let config = match config {
-        Some(config) => config,
-        None => return fragment_install_result(false),
-    };
-    let epoch = match epoch {
+    let epoch = match packet_epoch(p) {
         Some(epoch) => epoch,
-        None => return fragment_install_result(false),
+        None => {
+            record_drop(p, FRAGMENT_FAMILY_IPV6, DROP_FRAGMENT_EPOCH_MISSING);
+            return fragment_install_result(false);
+        }
     };
     let expires_at_ns = match p.now.checked_add(config.ipv6_timeout_ns) {
         Some(expires_at_ns) => expires_at_ns,

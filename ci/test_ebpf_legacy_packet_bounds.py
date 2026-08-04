@@ -47,6 +47,20 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             "kernel 4.18 may treat a conditional enum payload as uninitialized stack",
         )
 
+    def test_fragment_hot_paths_do_not_forward_conditional_option_payloads(self):
+        for name in (
+            "resolve_v4",
+            "resolve_v6",
+            "install_allowed_v4",
+            "install_allowed_v6",
+        ):
+            body = function_body(self.fragment_source, name)
+            self.assertNotRegex(
+                body,
+                re.compile(r"\b(?:config|epoch|value)\.as_ref\(\)"),
+                "%s must unwrap map values before forwarding their references" % name,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
