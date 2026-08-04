@@ -1220,35 +1220,20 @@ unsafe fn phase_ct_miss_tc_egress_v6(
 /// Phase: Policy evaluation for TC.
 #[inline(always)]
 unsafe fn phase_policy_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    let args = policy::PolicyArgs {
-        tap_id: p.tap_id,
-        src_id: p.src_id,
-        dst_id: p.dst_id,
-        proto: p.proto,
-        direction: p.direction,
-        dst_port: info.dst_port,
-        pkt_len: p.pkt_len,
-        now: p.now,
-        bank: p.matched_bank,
-    };
-    let (result, drop_reason, matched, policy_hit) = policy::evaluate_policy(&args);
-    if policy_hit {
-        policy::account_policy_result(&args, &matched, result, drop_reason);
-    }
-    p.drop_reason = drop_reason;
-    set_matched(p, &matched);
+    let result = policy::evaluate_policy(p, info.dst_port);
 
     if result == XDP_PASS {
         p.action = TC_ACT_OK as u32;
     } else {
         p.action = TC_ACT_SHOT as u32;
         if (p.flags & FLAG_TRACING) != 0 {
+            let trace_result = trace_result_from_drop_reason(p.drop_reason);
             do_trace(
                 ctx,
                 info,
                 p,
                 TRACE_TC_DROP,
-                trace_result_from_drop_reason(drop_reason),
+                trace_result,
             );
         }
     }
