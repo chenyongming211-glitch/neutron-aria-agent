@@ -15,6 +15,7 @@ PARSER = os.path.join(ROOT, "ebpf", "src", "parser.rs")
 FRAGMENT = os.path.join(ROOT, "ebpf", "src", "fragment.rs")
 LIB = os.path.join(ROOT, "ebpf", "src", "lib.rs")
 MAPS = os.path.join(ROOT, "ebpf", "src", "maps.rs")
+TCPRT = os.path.join(ROOT, "ebpf", "src", "tcprt.rs")
 INVENTORY = os.path.join(ROOT, "core", "src", "ebpf_ops", "inventory.rs")
 
 
@@ -29,6 +30,8 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             cls.lib_source = handle.read()
         with open(MAPS, "r", encoding="utf-8") as handle:
             cls.maps_source = handle.read()
+        with open(TCPRT, "r", encoding="utf-8") as handle:
+            cls.tcprt_source = handle.read()
         with open(INVENTORY, "r", encoding="utf-8") as handle:
             cls.inventory_source = handle.read()
 
@@ -92,8 +95,14 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             re.compile(r"let\s+ct_key\s*=\s*CtKey[46]\s*\{"),
             "TC connection keys must not remain live on the BPF stack",
         )
-        self.assertEqual(self.lib_source.count("CT_KEY4_SCRATCH.get_ptr_mut(0)"), 2)
-        self.assertEqual(self.lib_source.count("CT_KEY6_SCRATCH.get_ptr_mut(0)"), 2)
+        self.assertEqual(
+            self.lib_source.count("CT_KEY4_SCRATCH.get_ptr_mut(maps::CT_KEY_PRIMARY_SLOT)"),
+            2,
+        )
+        self.assertEqual(
+            self.lib_source.count("CT_KEY6_SCRATCH.get_ptr_mut(maps::CT_KEY_PRIMARY_SLOT)"),
+            2,
+        )
 
     def test_ct_key_scratch_is_not_persistent_inventory(self):
         for name in ("CT_KEY4_SCRATCH", "CT_KEY6_SCRATCH"):
@@ -102,6 +111,26 @@ class LegacyPacketBoundsTest(unittest.TestCase):
                 self.inventory_source,
                 "%s is packet scratch, not persistent runtime state" % name,
             )
+
+    def test_tcprt_derived_keys_use_the_second_scratch_slot(self):
+        self.assertIn("CT_KEY_PRIMARY_SLOT: u32 = 0", self.maps_source)
+        self.assertIn("CT_KEY_DERIVED_SLOT: u32 = 1", self.maps_source)
+        self.assertIn("PerCpuArray::with_max_entries(2, 0)", self.maps_source)
+        self.assertNotRegex(
+            self.tcprt_source,
+            re.compile(r"let\s+(?:fwd|rev)_key\s*=\s*CtKey[46]\s*\{"),
+            "TCPRT derived connection keys must not remain on the BPF stack",
+        )
+        self.assertEqual(
+            self.tcprt_source.count("CT_KEY4_SCRATCH.get_ptr_mut(CT_KEY_DERIVED_SLOT)"),
+            2,
+        )
+        self.assertEqual(
+            self.tcprt_source.count("CT_KEY6_SCRATCH.get_ptr_mut(CT_KEY_DERIVED_SLOT)"),
+            2,
+        )
+        self.assertNotIn("track_tcp_rt_v4_rev(tap_id", self.tcprt_source)
+        self.assertNotIn("track_tcp_rt_v6_rev(tap_id", self.tcprt_source)
 
 
 if __name__ == "__main__":
