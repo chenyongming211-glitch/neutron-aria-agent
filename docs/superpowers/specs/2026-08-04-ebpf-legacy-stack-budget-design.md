@@ -2,7 +2,7 @@
 
 Date: 2026-08-04
 
-Status: approved architecture baseline; implementation plan pending written-spec review
+Status: approved architecture baseline; implementation in progress
 
 Analyzed target: `origin/v0.9-neutron-agent@850832b`
 
