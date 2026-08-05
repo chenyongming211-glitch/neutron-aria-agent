@@ -6598,6 +6598,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn neutron_snapshot_ovs_inventory_command_captures_output() {
+        let output = run_bounded_process(
+            "sh",
+            &["-c", "printf ovs-out; printf ovs-error >&2"],
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("bounded command should complete");
+
+        assert_eq!(output.stdout, b"ovs-out");
+        assert_eq!(output.stderr, b"ovs-error");
+    }
+
     #[test]
     fn neutron_snapshot_admission_identity_detects_intervening_runtime_change() {
         let mut runtime = NeutronRuntimeState {
