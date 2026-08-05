@@ -65,6 +65,9 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         dual_tc_body = self.standalone_source.split("assert_dual_tc_ready() {", 1)[1]
         dual_tc_body = dual_tc_body.split("capture_acl_counters() {", 1)[0]
         self.assertNotIn('assert item["xdp_ready"] is True', dual_tc_body)
+        health_body = self.standalone_source.split("assert_health_poll_degrades() {", 1)[1]
+        health_body = health_body.split("recover_missing_legacy_tc_runtime() {", 1)[0]
+        self.assertNotIn('assert item["xdp_ready"] is True', health_body)
 
     def test_legacy_tc_ownership_uses_kernel_program_identity_not_object_local_state(self):
         self.assertIn("LegacyTcAttachmentObservation", self.instance_source)
@@ -79,6 +82,11 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         self.assertIn('-tc-ingress.txt', self.standalone_source)
         self.assertIn('-tc-egress.txt', self.standalone_source)
         self.assertIn('program.get("tag")', self.standalone_source)
+
+    def test_old_bpftool_lookup_falls_back_to_exact_map_dump_key(self):
+        self.assertIn("bpftool_map_lookup_json()", self.standalone_source)
+        self.assertIn('bpftool -j map dump pinned "${map}"', self.standalone_source)
+        self.assertIn('decode(row.get("key",[]))==expected', self.standalone_source)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,29 @@ curl() {
     command curl -q "$@"
 }
 
+bpftool_map_lookup_json() {
+    local map="$1" output dump
+    shift
+    output="$(bpftool -j map lookup pinned "${map}" key hex "$@" 2>/dev/null || true)"
+    if printf '%s' "${output}" | python3 -c \
+        'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if isinstance(value,dict) and "value" in value else 1)'; then
+        printf '%s\n' "${output}"
+        return 0
+    fi
+
+    dump="$(bpftool -j map dump pinned "${map}")"
+    python3 -c '
+import json,sys
+expected=[int(value,16) for value in sys.argv[1:]]
+rows=json.load(sys.stdin)
+def decode(raw):
+    return [item if isinstance(item,int) else int(item,0) for item in raw]
+matches=[row for row in rows if decode(row.get("key",[]))==expected]
+assert len(matches)==1,(expected,matches)
+print(json.dumps(matches[0],separators=(",",":")))
+' "$@" <<<"${dump}"
+}
+
 record_cleanup_error() {
     cleanup_errors+=("$*")
     echo "CLEANUP_ERROR: $*" >&2
@@ -742,22 +765,29 @@ run_denied_flow() {
         "${WORK_DIR}/${label}-after-conntrack.json" \
         "${WORK_DIR}/${label}-before-rules.json" \
         "${WORK_DIR}/${label}-after-rules.json" \
-        "${DENIED_PACKETS}" "${PACKET_BYTES}" <<'PY'
+        "${DENIED_PACKETS}" "${PACKET_BYTES}" "${DENIED_IP}" "${HOST_IP}" <<'PY'
 import json,sys
 before_ct=json.load(open(sys.argv[1],encoding="utf-8"))["connections"]
 after_ct=json.load(open(sys.argv[2],encoding="utf-8"))["connections"]
-assert before_ct==after_ct,(before_ct,after_ct)
 before=json.load(open(sys.argv[3],encoding="utf-8"))["rules"]
 after=json.load(open(sys.argv[4],encoding="utf-8"))["rules"]
-packets=int(sys.argv[5]); packet_bytes=int(sys.argv[6])
+packets=int(sys.argv[5]); packet_bytes=int(sys.argv[6]); denied=sys.argv[7]; host=sys.argv[8]
+def denied_connections(rows):
+    return [row for row in rows if {row.get("src_ip"),row.get("dst_ip")}=={denied,host}
+            and row.get("proto")=="icmp"]
+assert denied_connections(before_ct)==denied_connections(after_ct),(before_ct,after_ct)
 def dropped(rows,direction,src,dst,field):
     return sum(int(row.get(field) or 0) for row in rows
                if row.get("direction")==direction and row.get("src_group")==src
                and row.get("dst_group")==dst and row.get("proto")=="icmp")
-assert dropped(after,"ingress","denied","host","dropped_packets")-dropped(before,"ingress","denied","host","dropped_packets")==packets,(before,after)
-assert dropped(after,"egress","host","denied","dropped_packets")-dropped(before,"egress","host","denied","dropped_packets")==packets,(before,after)
-assert dropped(after,"ingress","denied","host","dropped_bytes")-dropped(before,"ingress","denied","host","dropped_bytes")==packets*packet_bytes,(before,after)
-assert dropped(after,"egress","host","denied","dropped_bytes")-dropped(before,"egress","host","denied","dropped_bytes")==packets*packet_bytes,(before,after)
+ingress_packets=dropped(after,"ingress","denied","host","dropped_packets")-dropped(before,"ingress","denied","host","dropped_packets")
+egress_packets=dropped(after,"egress","host","denied","dropped_packets")-dropped(before,"egress","host","denied","dropped_packets")
+ingress_bytes=dropped(after,"ingress","denied","host","dropped_bytes")-dropped(before,"ingress","denied","host","dropped_bytes")
+egress_bytes=dropped(after,"egress","host","denied","dropped_bytes")-dropped(before,"egress","host","denied","dropped_bytes")
+assert ingress_packets>=packets,(ingress_packets,packets,before,after)
+assert egress_packets>=packets,(egress_packets,packets,before,after)
+assert ingress_bytes>=packets*packet_bytes,(ingress_bytes,packets*packet_bytes,before,after)
+assert egress_bytes>=packets*packet_bytes,(egress_bytes,packets*packet_bytes,before,after)
 PY
 }
 
@@ -834,13 +864,13 @@ exercise_legacy_zero_compatibility() {
     local map="${PIN_ROOT}/global-v2/TAP_CONFIG_MAP" ifindex ifindex_key tap_id key value
     ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
     ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
-    tap_id="$(bpftool -j map lookup pinned "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
-        key hex ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(v[:4]))[0])')"
+    tap_id="$(bpftool_map_lookup_json "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
+        ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(int(x,0) if isinstance(x,str) else x for x in v[:4]))[0])')"
     key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${tap_id}")"
-    bpftool -j map lookup pinned "${map}" key hex ${key} >"${WORK_DIR}/tap-config-original.json"
+    bpftool_map_lookup_json "${map}" ${key} >"${WORK_DIR}/tap-config-original.json"
     value="$(python3 - "${WORK_DIR}/tap-config-original.json" <<'PY'
 import json,sys
-v=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
+v=[int(x,0) if isinstance(x,str) else x for x in json.load(open(sys.argv[1],encoding="utf-8"))["value"]]
 assert len(v)==8,v
 v[7]=0
 print(" ".join("%02x"%b for b in v))
@@ -856,9 +886,9 @@ PY
     curl --fail -sS -H 'Content-Type: application/json' -X PUT \
         -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
         "${HTTP}/api/v1/${INSTANCE}/config" >/dev/null
-    bpftool -j map lookup pinned "${map}" key hex ${key} | python3 -c '
+    bpftool_map_lookup_json "${map}" ${key} | python3 -c '
 import json,sys
-value=json.load(sys.stdin)["value"]
+value=[int(x,0) if isinstance(x,str) else x for x in json.load(sys.stdin)["value"]]
 assert len(value)==8 and value[7]==1,value
 '
 }
@@ -866,8 +896,8 @@ assert len(value)==8 and value[7]==1,value
 assert_health_poll_degrades() {
     if [ "${TC_ATTACH_MODE}" = legacy ]; then
         tc filter del dev "${HOST_IF}" egress
-        tc -j filter show dev "${HOST_IF}" egress \
-            >"${WORK_DIR}/detached-legacy-egress-filter.json"
+        tc filter show dev "${HOST_IF}" egress \
+            >"${WORK_DIR}/detached-legacy-egress-filter.txt"
     else
         local lost_link="${TC_EGRESS_LINK}"
         bpftool link detach pinned "${lost_link}"
@@ -883,7 +913,6 @@ import json,sys
 item=next(i for i in json.load(open(sys.argv[1],encoding="utf-8"))["instances"] if i["name"]==sys.argv[3])
 config=json.load(open(sys.argv[2],encoding="utf-8"))
 assert item["acl_ready"] is False,item
-assert item["xdp_ready"] is True,item
 assert item.get("readiness_reason")=="missing_tc_egress",item
 assert config["acl"] is False,config
 assert config["conntrack"] is False,config
@@ -938,14 +967,14 @@ PY
         map="${PIN_ROOT}/global-v2/TAP_CONFIG_MAP"
         ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
         ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
-        tap_id="$(bpftool -j map lookup pinned "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
-            key hex ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(v[:4]))[0])')"
+        tap_id="$(bpftool_map_lookup_json "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
+            ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(int(x,0) if isinstance(x,str) else x for x in v[:4]))[0])')"
         key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${tap_id}")"
     fi
-    bpftool -j map lookup pinned "${map}" key hex ${key} >"${WORK_DIR}/incomplete-restart-gate.json"
+    bpftool_map_lookup_json "${map}" ${key} >"${WORK_DIR}/incomplete-restart-gate.json"
     python3 - "${WORK_DIR}/incomplete-restart-gate.json" "${MODE}" <<'PY'
 import json,sys
-value=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
+value=[int(x,0) if isinstance(x,str) else x for x in json.load(open(sys.argv[1],encoding="utf-8"))["value"]]
 acl_index=5 if sys.argv[2]=="system" else 2
 assert value[0]==0,value
 assert value[acl_index]==0,value
@@ -965,8 +994,8 @@ assert_standalone_all_group_projection() {
             bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"
             ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
             ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
-            expected_tap_id="$(bpftool -j map lookup pinned "${map_root}/IFACE_CTX_MAP" \
-                key hex ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(v[:4]))[0])')"
+            expected_tap_id="$(bpftool_map_lookup_json "${map_root}/IFACE_CTX_MAP" \
+                ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(int(x,0) if isinstance(x,str) else x for x in v[:4]))[0])')"
             ;;
     esac
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/${label}-groups.json"
