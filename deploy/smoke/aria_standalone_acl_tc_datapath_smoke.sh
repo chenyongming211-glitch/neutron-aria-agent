@@ -334,7 +334,7 @@ observe_fragment_occupancy() {
 }
 
 publish_fragment_epoch_policy() {
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"standalone-unreferenced","dst_group":"fragment-host-v4","proto":"udp","action":"allow","direction":"ingress","ports":"54"}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/fragment-epoch-policy-update.json"
 }
@@ -479,7 +479,7 @@ crash_agent_bounded() {
 }
 
 start_system_mode() {
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d "{\"iface\":\"${HOST_IF}\",\"max_port_policies\":16384}" \
         "${HTTP}/api/v1/system/start" >"${WORK_DIR}/system-start.json"
     INSTANCE="system"
@@ -514,60 +514,60 @@ start_tap_mode() {
 }
 
 install_fixture_policy() {
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d "{\"name\":\"peer\",\"cidr\":\"${PEER_IP}/32\"}" \
         "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d "{\"name\":\"host\",\"cidr\":\"${HOST_IP}/32\"}" \
         "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d "{\"name\":\"denied\",\"cidr\":\"${DENIED_IP}/32\"}" \
         "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d '{"name":"standalone-unreferenced","cidr":"10.203.0.7/32"}' \
         "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"peer","dst_group":"host","proto":"icmp","action":"allow","direction":"ingress","ports":null}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"host","dst_group":"peer","proto":"icmp","action":"allow","direction":"egress","ports":null}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"denied","dst_group":"host","proto":"icmp","action":"drop","direction":"ingress","ports":null}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"host","dst_group":"denied","proto":"icmp","action":"drop","direction":"egress","ports":null}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
     if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d "{\"name\":\"fragment-host-v4\",\"cidr\":\"${FRAGMENT_IPV4_HOST}/32\"}" \
             "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d "{\"name\":\"fragment-peer-v4\",\"cidr\":\"${FRAGMENT_IPV4_PEER}/32\"}" \
             "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d "{\"name\":\"fragment-host-v6\",\"cidr\":\"${FRAGMENT_IPV6_HOST}/128\"}" \
             "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d "{\"name\":\"fragment-peer-v6\",\"cidr\":\"${FRAGMENT_IPV6_PEER}/128\"}" \
             "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d '{"src_group":"fragment-peer-v4","dst_group":"fragment-host-v4","proto":"udp","action":"allow","direction":"ingress","ports":"53"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d '{"src_group":"fragment-host-v4","dst_group":"fragment-peer-v4","proto":"udp","action":"allow","direction":"egress","ports":"53"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d '{"src_group":"fragment-peer-v6","dst_group":"fragment-host-v6","proto":"udp","action":"allow","direction":"ingress","ports":"53"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
-        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        curl --fail -sS -H 'Content-Type: application/json' \
             -d '{"src_group":"fragment-host-v6","dst_group":"fragment-peer-v6","proto":"udp","action":"allow","direction":"egress","ports":"53"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
     fi
-    curl --fail-with-body -sS -H 'Content-Type: application/json' -X PUT \
+    curl --fail -sS -H 'Content-Type: application/json' -X PUT \
         -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
         "${HTTP}/api/v1/${INSTANCE}/config" >/dev/null
-    curl --fail-with-body -sS -X DELETE \
+    curl --fail -sS -X DELETE \
         "${HTTP}/api/v1/${INSTANCE}/conntrack" >"${WORK_DIR}/initial-conntrack-flush.json"
 }
 
@@ -667,7 +667,7 @@ set_trace_filter() {
     local src_ip="${1:-}" dst_ip="${2:-}" body
     body="$(printf '{"src_ip":"%s","dst_ip":"%s","src_port":0,"dst_port":0,"proto":"icmp"}' \
         "${src_ip}" "${dst_ip}")"
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -X POST -d "${body}" "${HTTP}/api/v1/${INSTANCE}/trace" \
         >"${WORK_DIR}/trace-start-$(date +%s%N).json"
     TRACE_ARMED=true
@@ -675,7 +675,7 @@ set_trace_filter() {
 
 clear_trace_filter() {
     [ "${TRACE_ARMED}" = true ] || return 0
-    curl --max-time "${AGENT_STOP_TIMEOUT_SECS}" --fail-with-body -sS -X DELETE \
+    curl --max-time "${AGENT_STOP_TIMEOUT_SECS}" --fail -sS -X DELETE \
         "${HTTP}/api/v1/${INSTANCE}/trace" \
         >"${WORK_DIR}/trace-stop-$(date +%s%N).json"
     TRACE_ARMED=false
@@ -826,7 +826,7 @@ PY
     capture_acl_counters legacy-zero-after
     clear_trace_filter
     assert_xdp_neutral legacy-zero-before legacy-zero-after "${ALLOWED_PACKETS}"
-    curl --fail-with-body -sS -H 'Content-Type: application/json' -X PUT \
+    curl --fail -sS -H 'Content-Type: application/json' -X PUT \
         -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
         "${HTTP}/api/v1/${INSTANCE}/config" >/dev/null
     bpftool -j map lookup pinned "${map}" key hex ${key} | python3 -c '
@@ -1059,7 +1059,7 @@ if sys.argv[4]=="1":
 actual={(row["src_group"],row["dst_group"],row["action"],row["direction"]) for row in policies}
 assert actual==expected,(actual,expected)
 PY
-    curl --fail-with-body -sS -X DELETE "${HTTP}/api/v1/${INSTANCE}/conntrack" \
+    curl --fail -sS -X DELETE "${HTTP}/api/v1/${INSTANCE}/conntrack" \
         >"${WORK_DIR}/recovery-conntrack-flush.json"
     run_observed_allowed_flow recovery-allowed
     run_denied_flow recovery-denied
@@ -1093,7 +1093,7 @@ recover_incomplete_pinned_runtime() {
     assert_incomplete_pinned_runtime_quiesced
 
     if [ "${MODE}" = system ]; then
-        curl --fail-with-body -sS -X POST "${HTTP}/api/v1/system/stop" \
+        curl --fail -sS -X POST "${HTTP}/api/v1/system/stop" \
             >"${WORK_DIR}/incomplete-system-stop.json"
         start_system_mode
     else
@@ -1295,7 +1295,7 @@ cleanup() {
         clear_trace_filter || record_cleanup_error "trace filter cleanup failed"
     fi
     if [ "${MODE}" = system ] && [ "${SYSTEM_STARTED}" = true ]; then
-        if ! curl --max-time "${AGENT_STOP_TIMEOUT_SECS}" --fail-with-body -sS -X POST \
+        if ! curl --max-time "${AGENT_STOP_TIMEOUT_SECS}" --fail -sS -X POST \
             "${HTTP}/api/v1/system/stop" >"${WORK_DIR}/cleanup-system-stop.json" 2>&1; then
             record_cleanup_error "system stop failed"
         fi

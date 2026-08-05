@@ -45,6 +45,9 @@ def main():
     if missing:
         print("ERROR: standalone TC ACL smoke public contract missing %s" % ", ".join(missing))
         return 1
+    if "--fail-with-body" in source:
+        print("ERROR: standalone TC ACL smoke requires curl newer than the legacy target")
+        return 1
     print("Standalone TC ACL smoke entrypoint and evidence schema: OK")
     return 0
 
