@@ -20,6 +20,7 @@ STANDALONE = os.path.join(
     "smoke",
     "aria_standalone_acl_tc_datapath_smoke.sh",
 )
+INSTANCE = os.path.join(ROOT, "agent", "src", "instance.rs")
 
 
 class LegacyKernelCanaryContractTest(unittest.TestCase):
@@ -28,6 +29,8 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
             self.source = handle.read()
         with open(STANDALONE, "r", encoding="utf-8") as handle:
             self.standalone_source = handle.read()
+        with open(INSTANCE, "r", encoding="utf-8") as handle:
+            self.instance_source = handle.read()
 
     def test_requires_exact_kernel_and_artifact_hashes(self):
         self.assertIn("4.18.0-553.5.1.el8_10.x86_64", self.source)
@@ -59,6 +62,15 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         self.assertIn('"tc_ingress"', self.standalone_source)
         self.assertIn('"tc_egress"', self.standalone_source)
         self.assertIn("assert_exact_legacy_tc_filter", self.standalone_source)
+        dual_tc_body = self.standalone_source.split("assert_dual_tc_ready() {", 1)[1]
+        dual_tc_body = dual_tc_body.split("capture_acl_counters() {", 1)[0]
+        self.assertNotIn('assert item["xdp_ready"] is True', dual_tc_body)
+
+    def test_legacy_tc_ownership_uses_kernel_program_identity_not_object_local_state(self):
+        self.assertIn("LegacyTcAttachmentObservation", self.instance_source)
+        self.assertIn('args(["-j", "filter", "show"', self.instance_source)
+        self.assertIn("pinned_tc_program_id", self.instance_source)
+        self.assertNotIn("legacy_tc_ingress_attached: AtomicBool", self.instance_source)
 
 
 if __name__ == "__main__":

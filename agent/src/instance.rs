@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
@@ -23,8 +22,6 @@ pub struct FirewallInstance {
     pub shared_runtime: bool,
     trace_map_mode: TraceMapMode,
     fragment_tracking: FragmentTrackingSettings,
-    legacy_tc_ingress_attached: AtomicBool,
-    legacy_tc_egress_attached: AtomicBool,
     /// Whether FQ qdisc (EDT) was successfully configured.
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
@@ -134,14 +131,64 @@ fn tcx_query_contains_expected_program(
     attached_program_ids.contains(&expected_program_id)
 }
 
-fn tc_attachment_ready(tcx_live: bool, legacy_owned: bool, legacy_observed: bool) -> bool {
-    tcx_live || (legacy_owned && legacy_observed)
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LegacyTcAttachmentObservation {
+    Absent,
+    Owned,
+    Conflict,
 }
 
-fn tc_filter_output_contains_program(output: &str, prog_name: &str) -> bool {
-    output
-        .lines()
-        .any(|line| line.split_whitespace().any(|field| field == prog_name))
+fn tc_attachment_ready(
+    tcx_live: bool,
+    legacy: LegacyTcAttachmentObservation,
+) -> bool {
+    tcx_live || legacy == LegacyTcAttachmentObservation::Owned
+}
+
+fn collect_tc_program_ids(
+    value: &serde_json::Value,
+    prog_name: &str,
+    program_ids: &mut Vec<Option<u32>>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("name").and_then(serde_json::Value::as_str) == Some(prog_name) {
+                program_ids.push(
+                    fields
+                        .get("id")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|id| u32::try_from(id).ok()),
+                );
+            }
+            for child in fields.values() {
+                collect_tc_program_ids(child, prog_name, program_ids);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_tc_program_ids(child, prog_name, program_ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn classify_legacy_tc_filter_json(
+    output: &str,
+    prog_name: &str,
+    expected_program_id: u32,
+) -> Result<LegacyTcAttachmentObservation, String> {
+    let value: serde_json::Value = serde_json::from_str(output)
+        .map_err(|error| format!("parse tc JSON for {}: {}", prog_name, error))?;
+    let mut program_ids = Vec::new();
+    collect_tc_program_ids(&value, prog_name, &mut program_ids);
+    match program_ids.as_slice() {
+        [] => Ok(LegacyTcAttachmentObservation::Absent),
+        [Some(actual)] if *actual == expected_program_id => {
+            Ok(LegacyTcAttachmentObservation::Owned)
+        }
+        _ => Ok(LegacyTcAttachmentObservation::Conflict),
+    }
 }
 
 fn classify_legacy_tc_cleanup(
@@ -533,12 +580,43 @@ impl FirewallInstance {
         }
     }
 
-    fn legacy_tc_attached(&self, prog_name: &str) -> Option<&AtomicBool> {
-        match prog_name {
-            "tc_ingress" => Some(&self.legacy_tc_ingress_attached),
-            "tc_egress" => Some(&self.legacy_tc_egress_attached),
-            _ => None,
+    fn pinned_tc_program_id(&self, prog_name: &str) -> Result<u32, String> {
+        let program = aya::programs::SchedClassifier::from_pin(self.tc_prog_pin_path(prog_name))
+            .map_err(|error| format!("{} pinned program: {:?}", prog_name, error))?;
+        program
+            .info()
+            .map(|info| info.id())
+            .map_err(|error| format!("{} pinned program info: {:?}", prog_name, error))
+    }
+
+    fn observe_legacy_tc_attachment(
+        &self,
+        prog_name: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> Result<LegacyTcAttachmentObservation, String> {
+        let expected_program_id = self.pinned_tc_program_id(prog_name)?;
+        let direction = match attach_type {
+            aya::programs::tc::TcAttachType::Ingress => "ingress",
+            aya::programs::tc::TcAttachType::Egress => "egress",
+            _ => return Ok(LegacyTcAttachmentObservation::Absent),
+        };
+        let output = std::process::Command::new("tc")
+            .args(["-j", "filter", "show", "dev", &self.iface, direction])
+            .output()
+            .map_err(|error| format!("run tc JSON query for {}: {}", prog_name, error))?;
+        if !output.status.success() {
+            return Err(format!(
+                "tc JSON query for {} failed with status {}: {}",
+                prog_name,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
+        classify_legacy_tc_filter_json(
+            &String::from_utf8_lossy(&output.stdout),
+            prog_name,
+            expected_program_id,
+        )
     }
 
     fn legacy_tc_attachment_is_live(
@@ -546,31 +624,9 @@ impl FirewallInstance {
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
     ) -> bool {
-        let owned = self
-            .legacy_tc_attached(prog_name)
-            .map(|attached| attached.load(Ordering::Acquire))
-            .unwrap_or(false);
-        if !owned {
-            return false;
-        }
-        let direction = match attach_type {
-            aya::programs::tc::TcAttachType::Ingress => "ingress",
-            aya::programs::tc::TcAttachType::Egress => "egress",
-            _ => return false,
-        };
-        let observed = std::process::Command::new("tc")
-            .args(["filter", "show", "dev", &self.iface, direction])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| {
-                tc_filter_output_contains_program(
-                    &String::from_utf8_lossy(&output.stdout),
-                    prog_name,
-                )
-            })
-            .unwrap_or(false);
-        tc_attachment_ready(false, owned, observed)
+        self.observe_legacy_tc_attachment(prog_name, attach_type)
+            .map(|observed| observed == LegacyTcAttachmentObservation::Owned)
+            .unwrap_or(false)
     }
 
     fn detach_legacy_tc_program(
@@ -578,14 +634,20 @@ impl FirewallInstance {
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
     ) -> Result<bool, String> {
-        let removed = classify_legacy_tc_cleanup(
+        match self.observe_legacy_tc_attachment(prog_name, attach_type)? {
+            LegacyTcAttachmentObservation::Absent => return Ok(false),
+            LegacyTcAttachmentObservation::Owned => {}
+            LegacyTcAttachmentObservation::Conflict => {
+                return Err(format!(
+                    "refusing to detach ambiguous legacy {} TC filter on {}",
+                    prog_name, self.iface
+                ));
+            }
+        }
+        classify_legacy_tc_cleanup(
             aya::programs::tc::qdisc_detach_program(&self.iface, attach_type, prog_name),
             prog_name,
-        )?;
-        if let Some(attached) = self.legacy_tc_attached(prog_name) {
-            attached.store(false, Ordering::Release);
-        }
-        Ok(removed)
+        )
     }
 
     fn detach_owned_legacy_tc_program(
@@ -593,12 +655,6 @@ impl FirewallInstance {
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
     ) -> Result<bool, String> {
-        let Some(attached) = self.legacy_tc_attached(prog_name) else {
-            return Ok(false);
-        };
-        if !attached.load(Ordering::Acquire) {
-            return Ok(false);
-        }
         self.detach_legacy_tc_program(prog_name, attach_type)
     }
 
@@ -626,19 +682,19 @@ impl FirewallInstance {
         TcAclLinkHealth::new(
             tc_attachment_ready(
                 ingress_tcx,
-                self.legacy_tc_ingress_attached.load(Ordering::Acquire),
-                self.legacy_tc_attachment_is_live(
+                self.observe_legacy_tc_attachment(
                     "tc_ingress",
                     aya::programs::tc::TcAttachType::Ingress,
-                ),
+                )
+                .unwrap_or(LegacyTcAttachmentObservation::Absent),
             ),
             tc_attachment_ready(
                 egress_tcx,
-                self.legacy_tc_egress_attached.load(Ordering::Acquire),
-                self.legacy_tc_attachment_is_live(
+                self.observe_legacy_tc_attachment(
                     "tc_egress",
                     aya::programs::tc::TcAttachType::Egress,
-                ),
+                )
+                .unwrap_or(LegacyTcAttachmentObservation::Absent),
             ),
             self.xdp_link_health(),
         )
@@ -749,8 +805,6 @@ impl FirewallInstance {
             shared_runtime,
             trace_map_mode,
             fragment_tracking: FragmentTrackingSettings::default(),
-            legacy_tc_ingress_attached: AtomicBool::new(false),
-            legacy_tc_egress_attached: AtomicBool::new(false),
             edt_available: false,
         }
     }
@@ -1795,15 +1849,9 @@ impl FirewallInstance {
 
             match self.try_attach_tc_from_pin(prog_name, &prog_pin, attach_type) {
                 Ok(TcAttachOutcome::Pinned) => {
-                    if let Some(legacy_attached) = self.legacy_tc_attached(prog_name) {
-                        legacy_attached.store(false, Ordering::Release);
-                    }
                     Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::AttachedNow);
                 }
                 Ok(TcAttachOutcome::Legacy { priority, handle }) => {
-                    if let Some(legacy_attached) = self.legacy_tc_attached(prog_name) {
-                        legacy_attached.store(true, Ordering::Release);
-                    }
                     Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::AttachedNow);
                     info!(
                         instance = %self.iface,
@@ -2038,27 +2086,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tc_attachment_readiness_accepts_tcx_or_observed_owned_legacy_link() {
-        assert!(tc_attachment_ready(true, false, false));
-        assert!(tc_attachment_ready(false, true, true));
-        assert!(!tc_attachment_ready(false, true, false));
-        assert!(!tc_attachment_ready(false, false, true));
-        assert!(!tc_attachment_ready(false, false, false));
+    fn tc_attachment_readiness_accepts_tcx_or_exact_legacy_identity() {
+        assert!(tc_attachment_ready(
+            true,
+            LegacyTcAttachmentObservation::Absent
+        ));
+        assert!(tc_attachment_ready(
+            false,
+            LegacyTcAttachmentObservation::Owned
+        ));
+        assert!(!tc_attachment_ready(
+            false,
+            LegacyTcAttachmentObservation::Absent
+        ));
+        assert!(!tc_attachment_ready(
+            false,
+            LegacyTcAttachmentObservation::Conflict
+        ));
     }
 
     #[test]
-    fn legacy_tc_health_matches_only_the_exact_program_name() {
-        let output = concat!(
-            "filter protocol all pref 49152 bpf chain 0\n",
-            "filter protocol all pref 49152 bpf chain 0 handle 0x1 tc_ingress direct-action id 77\n",
-        );
+    fn legacy_tc_health_requires_one_exact_name_and_program_id() {
+        let owned = r#"[{"kind":"bpf","options":{"name":"tc_ingress","id":77}}]"#;
+        let unrelated = r#"[{"kind":"bpf","options":{"name":"tc_egress","id":88}}]"#;
+        let wrong_id = r#"[{"kind":"bpf","options":{"name":"tc_ingress","id":88}}]"#;
+        let duplicate = r#"[
+            {"kind":"bpf","options":{"name":"tc_ingress","id":77}},
+            {"kind":"bpf","options":{"name":"tc_ingress","id":88}}
+        ]"#;
 
-        assert!(tc_filter_output_contains_program(output, "tc_ingress"));
-        assert!(!tc_filter_output_contains_program(output, "tc_egress"));
-        assert!(!tc_filter_output_contains_program(
-            "handle 0x1 tc_ingress_backup direct-action",
-            "tc_ingress"
-        ));
+        assert_eq!(
+            classify_legacy_tc_filter_json(owned, "tc_ingress", 77).unwrap(),
+            LegacyTcAttachmentObservation::Owned
+        );
+        assert_eq!(
+            classify_legacy_tc_filter_json(unrelated, "tc_ingress", 77).unwrap(),
+            LegacyTcAttachmentObservation::Absent
+        );
+        assert_eq!(
+            classify_legacy_tc_filter_json(wrong_id, "tc_ingress", 77).unwrap(),
+            LegacyTcAttachmentObservation::Conflict
+        );
+        assert_eq!(
+            classify_legacy_tc_filter_json(duplicate, "tc_ingress", 77).unwrap(),
+            LegacyTcAttachmentObservation::Conflict
+        );
     }
 
     #[test]

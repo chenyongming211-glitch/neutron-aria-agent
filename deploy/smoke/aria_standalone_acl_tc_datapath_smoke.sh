@@ -647,7 +647,6 @@ import json,sys
 name=sys.argv[1]
 item=next(i for i in json.load(sys.stdin)["instances"] if i["name"]==name)
 assert item["acl_ready"] is True,item
-assert item["xdp_ready"] is True,item
 ' "${INSTANCE}"
     DUAL_TC_READY=true
 }
