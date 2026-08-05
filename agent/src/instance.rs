@@ -701,6 +701,10 @@ impl FirewallInstance {
     }
 
     pub(crate) fn detach_fragment_tc_links_strict(&self) -> Result<(), String> {
+        let current_tcx_directions: HashSet<&str> = ["tc_ingress", "tc_egress"]
+            .into_iter()
+            .filter(|prog_name| Path::new(&self.tc_link_pin_path(prog_name)).exists())
+            .collect();
         let candidates = if self.shared_runtime {
             let entries = std::fs::read_dir(&self.pin_path).map_err(|error| {
                 format!(
@@ -758,6 +762,9 @@ impl FirewallInstance {
                 aya::programs::tc::TcAttachType::Egress,
             ),
         ] {
+            if current_tcx_directions.contains(prog_name) {
+                continue;
+            }
             if let Err(error) = self.detach_owned_legacy_tc_program(prog_name, attach_type) {
                 errors.push(error);
             }
@@ -2036,7 +2043,8 @@ impl FirewallInstance {
 
         for prog_name in ["tc_egress", "tc_ingress"] {
             let link_pin = self.tc_link_pin_path(prog_name);
-            if std::path::Path::new(&link_pin).exists() {
+            let had_tcx_link = std::path::Path::new(&link_pin).exists();
+            if had_tcx_link {
                 match std::fs::remove_file(&link_pin) {
                     Ok(()) => info!(instance = %self.iface, program = %prog_name, "TC link unpinned"),
                     Err(error) => errors.push(format!(
@@ -2045,7 +2053,10 @@ impl FirewallInstance {
                     )),
                 }
             }
-            if let Some(attach_type) = Self::tc_attach_type(prog_name) {
+            if !had_tcx_link {
+                let Some(attach_type) = Self::tc_attach_type(prog_name) else {
+                    continue;
+                };
                 if let Err(error) = self.detach_owned_legacy_tc_program(prog_name, attach_type) {
                     errors.push(error);
                 }
