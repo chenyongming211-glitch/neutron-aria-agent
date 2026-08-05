@@ -38,6 +38,7 @@ def main():
         source = handle.read()
     required = (
         'MODE="${MODE:-system}"', 'case "${MODE}" in system|tap)', "write_summary() {",
+        "curl() {", 'command curl -q "$@"',
         "summary.json.tmp", 'mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json"',
     ) + SUMMARY_FIELDS
     missing = [term for term in required if term not in source]

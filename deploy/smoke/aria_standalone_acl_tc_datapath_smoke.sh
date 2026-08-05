@@ -92,6 +92,10 @@ need_command() {
     command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
+curl() {
+    command curl -q "$@"
+}
+
 record_cleanup_error() {
     cleanup_errors+=("$*")
     echo "CLEANUP_ERROR: $*" >&2
