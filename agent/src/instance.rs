@@ -138,6 +138,12 @@ enum LegacyTcAttachmentObservation {
     Conflict,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct LegacyTcProgramIdentity {
+    id: u32,
+    tag: u64,
+}
+
 fn tc_attachment_ready(
     tcx_live: bool,
     legacy: LegacyTcAttachmentObservation,
@@ -188,6 +194,35 @@ fn classify_legacy_tc_filter_json(
             Ok(LegacyTcAttachmentObservation::Owned)
         }
         _ => Ok(LegacyTcAttachmentObservation::Conflict),
+    }
+}
+
+fn classify_legacy_tc_filter_text(
+    output: &str,
+    prog_name: &str,
+    expected_program_tag: u64,
+) -> LegacyTcAttachmentObservation {
+    let expected_tag = format!("{:016x}", expected_program_tag);
+    let mut observed_tags = Vec::new();
+    for line in output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if !fields.iter().any(|field| *field == prog_name) {
+            continue;
+        }
+        observed_tags.push(
+            fields
+                .windows(2)
+                .find(|pair| pair[0] == "tag")
+                .map(|pair| pair[1]),
+        );
+    }
+
+    match observed_tags.as_slice() {
+        [] => LegacyTcAttachmentObservation::Absent,
+        [Some(actual)] if actual.eq_ignore_ascii_case(&expected_tag) => {
+            LegacyTcAttachmentObservation::Owned
+        }
+        _ => LegacyTcAttachmentObservation::Conflict,
     }
 }
 
@@ -580,12 +615,18 @@ impl FirewallInstance {
         }
     }
 
-    fn pinned_tc_program_id(&self, prog_name: &str) -> Result<u32, String> {
+    fn pinned_tc_program_identity(
+        &self,
+        prog_name: &str,
+    ) -> Result<LegacyTcProgramIdentity, String> {
         let program = aya::programs::SchedClassifier::from_pin(self.tc_prog_pin_path(prog_name))
             .map_err(|error| format!("{} pinned program: {:?}", prog_name, error))?;
         program
             .info()
-            .map(|info| info.id())
+            .map(|info| LegacyTcProgramIdentity {
+                id: info.id(),
+                tag: info.tag(),
+            })
             .map_err(|error| format!("{} pinned program info: {:?}", prog_name, error))
     }
 
@@ -594,29 +635,44 @@ impl FirewallInstance {
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
     ) -> Result<LegacyTcAttachmentObservation, String> {
-        let expected_program_id = self.pinned_tc_program_id(prog_name)?;
+        let expected = self.pinned_tc_program_identity(prog_name)?;
         let direction = match attach_type {
             aya::programs::tc::TcAttachType::Ingress => "ingress",
             aya::programs::tc::TcAttachType::Egress => "egress",
             _ => return Ok(LegacyTcAttachmentObservation::Absent),
         };
-        let output = std::process::Command::new("tc")
+        let json_output = std::process::Command::new("tc")
             .args(["-j", "filter", "show", "dev", &self.iface, direction])
             .output()
             .map_err(|error| format!("run tc JSON query for {}: {}", prog_name, error))?;
-        if !output.status.success() {
-            return Err(format!(
-                "tc JSON query for {} failed with status {}: {}",
+        if json_output.status.success() {
+            return classify_legacy_tc_filter_json(
+                &String::from_utf8_lossy(&json_output.stdout),
                 prog_name,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                expected.id,
+            );
+        }
+
+        let text_output = std::process::Command::new("tc")
+            .args(["filter", "show", "dev", &self.iface, direction])
+            .output()
+            .map_err(|error| format!("run tc text query for {}: {}", prog_name, error))?;
+        if !text_output.status.success() {
+            return Err(format!(
+                "tc queries for {} failed (JSON status {}: {}; text status {}: {})",
+                prog_name,
+                json_output.status,
+                String::from_utf8_lossy(&json_output.stderr).trim(),
+                text_output.status,
+                String::from_utf8_lossy(&text_output.stderr).trim(),
             ));
         }
-        classify_legacy_tc_filter_json(
-            &String::from_utf8_lossy(&output.stdout),
+
+        Ok(classify_legacy_tc_filter_text(
+            &String::from_utf8_lossy(&text_output.stdout),
             prog_name,
-            expected_program_id,
-        )
+            expected.tag,
+        ))
     }
 
     fn legacy_tc_attachment_is_live(
@@ -2140,6 +2196,31 @@ mod tests {
         );
         assert_eq!(
             classify_legacy_tc_filter_json(duplicate, "tc_ingress", 77).unwrap(),
+            LegacyTcAttachmentObservation::Conflict
+        );
+    }
+
+    #[test]
+    fn legacy_tc_text_health_requires_one_exact_name_and_program_tag() {
+        let owned = "filter protocol all pref 49152 bpf chain 0 handle 0x1 tc_ingress direct-action not_in_hw tag 37c900611687cdec";
+        let unrelated = "filter protocol all pref 49152 bpf chain 0 handle 0x1 tc_egress direct-action not_in_hw tag 753206be16915915";
+        let wrong_tag = "filter protocol all pref 49152 bpf chain 0 handle 0x1 tc_ingress direct-action not_in_hw tag 753206be16915915";
+        let duplicate = format!("{}\n{}", owned, owned);
+
+        assert_eq!(
+            classify_legacy_tc_filter_text(owned, "tc_ingress", 0x37c900611687cdec),
+            LegacyTcAttachmentObservation::Owned
+        );
+        assert_eq!(
+            classify_legacy_tc_filter_text(unrelated, "tc_ingress", 0x37c900611687cdec),
+            LegacyTcAttachmentObservation::Absent
+        );
+        assert_eq!(
+            classify_legacy_tc_filter_text(wrong_tag, "tc_ingress", 0x37c900611687cdec),
+            LegacyTcAttachmentObservation::Conflict
+        );
+        assert_eq!(
+            classify_legacy_tc_filter_text(&duplicate, "tc_ingress", 0x37c900611687cdec),
             LegacyTcAttachmentObservation::Conflict
         );
     }

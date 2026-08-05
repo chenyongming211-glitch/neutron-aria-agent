@@ -69,8 +69,16 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
     def test_legacy_tc_ownership_uses_kernel_program_identity_not_object_local_state(self):
         self.assertIn("LegacyTcAttachmentObservation", self.instance_source)
         self.assertIn('args(["-j", "filter", "show"', self.instance_source)
-        self.assertIn("pinned_tc_program_id", self.instance_source)
+        self.assertIn("pinned_tc_program_identity", self.instance_source)
+        self.assertIn("classify_legacy_tc_filter_text", self.instance_source)
+        self.assertIn("info.tag()", self.instance_source)
+        self.assertIn('args(["filter", "show"', self.instance_source)
         self.assertNotIn("legacy_tc_ingress_attached: AtomicBool", self.instance_source)
+
+    def test_legacy_tc_smoke_falls_back_when_tc_json_is_unavailable(self):
+        self.assertIn('-tc-ingress.txt', self.standalone_source)
+        self.assertIn('-tc-egress.txt', self.standalone_source)
+        self.assertIn('program.get("tag")', self.standalone_source)
 
 
 if __name__ == "__main__":

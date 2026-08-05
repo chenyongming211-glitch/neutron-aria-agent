@@ -581,21 +581,30 @@ capture_links() {
         >"${WORK_DIR}/${label}-tc-ingress-prog.json"
     bpftool -j prog show pinned "${TC_EGRESS_PROG}" \
         >"${WORK_DIR}/${label}-tc-egress-prog.json"
-    tc -j filter show dev "${HOST_IF}" ingress >"${WORK_DIR}/${label}-tc-ingress.json"
-    tc -j filter show dev "${HOST_IF}" egress >"${WORK_DIR}/${label}-tc-egress.json"
+    if tc -j filter show dev "${HOST_IF}" ingress \
+        >"${WORK_DIR}/${label}-tc-ingress.json" 2>"${WORK_DIR}/${label}-tc-ingress-json.err"; then
+        rm -f "${WORK_DIR}/${label}-tc-ingress.txt"
+    else
+        rm -f "${WORK_DIR}/${label}-tc-ingress.json"
+        tc filter show dev "${HOST_IF}" ingress >"${WORK_DIR}/${label}-tc-ingress.txt"
+    fi
+    if tc -j filter show dev "${HOST_IF}" egress \
+        >"${WORK_DIR}/${label}-tc-egress.json" 2>"${WORK_DIR}/${label}-tc-egress-json.err"; then
+        rm -f "${WORK_DIR}/${label}-tc-egress.txt"
+    else
+        rm -f "${WORK_DIR}/${label}-tc-egress.json"
+        tc filter show dev "${HOST_IF}" egress >"${WORK_DIR}/${label}-tc-egress.txt"
+    fi
     bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json"
 }
 
 assert_exact_legacy_tc_filter() {
-    local filter_json="$1" program_json="$2" expected_name="$3"
-    python3 - "${filter_json}" "${program_json}" "${expected_name}" <<'PY'
+    local filter_json="$1" filter_text="$2" program_json="$3" expected_name="$4"
+    python3 - "${filter_json}" "${filter_text}" "${program_json}" "${expected_name}" <<'PY'
 import json,sys
 
-filters=json.load(open(sys.argv[1],encoding="utf-8"))
-program=json.load(open(sys.argv[2],encoding="utf-8"))
-expected_name=sys.argv[3]
-expected_id=program.get("id")
-assert isinstance(expected_id,int),(expected_name,program)
+filter_json,filter_text,program_json,expected_name=sys.argv[1:]
+program=json.load(open(program_json,encoding="utf-8"))
 
 def contains_exact_program(value):
     if isinstance(value,dict):
@@ -606,7 +615,24 @@ def contains_exact_program(value):
         return any(contains_exact_program(child) for child in value)
     return False
 
-assert contains_exact_program(filters),(expected_name,expected_id,filters)
+try:
+    filters=json.load(open(filter_json,encoding="utf-8"))
+except FileNotFoundError:
+    expected_tag=program.get("tag")
+    assert isinstance(expected_tag,str) and expected_tag,(expected_name,program)
+    matches=[]
+    for line in open(filter_text,encoding="utf-8"):
+        fields=line.split()
+        if expected_name not in fields:
+            continue
+        matches.append(fields[fields.index("tag") + 1] if "tag" in fields else None)
+    assert len(matches)==1 and matches[0].lower()==expected_tag.lower(),(
+        expected_name,expected_tag,matches
+    )
+else:
+    expected_id=program.get("id")
+    assert isinstance(expected_id,int),(expected_name,program)
+    assert contains_exact_program(filters),(expected_name,expected_id,filters)
 PY
 }
 
@@ -635,10 +661,12 @@ PY
     else
         assert_exact_legacy_tc_filter \
             "${WORK_DIR}/dual-tc-ready-tc-ingress.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-ingress.txt" \
             "${WORK_DIR}/dual-tc-ready-tc-ingress-prog.json" \
             "tc_ingress"
         assert_exact_legacy_tc_filter \
             "${WORK_DIR}/dual-tc-ready-tc-egress.json" \
+            "${WORK_DIR}/dual-tc-ready-tc-egress.txt" \
             "${WORK_DIR}/dual-tc-ready-tc-egress-prog.json" \
             "tc_egress"
     fi

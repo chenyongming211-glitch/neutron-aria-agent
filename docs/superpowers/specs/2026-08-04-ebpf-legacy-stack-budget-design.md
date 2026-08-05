@@ -255,10 +255,14 @@ does not require impossible TCX link pins. It still requires both exact Aria
 program names to be live and both traffic verdicts to pass.
 
 Legacy TC ownership is derived from the live kernel inventory, not from a
-process-local flag: each direction must expose exactly one matching program
-name and its program ID must equal the corresponding Aria program pinned in the
-private bpffs runtime. A missing match is not ready; a duplicate name or ID
-mismatch is an ownership conflict and must not be detached or claimed.
+process-local flag. With JSON-capable `tc`, each direction must expose exactly
+one matching program name and its program ID must equal the corresponding
+program pinned in the private bpffs runtime. On the maintained environment's
+older `tc`, which has no `-j` support and omits program IDs from text output,
+the fallback requires exactly one matching program name and the same kernel
+BPF program tag as the pinned program. A missing match is not ready; a
+duplicate name or identity mismatch is an ownership conflict and must not be
+detached or claimed. The fallback does not accept name-only ownership.
 
 The canary artifact and the deployable artifact must have identical SHA-256
 hashes.
