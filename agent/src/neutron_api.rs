@@ -4326,12 +4326,19 @@ impl LocalInterfaceInventory {
     async fn load(ovs_bridge: &str) -> Self {
         match Self::try_load(ovs_bridge, Instant::now() + OVS_INVENTORY_TIMEOUT).await {
             Ok(inventory) => inventory,
-            Err(error) => Self {
-                ovs_bridge: ovs_bridge.to_string(),
-                ovs_error: Some(error),
-                by_iface_id: BTreeMap::new(),
-                by_name: BTreeMap::new(),
-            },
+            Err(error) => {
+                warn!(
+                    ovs_bridge,
+                    error = %error,
+                    "failed to load OVS interface inventory"
+                );
+                Self {
+                    ovs_bridge: ovs_bridge.to_string(),
+                    ovs_error: Some(error),
+                    by_iface_id: BTreeMap::new(),
+                    by_name: BTreeMap::new(),
+                }
+            }
         }
     }
 
