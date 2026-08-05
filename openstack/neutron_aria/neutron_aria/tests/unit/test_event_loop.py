@@ -4432,6 +4432,35 @@ class StatusContractEventLoopRedTestCase(unittest.TestCase):
         )
         self.assertEqual("hash-ready-42", unaffected["desired_hash"])
 
+    def test_v1_ready_accepts_locally_resolved_ifname_for_logical_snapshot(self):
+        scenario = status_scenario("full-classified-ready")
+        snapshot = copy.deepcopy(scenario["request_context"]["snapshot"])
+        snapshot["ports"][0]["ifname"] = ""
+        sync = self._synchronizer()
+
+        verdict, reason = sync._snapshot_status_verdict(
+            snapshot,
+            scenario["request_context"]["projected_port_ids"],
+            scenario["status"],
+        )
+
+        self.assertEqual("ready", verdict, reason)
+
+    def test_v1_ready_rejects_mismatched_explicit_snapshot_ifname(self):
+        scenario = status_scenario("full-classified-ready")
+        snapshot = copy.deepcopy(scenario["request_context"]["snapshot"])
+        snapshot["ports"][0]["ifname"] = "tap-wrong-port"
+        sync = self._synchronizer()
+
+        verdict, reason = sync._snapshot_status_verdict(
+            snapshot,
+            scenario["request_context"]["projected_port_ids"],
+            scenario["status"],
+        )
+
+        self.assertEqual("failed", verdict)
+        self.assertIn("snapshot ifname does not match status", reason)
+
     def test_public_v1_poll_and_operator_are_diagnostic_independent_no_write(self):
         variants = [
             ("pending-poll", "fixture-diagnostics", {}),
@@ -4813,6 +4842,37 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual("classified_degraded", verdict, details)
                 self.assertEqual("none", status["required_action"])
+
+    def test_classified_degraded_accepts_degraded_bypass_desired_acl(self):
+        scenario = status_scenario("classified-degraded-terminal")
+        snapshot = self._terminal_degraded_snapshot(scenario)
+        snapshot["ports"][0]["acl"].update({
+            "enabled": False,
+            "status": "degraded",
+            "effective_action": "bypass",
+            "reason": "policy_missing_or_disabled",
+        })
+        status = copy.deepcopy(scenario["status"])
+        status["port_statuses"][0]["reason"] = "policy_missing_or_disabled"
+        status["port_statuses"][0]["domains"][0].update({
+            "reason": "policy_missing_or_disabled",
+            "support_disposition": "unknown",
+        })
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+
+        verdict, details = sync._snapshot_status_verdict(
+            snapshot,
+            set(scenario["request_context"]["projected_port_ids"]),
+            status,
+        )
+
+        self.assertEqual("classified_degraded", verdict, details)
 
     def test_classified_degraded_full_resync_forces_newer_generation_independent_of_reason(self):
         scenario = status_scenario("classified-degraded-full-resync")

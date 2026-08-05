@@ -3065,7 +3065,10 @@ class SnapshotSynchronizer(object):
                 snapshot_ifname = snapshot_port.get("ifname")
                 if (
                     not isinstance(snapshot_ifname, _STRING_TYPES) or
-                    snapshot_ifname != managed_ports[port_id].get("ifname")
+                    (
+                        snapshot_ifname and
+                        snapshot_ifname != managed_ports[port_id].get("ifname")
+                    )
                 ):
                     return (
                         "failed",
@@ -3269,6 +3272,18 @@ class SnapshotSynchronizer(object):
                     runtime_action or "missing",
                 ),
             )
+
+        if (
+            v1 and
+            classification == "classified_degraded" and
+            desired_status == "degraded" and
+            not desired_enabled and
+            desired_action in ("bypass", "unchanged", "no_op") and
+            runtime_status == "degraded" and
+            runtime_action in ("bypass", "unchanged", "no_op") and
+            runtime_support in ("supported", "unsupported", "unknown")
+        ):
+            return "degraded", None
 
         return (
             "failed",
