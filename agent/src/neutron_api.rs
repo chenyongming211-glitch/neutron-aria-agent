@@ -4473,7 +4473,11 @@ async fn run_bounded_process(
     timeout_duration: Duration,
 ) -> Result<std::process::Output, String> {
     let mut command = Command::new(program);
-    command.args(args).kill_on_drop(true);
+    command
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     let child = command
         .spawn()
         .map_err(|error| format!("run {}: {}", program, error))?;
