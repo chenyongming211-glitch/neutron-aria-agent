@@ -608,6 +608,9 @@ def run_smoke_syntax():
 
 def run_fragment_tracking_field_driver_self_test():
     print("==> checking fragment tracking field driver")
+    run([sys.executable, os.path.join(
+        "ci", "test_fragment_tracking_field_driver_compat.py"
+    )])
     run([sys.executable, FRAGMENT_TRACKING_FIELD_DRIVER_PATH, "--self-test"])
 
 

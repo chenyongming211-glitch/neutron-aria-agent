@@ -16,6 +16,7 @@ from neutron_aria.agent.state import desired_snapshot_hash
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiContractError
 from neutron_aria.agent.uds_client import LocalApiError
+from neutron_aria.agent.uds_client import LocalApiResponseError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 
 
@@ -419,6 +420,14 @@ class SnapshotSynchronizer(object):
             response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
             timeout_recovery_ms = _elapsed_ms(phase_started)
             submit_mode = "timeout_recovered"
+        except LocalApiResponseError as exc:
+            if not self._is_restore_in_progress_error(exc):
+                raise
+            uds_submit_ms = _elapsed_ms(phase_started)
+            phase_started = time.time()
+            response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
+            timeout_recovery_ms = _elapsed_ms(phase_started)
+            submit_mode = "startup_restore_retried"
         self._raise_if_response_failed(response)
 
         phase_started = time.time()
@@ -663,7 +672,30 @@ class SnapshotSynchronizer(object):
                     pending_reason,
                 )
                 raise LocalApiError(pending_reason)
-            if self._pending_snapshot_hash_mismatch(snapshot, status):
+            if self._pending_snapshot_was_not_accepted(
+                snapshot,
+                status,
+                normalized_control,
+            ):
+                cleared = self.state_store.clear_pending_snapshot(
+                    reason="remote_never_accepted",
+                )
+                recovered.append("unaccepted_snapshot")
+                LOG.warning(
+                    "pending_snapshot_unaccepted_cleared host=%s "
+                    "pending_generation=%s accepted_generation=%s "
+                    "applied_generation=%s projected_ports=%s",
+                    self.host,
+                    cleared.get("generation") if cleared else None,
+                    status.get("accepted_generation"),
+                    status.get("applied_generation"),
+                    len((cleared or {}).get("projected_port_ids") or []),
+                )
+                snapshot = None
+            if (
+                snapshot is not None and
+                self._pending_snapshot_hash_mismatch(snapshot, status)
+            ):
                 if normalized_control not in (
                     None,
                     ("classified", "ready", "none"),
@@ -2188,7 +2220,8 @@ class SnapshotSynchronizer(object):
     def _recover_snapshot_timeout(self, snapshot, projected_port_ids, timeout_error):
         recovery_started = time.time()
         last_error = timeout_error
-        for attempt in range(1, self.timeout_convergence_attempts + 1):
+        max_attempts = self._accepted_convergence_attempts()
+        for attempt in range(1, max_attempts + 1):
             attempt_started = time.time()
             try:
                 status = self.local_client.status()
@@ -2202,7 +2235,7 @@ class SnapshotSynchronizer(object):
                     self.host,
                     snapshot["generation"],
                     attempt,
-                    self.timeout_convergence_attempts,
+                    max_attempts,
                     exc,
                 )
             else:
@@ -2230,7 +2263,7 @@ class SnapshotSynchronizer(object):
                         managed_ports=len(status.get("managed_ports") or []),
                         status_generation=status.get("generation"),
                         attempt=attempt,
-                        attempts=self.timeout_convergence_attempts,
+                        attempts=max_attempts,
                         status_poll_attempt_ms=_elapsed_ms(attempt_started),
                         status_poll_total_ms=_elapsed_ms(recovery_started),
                     )
@@ -2244,6 +2277,30 @@ class SnapshotSynchronizer(object):
                         "recovered_after_timeout": True,
                     }
                 if verdict == "failed":
+                    if self._status_allows_unaccepted_snapshot_retry(
+                        snapshot,
+                        status,
+                    ):
+                        try:
+                            response = self.local_client.put_snapshot(snapshot)
+                        except LocalApiResponseError as exc:
+                            if not self._is_restore_in_progress_error(exc):
+                                raise
+                            last_error = exc
+                        except LocalApiTimeoutError as exc:
+                            last_error = exc
+                        else:
+                            LOG.warning(
+                                "snapshot_submit_retried_after_restore "
+                                "host=%s generation=%s attempt=%s",
+                                self.host,
+                                snapshot["generation"],
+                                attempt,
+                            )
+                            return response
+                        if attempt < max_attempts:
+                            self.sleeper(self.timeout_convergence_interval)
+                        continue
                     raise LocalApiError(
                         "snapshot status failed terminal-ready validation: %s" %
                         reason
@@ -2261,13 +2318,13 @@ class SnapshotSynchronizer(object):
                     self.host,
                     snapshot["generation"],
                     attempt,
-                    self.timeout_convergence_attempts,
+                    max_attempts,
                     len(projected_port_ids),
                     len(status.get("managed_ports") or []),
                     status.get("generation"),
                 )
 
-            if attempt < self.timeout_convergence_attempts:
+            if attempt < max_attempts:
                 self.sleeper(self.timeout_convergence_interval)
 
         self._log_acl_delivery_profile(
@@ -2276,13 +2333,38 @@ class SnapshotSynchronizer(object):
             generation=snapshot["generation"],
             desired_hash=snapshot.get("desired_hash"),
             projected_ports=len(projected_port_ids),
-            attempts=self.timeout_convergence_attempts,
+            attempts=max_attempts,
             status_poll_total_ms=_elapsed_ms(recovery_started),
             error=last_error,
         )
         raise LocalApiTimeoutError(
             "snapshot submit timed out and status did not converge: %s" % last_error
         )
+
+    def _is_restore_in_progress_error(self, error):
+        return bool(
+            isinstance(error, LocalApiResponseError) and
+            error.status == 503 and
+            isinstance(error.body, dict) and
+            error.body.get("error") == "neutron_runtime_restore_in_progress"
+        )
+
+    def _status_allows_unaccepted_snapshot_retry(self, snapshot, status):
+        pending_state, _, _ = self._pending_generation_status(status)
+        if pending_state != "none":
+            return False
+        pending_action = self._remote_pending_action(
+            snapshot,
+            status,
+            snapshot.get("desired_hash"),
+        )
+        if pending_action.get("action") != "force_full_resync":
+            return False
+        try:
+            generation = _strict_scalar(snapshot.get("generation"), "integer")
+        except ValueError:
+            return False
+        return self._generation_floor_from_status(status) < generation
 
     def _recover_delete_timeout(self, port_id, timeout_error):
         last_error = timeout_error
@@ -2496,6 +2578,40 @@ class SnapshotSynchronizer(object):
         return bool(
             status_generation >= pending_generation and
             status_hash != pending_hash
+        )
+
+    def _pending_snapshot_was_not_accepted(
+        self,
+        pending,
+        status,
+        normalized_control,
+    ):
+        if normalized_control not in (
+            ("classified", "degraded", "full_resync"),
+            ("recovery", "degraded", "full_resync"),
+            ("idle", "unknown", "full_resync"),
+        ):
+            return False
+        if status.get("pending_generation") is not None:
+            return False
+        try:
+            pending_generation = _strict_scalar(
+                pending.get("generation"),
+                "integer",
+            )
+            accepted_generation = _strict_scalar(
+                status.get("accepted_generation"),
+                "integer",
+            )
+            applied_generation = _strict_scalar(
+                status.get("applied_generation"),
+                "integer",
+            )
+        except ValueError:
+            return False
+        return bool(
+            accepted_generation < pending_generation and
+            applied_generation < pending_generation
         )
 
     def _pending_snapshot_is_stale(self, pending, status):

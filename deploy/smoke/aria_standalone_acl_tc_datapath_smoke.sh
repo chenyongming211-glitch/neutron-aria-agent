@@ -595,7 +595,7 @@ install_fixture_policy() {
 }
 
 capture_links() {
-    local label="${1:-links}"
+    local label="${1:-links}" net_rc=0
     [ -e "${TC_INGRESS_LINK}" ] && bpftool -j link show pinned "${TC_INGRESS_LINK}" \
         >"${WORK_DIR}/${label}-tc-ingress-link.json"
     [ -e "${TC_EGRESS_LINK}" ] && bpftool -j link show pinned "${TC_EGRESS_LINK}" \
@@ -618,7 +618,15 @@ capture_links() {
         rm -f "${WORK_DIR}/${label}-tc-egress.json"
         tc filter show dev "${HOST_IF}" egress >"${WORK_DIR}/${label}-tc-egress.txt"
     fi
-    bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json"
+    bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json" \
+        2>"${WORK_DIR}/${label}-bpftool-net.err" || net_rc=$?
+    if [ "${net_rc}" -eq 0 ]; then
+        printf '{"available":true,"exit_code":0}\n' \
+            >"${WORK_DIR}/${label}-bpftool-net-status.json"
+    else
+        printf '{"available":false,"exit_code":%s}\n' "${net_rc}" \
+            >"${WORK_DIR}/${label}-bpftool-net-status.json"
+    fi
 }
 
 assert_exact_legacy_tc_filter() {

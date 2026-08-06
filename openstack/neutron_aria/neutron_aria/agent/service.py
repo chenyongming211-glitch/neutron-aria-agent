@@ -195,7 +195,11 @@ class AgentService(object):
         status = result.get("status") or {}
         heartbeat = result.get("heartbeat")
         heartbeat_failed = heartbeat is not None and not heartbeat.get("ok", False)
-        if status.get("degraded") or heartbeat_failed:
+        resync_completed = bool(
+            result.get("snapshot") is not None and
+            result.get("response") is not None
+        )
+        if (status.get("degraded") and not resync_completed) or heartbeat_failed:
             if self.current_resync_backoff:
                 self.current_resync_backoff = min(
                     self.current_resync_backoff * 2,

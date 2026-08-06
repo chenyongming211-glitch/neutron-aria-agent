@@ -16,6 +16,7 @@ from neutron_aria.agent.state import SnapshotStateStore
 from neutron_aria.agent.status_reporter import StatusReportError
 from neutron_aria.agent.uds_client import LocalApiContractError
 from neutron_aria.agent.uds_client import LocalApiError
+from neutron_aria.agent.uds_client import LocalApiResponseError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalApiTransportError
 from neutron_aria.agent.uds_client import _decode_legacy_status_v0
@@ -867,6 +868,37 @@ class PublicV1ActionLocalClient(FakeLocalClient):
     def delete_port(self, port_id):
         self.mutating_calls.append("delete_port")
         return FakeLocalClient.delete_port(self, port_id)
+
+
+class RestoreInProgressThenReadyLocalClient(PublicV1ActionLocalClient):
+    def __init__(self, scenario):
+        PublicV1ActionLocalClient.__init__(self, scenario)
+        self.restore_rejections = 0
+
+    def put_snapshot(self, snapshot):
+        self.mutating_calls.append("put_full_snapshot")
+        if self.restore_rejections == 0:
+            self.restore_rejections += 1
+            raise LocalApiResponseError(
+                503,
+                "Service Unavailable",
+                {"error": "neutron_runtime_restore_in_progress"},
+            )
+        return FakeLocalClient.put_snapshot(self, snapshot)
+
+    def status(self):
+        status = PublicV1ActionLocalClient.status(self)
+        if self.snapshots:
+            domains_by_port = dict(
+                (port["port_id"], list(port.get("managed_domains") or []))
+                for port in self.snapshots[-1].get("ports") or []
+            )
+            for port in status.get("managed_ports") or []:
+                port["managed_domains"] = domains_by_port.get(
+                    port.get("port_id"),
+                    [],
+                )
+        return status
 
 
 class PreSubmitStatusUnavailableLocalClient(PublicV1ActionLocalClient):
@@ -2409,6 +2441,60 @@ class EventLoopTestCase(unittest.TestCase):
                 "remote_generation_advanced",
                 state["last_cleared_pending_reason"],
             )
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_restart_clears_pending_generation_remote_never_accepted(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot_at_generation(
+                {
+                    "generation": 0,
+                    "host": "compute-1",
+                    "ports": [],
+                },
+                43,
+                desired_hash="local-hash-43",
+            )
+            status = {
+                "generation": 42,
+                "accepted_generation": 42,
+                "applied_generation": 42,
+                "pending_generation": None,
+                "desired_hash": "remote-hash-42",
+                "applied_desired_hash": "remote-hash-42",
+                "transaction_state": "classified",
+                "overall_readiness": "degraded",
+                "required_action": "full_resync",
+                "authority_state": "runtime_reconcile_requires_full_resync",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": [],
+            }
+            sync = SnapshotSynchronizer(
+                "compute-1",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                FixedStatusLocalClient(status),
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            result = sync.recover_pending_state()
+            state = SnapshotStateStore(state_dir).to_dict()
+
+            self.assertEqual(["unaccepted_snapshot"], result["recovered"])
+            self.assertEqual(None, state["pending_generation"])
+            self.assertEqual(
+                prepared["generation"],
+                state["last_cleared_pending_generation"],
+            )
+            self.assertEqual(
+                "remote_never_accepted",
+                state["last_cleared_pending_reason"],
+            )
+            self.assertFalse(sync.runtime_status.degraded)
         finally:
             shutil.rmtree(state_dir)
 
@@ -4030,6 +4116,38 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertFalse(result["status"]["degraded"])
         self.assertEqual(1, result["status"]["last_managed_ports"])
         self.assertEqual(set([port_id]), sync.projected_port_ids)
+
+    def test_full_resync_retries_while_datapath_restore_is_in_progress(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "device_owner": "compute:nova",
+            "binding:host_id": "compute-1",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        local_client = RestoreInProgressThenReadyLocalClient(
+            status_scenario("classified-degraded-full-resync")
+        )
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            timeout_convergence_attempts=2,
+            timeout_convergence_interval=0,
+        )
+
+        result = sync.full_resync()
+
+        self.assertEqual(1, local_client.restore_rejections)
+        self.assertEqual(
+            ["put_full_snapshot", "put_full_snapshot"],
+            local_client.mutating_calls,
+        )
+        self.assertTrue(result["status"]["ready"])
+        self.assertIsNone(sync.state_store.pending_snapshot())
 
     def test_timeout_recovery_rejects_missing_projected_port_status(self):
         port_ids = [

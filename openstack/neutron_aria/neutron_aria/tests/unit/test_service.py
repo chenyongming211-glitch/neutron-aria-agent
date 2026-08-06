@@ -138,6 +138,23 @@ class DegradedSynchronizer(FakeSynchronizer):
         }
 
 
+class ClassifiedDegradedSynchronizer(FakeSynchronizer):
+    def safe_full_resync(self):
+        self.resync_calls += 1
+        self.runtime_status.mark_classified_degraded(
+            generation=self.resync_calls,
+            snapshot_ports=2,
+            managed_ports=1,
+        )
+        heartbeat = self.report_status()
+        return {
+            "snapshot": {"generation": self.resync_calls},
+            "response": {"status": "classified"},
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+        }
+
+
 class AgentServiceTestCase(unittest.TestCase):
     def test_heartbeat_only_initialize_reports_degraded_without_resync(self):
         clock = FakeClock()
@@ -248,6 +265,26 @@ class AgentServiceTestCase(unittest.TestCase):
         service.run_once()
         self.assertEqual(10, service.current_resync_backoff)
         self.assertEqual(19, service.next_resync_at)
+
+    def test_classified_degraded_full_resync_uses_normal_interval(self):
+        clock = FakeClock()
+        sync = ClassifiedDegradedSynchronizer()
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            resync_backoff_initial=3,
+            resync_backoff_max=10,
+            clock=clock,
+        )
+
+        result = service.initialize()
+
+        self.assertTrue(result["status"]["degraded"])
+        self.assertIsNotNone(result["snapshot"])
+        self.assertEqual(0, service.current_resync_backoff)
+        self.assertEqual(60, service.next_resync_at)
 
     def test_heartbeat_only_rpc_events_do_not_write_locally(self):
         clock = FakeClock()

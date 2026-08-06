@@ -267,8 +267,12 @@ def receiver(namespace, family, address, token, port=53, timeout=3.0, directory=
         command = ["ip", "netns", "exec", namespace] + command
     process = None
     try:
-        process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
         deadline = time.monotonic() + min(5.0, timeout + 2.0)
         while not os.path.exists(ready):
             if process.poll() is not None:

@@ -24,7 +24,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -51,6 +51,7 @@ pub(crate) struct NeutronApiState {
     ovs_bridge: String,
     runtime: Arc<RwLock<NeutronRuntimeState>>,
     apply_lock: Arc<Mutex<()>>,
+    restore_ready: Arc<AtomicBool>,
     wal: Arc<NeutronWal>,
     pending_recovery: Option<PendingNeutronIntent>,
 }
@@ -571,9 +572,26 @@ impl NeutronApiState {
             ovs_bridge,
             runtime: Arc::new(RwLock::new(runtime)),
             apply_lock: Arc::new(Mutex::new(())),
+            restore_ready: Arc::new(AtomicBool::new(false)),
             wal,
             pending_recovery,
         }
+    }
+
+    fn mark_restore_ready(&self) {
+        self.restore_ready.store(true, Ordering::Release);
+    }
+
+    fn require_restore_ready(&self) -> Result<(), SnapshotApplyError> {
+        if self.restore_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        Err(SnapshotApplyError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "neutron_runtime_restore_in_progress",
+            details: "Neutron runtime restore is still in progress; retry the request"
+                .to_string(),
+        })
     }
 
     async fn restore_neutron_authorities(&self) {
@@ -1170,6 +1188,8 @@ pub(crate) fn build_router(
         restore_state.recover_incomplete_wal_intent().await;
         restore_state.reconcile_committed_runtime().await;
         restore_state.restore_neutron_authorities().await;
+        restore_state.mark_restore_ready();
+        info!("Neutron runtime restore completed; mutating UDS routes are ready");
     });
     let health_state = state.clone();
     let health_task = tokio::spawn(async move {
@@ -1241,6 +1261,7 @@ async fn recover_pending_snapshot(
     state: NeutronApiState,
     request: NeutronRecoverPendingRequest,
 ) -> Result<NeutronRecoverPendingResponse, SnapshotApplyError> {
+    state.require_restore_ready()?;
     let mode = request
         .mode
         .as_deref()
@@ -2274,6 +2295,7 @@ async fn accept_neutron_snapshot_submit(
     snapshot: &NeutronSnapshotRequest,
     scope: &ApplyScope,
 ) -> Result<SnapshotSubmitDecision, SnapshotApplyError> {
+    state.require_restore_ready()?;
     validate_snapshot_preflight(scope, snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
     if let Some(mut response) = {
@@ -4039,6 +4061,16 @@ async fn delete_neutron_port(
     State(state): State<NeutronApiState>,
     Path(port_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = state.require_restore_ready() {
+        return (
+            error.status,
+            Json(serde_json::json!({
+                "error": error.code,
+                "details": error.details,
+            })),
+        )
+            .into_response();
+    }
     let error_port_id = port_id.clone();
     // Keep mutating delete alive even if the UDS client times out or disconnects.
     let handle = tokio::spawn(apply_delete_neutron_port(state, port_id));
@@ -6568,7 +6600,24 @@ mod tests {
             4096,
             control_plane.clone(),
         ));
-        NeutronApiState::new(registry, control_plane, "br-int".to_string())
+        let state =
+            NeutronApiState::new(registry, control_plane, "br-int".to_string());
+        state.mark_restore_ready();
+        state
+    }
+
+    #[test]
+    fn neutron_runtime_restore_gate_rejects_mutations_until_ready() {
+        let root = temp_root("runtime-restore-gate");
+        let state = test_neutron_state(&root);
+        state.restore_ready.store(false, Ordering::Release);
+
+        let error = state.require_restore_ready().unwrap_err();
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "neutron_runtime_restore_in_progress");
+        state.mark_restore_ready();
+        assert!(state.require_restore_ready().is_ok());
     }
 
     #[tokio::test]
