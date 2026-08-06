@@ -1,4 +1,5 @@
 import importlib.util
+import errno
 import io
 import os
 import tempfile
@@ -53,6 +54,39 @@ class FragmentTrackingDriverCompatibilityTests(unittest.TestCase):
                     directory=os.path.join(directory, "receiver"),
                 ):
                     pass
+
+    def test_expected_drop_continues_after_tc_enobufs(self):
+        driver = load_driver()
+        raw = mock.MagicMock()
+        raw.__enter__.return_value = raw
+        raw.sendto.side_effect = [OSError(errno.ENOBUFS, "drop"), None]
+        with mock.patch.object(driver.socket, "AF_PACKET", 17, create=True), \
+                mock.patch.object(driver.socket, "socket", return_value=raw):
+            driver.send_frames("tap-test", [b"first", b"second"],
+                               tolerate_no_buffer=True)
+        self.assertEqual(raw.sendto.call_count, 2)
+
+    def test_allowed_delivery_does_not_hide_tc_enobufs(self):
+        driver = load_driver()
+        raw = mock.MagicMock()
+        raw.__enter__.return_value = raw
+        raw.sendto.side_effect = OSError(errno.ENOBUFS, "drop")
+        with mock.patch.object(driver.socket, "AF_PACKET", 17, create=True), \
+                mock.patch.object(driver.socket, "socket", return_value=raw):
+            with self.assertRaises(OSError):
+                driver.send_frames("tap-test", [b"first"])
+
+    def test_lru_pressure_accepts_bounded_old_kernel_batch_reclaim(self):
+        driver = load_driver()
+        snapshot = driver.parse_metrics(
+            driver._metric_fixture("/p", "ipv4", occupancy=1, maximum=8)
+        )
+        self.assertEqual(
+            driver.require_pressure_range(snapshot, "/p", "ipv4", 1, 8, 8),
+            1,
+        )
+        with self.assertRaises(RuntimeError):
+            driver.require_pressure_range(snapshot, "/p", "ipv4", 2, 8, 8)
 
 
 if __name__ == "__main__":

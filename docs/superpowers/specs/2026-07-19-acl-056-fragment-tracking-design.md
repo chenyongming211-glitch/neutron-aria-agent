@@ -2,9 +2,9 @@
 
 Date: 2026-07-19
 
-Status: implementation and hosted CI complete on `v0.9-neutron-agent`;
-privileged field evidence remains `deferred/pending`, and production activation
-remains disabled.
+Status: implementation, hosted CI, and privileged legacy-kernel tap evidence
+complete on `v0.9-neutron-agent`; production activation remains disabled pending
+a separate change-controlled rollout.
 
 Analyzed implementation target: `v0.9-neutron-agent@43e0e2a`
 
@@ -513,16 +513,18 @@ Commit RED before production implementation and prove an intended RED-only CI
 failure. GREEN includes focused Rust behavior plus warning-denied userspace and
 eBPF builds. No local Cargo command is run.
 
-Privileged evidence stays `deferred/pending` until a real environment exists.
-It must use real pinned maps and raw IPv4/IPv6 fragments in both TC directions,
+Privileged evidence must use real pinned maps and raw IPv4/IPv6 fragments in
+both TC directions,
 including ordered, post-first reordered, later-before-first, tap/VLAN isolation,
 publication invalidation, restart recovery, and bounded pressure/eviction in
 the temporary standalone capacity-8 fixture. Managed smoke preserves deployed
 capacity. `update_failed` remains a hosted Rust/eBPF contract because the LRU
 map and public configuration expose no safe deterministic field trigger.
 
-Hosted CI is not a substitute for field evidence and cannot activate the
-capability by itself.
+The 2026-08-06 legacy-kernel tap run satisfied this matrix, including bounded
+capacity pressure and cleanup. The sanitized result is recorded in
+`docs/evidence/openstack-n05-lite/20260806-acl-high-risk-field-acceptance/summary.md`.
+Field verification does not activate the shipped production gate by itself.
 
 ### 11.4 Hosted implementation evidence
 
@@ -552,6 +554,10 @@ capability by itself.
   GREEN `43e0e2a` passed `fast-contracts`, `rust-behavior`, and warning-denied
   Rust/eBPF/static builds in Build
   [29943612716](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29943612716).
+- Privileged legacy-kernel `MODE=tap` execution on 2026-08-06 passed the complete
+  dual-stack, dual-direction, ordering, isolation, epoch, restart, pressure,
+  eviction, and cleanup matrix. See the sanitized high-risk field acceptance
+  summary linked above.
 
 ## 12. Scope Boundaries
 
@@ -573,8 +579,9 @@ source-port/priority changes, OVS/Netfilter delegation, ACL-059, remaining
 6. integrate strict epochs into standalone, managed, and recovery paths;
 7. add observability, loader, inventory, and status surfaces;
 8. prove hosted GREEN and warning-free builds;
-9. keep field evidence pending and production activation disabled;
-10. activate only after real-tap smoke passes.
+9. preserve the passing field evidence while keeping production activation
+   disabled;
+10. activate only through a separate change-controlled rollout.
 
 ## 14. External Baseline
 

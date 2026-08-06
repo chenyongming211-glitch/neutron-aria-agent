@@ -5,6 +5,7 @@ import argparse
 import base64
 from contextlib import contextmanager, redirect_stderr
 from decimal import Decimal, InvalidOperation
+import errno
 import io
 import ipaddress
 import os
@@ -195,17 +196,33 @@ def require_deltas(before, after, pin_path, family, expected):
             raise RuntimeError("series %r delta %d, expected %d" %
                                (key, actual, expected[event]))
 def require_pressure(snapshot, pin_path, family, occupancy, maximum):
+    actual_occupancy = require_pressure_range(
+        snapshot, pin_path, family, occupancy, occupancy, maximum
+    )
+    if actual_occupancy != occupancy:
+        raise RuntimeError("unreachable exact pressure mismatch")
+def require_pressure_range(snapshot, pin_path, family, minimum_occupancy,
+                           maximum_occupancy, expected_capacity):
     key = (pin_path, family)
     if any(key not in snapshot[field] for field in ("occupancy", "max_entries", "pressure")):
         raise RuntimeError("missing exact public pressure series %r" % (key,))
-    actual = snapshot["occupancy"][key], snapshot["max_entries"][key]
-    if actual != (occupancy, maximum) or maximum <= 0 or not 0 <= occupancy <= maximum:
-        raise RuntimeError("context bounds %r are %r, expected %r" %
-                           (key, actual, (occupancy, maximum)))
-    expected = Decimal(occupancy) / Decimal(maximum)
+    occupancy = snapshot["occupancy"][key]
+    capacity = snapshot["max_entries"][key]
+    if (expected_capacity <= 0 or minimum_occupancy < 0 or
+            maximum_occupancy < minimum_occupancy or
+            maximum_occupancy > expected_capacity or
+            capacity != expected_capacity or
+            not minimum_occupancy <= occupancy <= maximum_occupancy):
+        raise RuntimeError(
+            "context bounds %r are %r, expected occupancy %d..%d capacity %d" %
+            (key, (occupancy, capacity), minimum_occupancy,
+             maximum_occupancy, expected_capacity)
+        )
+    expected = Decimal(occupancy) / Decimal(capacity)
     if snapshot["pressure"][key] != expected:
         raise RuntimeError("context pressure %r is %s, expected %s" %
                            (key, snapshot["pressure"][key], expected))
+    return occupancy
 
 
 RECEIVER = r'''import socket
@@ -315,21 +332,28 @@ def require_receiver_outcome(handle, expect_delivery):
     if outcome != expected:
         raise RuntimeError("receiver outcome %r, expected %r" % (outcome, expected))
     return outcome
-def send_frames(interface, frames, namespace=None):
+def send_frames(interface, frames, namespace=None, tolerate_no_buffer=False):
     if namespace:
         command = ["ip", "netns", "exec", namespace, sys.executable, __file__,
                    "--emit", "--iface", interface]
+        if tolerate_no_buffer:
+            command.append("--tolerate-no-buffer")
         command += ["--frame=" + base64.b64encode(frame).decode("ascii") for frame in frames]
         subprocess.check_call(command)
         return
     with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_ALL)) as raw:
         for frame in frames:
-            raw.sendto(frame, (interface, 0))
+            try:
+                raw.sendto(frame, (interface, 0))
+            except OSError as error:
+                if not (tolerate_no_buffer and error.errno == errno.ENOBUFS):
+                    raise
 def run_stage(args, frames, expected, delivery):
     before = fetch_metrics(args.metrics_url)
     with receiver(args.receiver_netns, args.family, args.destination, args.token,
                   args.receiver_port, args.receiver_timeout) as handle:
-        send_frames(args.iface, frames, args.send_netns)
+        send_frames(args.iface, frames, args.send_netns,
+                    tolerate_no_buffer=not delivery)
         require_receiver_outcome(handle, delivery)
     after = fetch_metrics(args.metrics_url)
     require_deltas(before, after, args.pin_path, args.family, expected)
@@ -347,20 +371,25 @@ def run_pressure(args, family, source_mac):
     before = fetch_metrics(args.metrics_url)
     with receiver(args.receiver_netns, args.family, args.destination, args.token,
                   args.receiver_port, args.receiver_timeout) as handle:
-        send_frames(args.iface, [frames[0] for frames in frame_sets], args.send_netns)
+        send_frames(args.iface, [frames[0] for frames in frame_sets], args.send_netns,
+                    tolerate_no_buffer=True)
         require_receiver_outcome(handle, False)
     filled = fetch_metrics(args.metrics_url)
     require_deltas(before, filled, args.pin_path, args.family,
                    vector(first=args.capacity + 1, inserted=args.capacity + 1))
-    require_pressure(filled, args.pin_path, args.family, args.capacity, args.capacity)
+    filled_occupancy = require_pressure_range(
+        filled, args.pin_path, args.family, 1, args.capacity, args.capacity
+    )
     with receiver(args.receiver_netns, args.family, args.destination, args.token,
                   args.receiver_port, args.receiver_timeout) as handle:
-        send_frames(args.iface, [frame_sets[0][1]], args.send_netns)
+        send_frames(args.iface, [frame_sets[0][1]], args.send_netns,
+                    tolerate_no_buffer=True)
         require_receiver_outcome(handle, False)
     probed = fetch_metrics(args.metrics_url)
     require_deltas(filled, probed, args.pin_path, args.family,
                    vector(non_initial=1, miss=1))
-    require_pressure(probed, args.pin_path, args.family, args.capacity, args.capacity)
+    require_pressure(probed, args.pin_path, args.family,
+                     filled_occupancy, args.capacity)
     print("fragment pressure fill-and-evict observation complete")
 def run_observe(args):
     snapshot = fetch_metrics(args.metrics_url)
@@ -534,6 +563,7 @@ def build_parser():
     for name in ("self-test", "run", "emit"):
         mode.add_argument("--" + name, action="store_true")
     parser.add_argument("--frame", action="append")
+    parser.add_argument("--tolerate-no-buffer", action="store_true")
     for name in (
         "iface", "source", "destination", "source_mac", "destination_mac", "metrics_url",
         "pin_path", "receiver_netns", "send_netns", "token",
@@ -566,9 +596,11 @@ def parse_arguments(argv=None):
     if args.emit:
         if not args.iface or not args.frame:
             parser.error("--emit requires interface and frames")
-        if not provided <= {"emit", "iface", "frame"}:
-            parser.error("--emit accepts only --iface and --frame")
+        if not provided <= {"emit", "iface", "frame", "tolerate_no_buffer"}:
+            parser.error("--emit accepts only --iface, --frame, and drop tolerance")
         return args
+    if args.tolerate_no_buffer:
+        parser.error("--tolerate-no-buffer is valid only with --emit")
     if args.frame is not None:
         parser.error("--run does not accept --frame")
     operation = args.operation or "complete"
@@ -628,7 +660,8 @@ def main():
             frames = [base64.b64decode(value, validate=True) for value in args.frame]
         except ValueError as error:
             build_parser().error("invalid base64 frame: %s" % error)
-        send_frames(args.iface, frames)
+        send_frames(args.iface, frames,
+                    tolerate_no_buffer=args.tolerate_no_buffer)
         return
     try:
         run_fixture(args)

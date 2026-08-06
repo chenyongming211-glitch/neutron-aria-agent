@@ -92,10 +92,12 @@ from the update path, so no eviction counter may be inferred. The distinct
 otherwise valid IPv4/IPv6 TCP/UDP first fragment with an incomplete transport
 header; generic malformed IP and stored-context invalidity remain separate.
 
-These metrics are implementation availability, not an activation signal. Both
-production activation and privileged field evidence remain disabled and
-`deferred/pending`; do not set either fragment gate to `true` until the real tap
-smoke and evidence review are complete.
+These metrics are implementation availability, not an activation signal.
+Privileged legacy-kernel tap evidence passed on 2026-08-06, but production
+activation remains disabled. Do not set either fragment gate to `true` until a
+separate change-controlled rollout reviews the field evidence, host scope,
+rollback, and monitoring. See
+`docs/evidence/openstack-n05-lite/20260806-acl-high-risk-field-acceptance/summary.md`.
 
 `integration_mode=coexist` is written by `neutron-aria-agent` into snapshot
 bodies only; it must not appear in `neutron-aria-agent.ini`.
