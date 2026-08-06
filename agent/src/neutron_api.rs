@@ -10253,6 +10253,45 @@ mod tests {
     }
 
     #[test]
+    fn neutron_snapshot_same_generation_noop_verifies_only_scoped_managed_acl_projection() {
+        let mut runtime = NeutronRuntimeState::default();
+        let mut target = managed_with_ifindex("target-port", "tap-target", 63);
+        target.managed_domains = vec!["acl".to_string()];
+        let mut unrelated = managed_with_ifindex("other-port", "tap-other", 64);
+        unrelated.managed_domains = vec!["acl".to_string()];
+        runtime.ports.insert(target.port_id.clone(), target);
+        runtime.ports.insert(unrelated.port_id.clone(), unrelated);
+
+        let mut target_snapshot = port("target-port", "tap-target", true);
+        target_snapshot.managed_domains = vec!["acl".to_string()];
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 63,
+            desired_hash: Some("hash-63".to_string()),
+            host: None,
+            ports: vec![target_snapshot],
+        };
+
+        assert_eq!(
+            managed_acl_projection_verification_targets(
+                &ApplyScope::SinglePort("target-port".to_string()),
+                &runtime,
+                &snapshot,
+            ),
+            vec!["tap-target".to_string()]
+        );
+
+        let mut non_acl_snapshot = snapshot.clone();
+        non_acl_snapshot.ports[0].managed_domains = vec!["qos".to_string()];
+        assert!(managed_acl_projection_verification_targets(
+            &ApplyScope::SinglePort("target-port".to_string()),
+            &runtime,
+            &non_acl_snapshot,
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn neutron_snapshot_early_response_scoped_hash_conflict() {
         let runtime = NeutronRuntimeState {
             accepted_generation: 70,
