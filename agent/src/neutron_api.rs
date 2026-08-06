@@ -2369,11 +2369,25 @@ async fn accept_neutron_snapshot_submit(
         &local_inventory,
         &requested_hash,
     )? {
-        response.active_instances = state.registry.list().await;
-        return Ok(SnapshotSubmitDecision {
-            response,
-            prepared: None,
-        });
+        let verification_targets = managed_acl_projection_verification_targets(
+            scope,
+            &runtime_before_apply,
+            snapshot,
+        );
+        if response.status != "noop"
+            || verify_managed_acl_noop_projection(
+                state,
+                &verification_targets,
+                snapshot.generation,
+            )
+            .await
+        {
+            response.active_instances = state.registry.list().await;
+            return Ok(SnapshotSubmitDecision {
+                response,
+                prepared: None,
+            });
+        }
     }
 
     let current_ports = runtime_before_apply.ports.clone();
@@ -3584,6 +3598,53 @@ fn snapshot_has_runtime_drift_for_scope(
             })
             .unwrap_or(true)
     })
+}
+
+fn managed_acl_projection_verification_targets(
+    scope: &ApplyScope,
+    runtime: &NeutronRuntimeState,
+    snapshot: &NeutronSnapshotRequest,
+) -> Vec<String> {
+    snapshot
+        .ports
+        .iter()
+        .filter(|port| match scope {
+            ApplyScope::FullHost => true,
+            ApplyScope::SinglePort(target_port_id) => &port.port_id == target_port_id,
+        })
+        .filter(|port| {
+            normalize_managed_domains(&port.managed_domains)
+                .iter()
+                .any(|domain| domain == "acl")
+        })
+        .filter_map(|port| runtime.ports.get(&port.port_id))
+        .map(|port| port.ifname.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+async fn verify_managed_acl_noop_projection(
+    state: &NeutronApiState,
+    targets: &[String],
+    generation: u64,
+) -> bool {
+    for ifname in targets {
+        if let Err(error) = state
+            .control_plane
+            .verify_and_mark_managed_projection(ifname)
+            .await
+        {
+            warn!(
+                generation,
+                ifname = %ifname,
+                error = %error,
+                "same-generation managed ACL projection requires reconcile"
+            );
+            return false;
+        }
+    }
+    true
 }
 
 fn snapshot_early_response_for_scope(

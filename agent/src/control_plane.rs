@@ -4197,6 +4197,8 @@ impl ControlPlane {
             ));
         }
 
+        state.managed_projection_health = ManagedProjectionHealth::Unverified;
+
         let actual_gate = aria_core::ebpf_ops::read_runtime_config(state.map_runtime())
             .map_err(|error| format!("read managed ACL runtime gate: {}", error))?;
         validate_managed_projection_runtime_gate(&state.state, &actual_gate)?;
