@@ -240,6 +240,17 @@ fn classify_legacy_tc_cleanup(
     }
 }
 
+fn classify_legacy_tc_query_failure(
+    interface_exists: bool,
+    error: String,
+) -> Result<LegacyTcAttachmentObservation, String> {
+    if interface_exists {
+        Err(error)
+    } else {
+        Ok(LegacyTcAttachmentObservation::Absent)
+    }
+}
+
 pub(crate) fn preexisting_tc_acl_runtime_is_healthy(
     enforcement_required: bool,
     preexisting_live_links: bool,
@@ -635,6 +646,10 @@ impl FirewallInstance {
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
     ) -> Result<LegacyTcAttachmentObservation, String> {
+        let iface_sys_path = Path::new("/sys/class/net").join(&self.iface);
+        if !iface_sys_path.exists() {
+            return Ok(LegacyTcAttachmentObservation::Absent);
+        }
         let expected = self.pinned_tc_program_identity(prog_name)?;
         let direction = match attach_type {
             aya::programs::tc::TcAttachType::Ingress => "ingress",
@@ -658,14 +673,15 @@ impl FirewallInstance {
             .output()
             .map_err(|error| format!("run tc text query for {}: {}", prog_name, error))?;
         if !text_output.status.success() {
-            return Err(format!(
+            let error = format!(
                 "tc queries for {} failed (JSON status {}: {}; text status {}: {})",
                 prog_name,
                 json_output.status,
                 String::from_utf8_lossy(&json_output.stderr).trim(),
                 text_output.status,
                 String::from_utf8_lossy(&text_output.stderr).trim(),
-            ));
+            );
+            return classify_legacy_tc_query_failure(iface_sys_path.exists(), error);
         }
 
         Ok(classify_legacy_tc_filter_text(
@@ -2241,6 +2257,21 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("tc_ingress"));
         assert!(error.contains("permission denied"));
+    }
+
+    #[test]
+    fn legacy_tc_query_failure_is_idempotent_only_after_interface_disappears() {
+        assert_eq!(
+            classify_legacy_tc_query_failure(false, "Cannot find device".to_string()).unwrap(),
+            LegacyTcAttachmentObservation::Absent
+        );
+
+        let error = classify_legacy_tc_query_failure(
+            true,
+            "tc query failed while interface still exists".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "tc query failed while interface still exists");
     }
 
     #[test]
