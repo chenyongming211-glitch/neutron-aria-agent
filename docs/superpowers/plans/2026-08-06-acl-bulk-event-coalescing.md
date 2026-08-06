@@ -30,10 +30,10 @@
 - Consumes: `EventMerger.record_*()`, `EventMerger.ready(interval)`.
 - Produces: `EventMerger.last_pending_at()` and a deadline based on the latest event.
 
-- [ ] Add a failing unit test showing that a second event postpones readiness.
-- [ ] Run the focused test and verify it fails because readiness still uses the first event.
-- [ ] Track and reset `_last_pending_at`, update it for every accepted event, and use it for readiness and service deadlines.
-- [ ] Run event merger and service unit tests and verify the burst drains once after the quiet window.
+- [x] Add a failing unit test showing that a second event postpones readiness.
+- [x] Run the focused test and verify it fails because readiness still uses the first event.
+- [x] Track and reset `_last_pending_at`, update it for every accepted event, and use it for readiness and service deadlines.
+- [x] Run event merger and service unit tests and verify the burst drains once after the quiet window.
 
 ### Task 2: Transaction-Level Native Bulk Notification
 
@@ -45,10 +45,10 @@
 - Consumes: old Neutron `create_<resource>_bulk(context, <collection>=body)` dispatch and repository singular create methods.
 - Produces: native bulk entry points and one `bulk_create` ACL event with `resource_count`.
 
-- [ ] Add failing tests for native bulk capability, one notification on success, and no notification on rollback.
-- [ ] Run the focused tests and verify failures are caused by missing native bulk methods.
-- [ ] Add Python 2-compatible bulk entry points, one outer DB transaction, singular notification suppression, and one post-commit notification.
-- [ ] Run plugin and DB contract tests and preserve existing singular notifications.
+- [x] Add failing tests for native bulk capability, one notification on success, and no notification on rollback.
+- [x] Run the focused tests and verify failures are caused by missing native bulk methods.
+- [x] Add Python 2-compatible bulk entry points, one outer DB transaction, singular notification suppression, and one post-commit notification.
+- [x] Run plugin and DB contract tests and preserve existing singular notifications.
 
 ### Task 3: CI And Field Verification
 
@@ -60,10 +60,9 @@
 - Consumes: packaged `neutron_aria` server and agent artifacts.
 - Produces: before/after benchmark evidence using the existing workload.
 
-- [ ] Run all relevant Python unit and contract tests plus sensitive-term checks.
-- [ ] Commit and push the change, then require GitHub CI to pass.
-- [ ] Package and deploy the updated Neutron server and agent components to all three test nodes without restarting OVS components.
-- [ ] Repeat 100/500/1000-rule tests and record API time, event batches, full-resyncs, convergence, traffic, resources, and cleanup.
-- [ ] Restore the test port to bypass state and verify service health.
-- [ ] Add measured results to the performance record and commit the evidence summary.
-
+- [x] Run all relevant Python unit and contract tests plus sensitive-term checks.
+- [x] Commit and push the change, then require GitHub CI to pass.
+- [x] Package and deploy the updated Neutron server and agent components to all three test nodes without restarting OVS components.
+- [x] Repeat 100/500/1000-rule tests and record API time, event batches, full-resyncs, convergence, traffic, resources, and cleanup.
+- [x] Restore the test port to bypass state and verify service health.
+- [x] Add measured results to the performance record and commit the evidence summary.

@@ -355,6 +355,50 @@ This gives the product stronger semantics than the previous diff-only approach:
 for complex ACL changes, packets should see either the previous committed ACL
 or the next committed ACL, not a partially rewritten ACL bank.
 
+### 2.5 2026-08-06 Native Bulk And Event Coalescing Update
+
+A controlled 100/500/1000-rule run identified a separate control-plane
+amplification issue. The target Neutron release emulated a standard bulk POST
+by calling the singular plugin create method once per rule. Every call emitted
+an ACL RPC event. The agent also measured `event_merge_interval` from the first
+event, so a sustained stream repeatedly became ready while writes were still
+arriving.
+
+Implemented changes:
+
+- `AriaAclPlugin` now implements the old Neutron native bulk contract.
+- One bulk request is committed atomically and emits one `bulk_create` ACL RPC
+  summary after success.
+- Bulk rollback leaves no partial rows and emits no RPC event.
+- `EventMerger` now measures readiness from the latest accepted event.
+- The existing synchronous service loop remains the single-flight boundary;
+  events received during a full-resync become one quiet-window follow-up.
+
+Same-workload before/after evidence:
+
+| Rules | Bulk create before | Bulk create after | Throughput before | Throughput after |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | `5.757 s` | `0.761 s` | `17.37/s` | `131.41/s` |
+| 500 | `52.581 s` | `8.442 s` | `9.51/s` | `59.23/s` |
+| 1000 | `130.193 s` | `29.189 s` | `7.68/s` | `34.26/s` |
+
+The 1000-rule workflow previously produced about 62 full-resyncs during bulk
+create and about 51 during sequential cleanup. After this change, the entire
+create, bind, delta, rollback, and cleanup workflow produced 25 event-driven
+full-resyncs. Neutron-server peak CPU fell from `266.65%` to `146.27%` in the
+same 1000-rule workload.
+
+Traffic remained correct at every scale: nonmatching ICMP/TCP/UDP passed,
+enabling the matching ICMP rule produced 100% loss, disabling it restored
+traffic, and continuous traffic had no apply-time gaps.
+
+The remaining limit is explicit: sequential rule DELETE is not a native bulk
+operation. The 1000-rule cleanup measured `108.042 s` versus the earlier
+`91.627 s`, so this change must not be claimed as a delete-path optimization.
+A future replace-rules or bulk-delete API can address that independently after
+its atomicity and authorization contract is designed. Sparse changes more than
+one merge interval apart still intentionally trigger prompt individual syncs.
+
 ## 3. OVS-Inspired Design Principles
 
 Aria should borrow several ideas from OVS without copying the whole OVS agent:
