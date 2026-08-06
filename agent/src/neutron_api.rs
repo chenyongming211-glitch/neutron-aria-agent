@@ -4283,22 +4283,32 @@ async fn apply_delete_neutron_port(
         );
     }
 
-    if let Err(e) = purge_neutron_acl_transactionally(&state, &port.ifname, &port.port_id).await {
-        warn!(
+    if detached_port_cleanup_requires_acl_purge(read_ifindex(&port.ifname).is_some()) {
+        if let Err(e) =
+            purge_neutron_acl_transactionally(&state, &port.ifname, &port.port_id).await
+        {
+            warn!(
+                port_id = %port.port_id,
+                ifname = %port.ifname,
+                error = %e,
+                "keeping attached Neutron interface quiesced after ACL purge failure"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                NeutronDeleteResponse {
+                    port_id: port.port_id,
+                    ifname: Some(port.ifname),
+                    detached: false,
+                    status: "error".to_string(),
+                    error: Some(format!("neutron_acl_purge_failed:{}", e)),
+                },
+            );
+        }
+    } else {
+        info!(
             port_id = %port.port_id,
             ifname = %port.ifname,
-            error = %e,
-            "keeping attached Neutron interface quiesced after ACL purge failure"
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            NeutronDeleteResponse {
-                port_id: port.port_id,
-                ifname: Some(port.ifname),
-                detached: false,
-                status: "error".to_string(),
-                error: Some(format!("neutron_acl_purge_failed:{}", e)),
-            },
+            "skipping ACL purge because the detached interface is already absent"
         );
     }
     if let Err(e) = fault_injection::check("neutron.delete.after_acl_purge").await {
@@ -4564,6 +4574,10 @@ fn read_ifindex(ifname: &str) -> Option<u32> {
         .ok()
         .and_then(|raw| raw.trim().parse::<u32>().ok())
         .filter(|ifindex| *ifindex != 0)
+}
+
+fn detached_port_cleanup_requires_acl_purge(interface_exists: bool) -> bool {
+    interface_exists
 }
 
 fn is_compute_owner(device_owner: Option<&str>) -> bool {
@@ -12707,6 +12721,12 @@ mod tests {
             vec!["quiesce", "replace-empty-and-strict-flush"],
             "detach must not run after any owned-purge failure",
         );
+    }
+
+    #[test]
+    fn detached_port_cleanup_skips_acl_purge_only_after_interface_disappears() {
+        assert!(detached_port_cleanup_requires_acl_purge(true));
+        assert!(!detached_port_cleanup_requires_acl_purge(false));
     }
 
     #[test]
