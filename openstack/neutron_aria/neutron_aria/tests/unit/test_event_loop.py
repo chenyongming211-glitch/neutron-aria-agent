@@ -6576,9 +6576,14 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             status_scenario("classified-degraded-terminal")["status"]
         )
         degraded["managed_ports"] = []
+        full_resync = copy.deepcopy(
+            status_scenario("classified-degraded-full-resync")["status"]
+        )
+        full_resync["managed_ports"] = []
         raw_legacy = {"managed_ports": []}
         self.assertTrue(sync._delete_status_converged(port_id, ready))
         self.assertTrue(sync._delete_status_converged(port_id, degraded))
+        self.assertTrue(sync._delete_status_converged(port_id, full_resync))
         self.assertTrue(sync._delete_status_converged(port_id, raw_legacy))
 
     def test_scoped_pre_submit_routes_normalized_action_matrix_before_prepare(self):
@@ -7034,7 +7039,6 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             "applying",
             "runtime-degraded-pending",
             "partial-recoverable",
-            "runtime-degraded-baseline",
         ):
             status = self._actual_decoded_legacy_status(
                 case_id,
@@ -7044,6 +7048,12 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
                 self.assertFalse(
                     sync._delete_status_converged(target_port, status)
                 )
+
+        full_resync = self._actual_decoded_legacy_status(
+            "runtime-degraded-baseline",
+            clear_runtime_evidence=True,
+        )
+        self.assertTrue(sync._delete_status_converged(target_port, full_resync))
 
         ready = self._actual_decoded_legacy_status(
             clear_runtime_evidence=True,

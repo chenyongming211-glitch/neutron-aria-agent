@@ -3431,6 +3431,7 @@ class SnapshotSynchronizer(object):
             if control not in (
                 ("classified", "ready", "none"),
                 ("classified", "degraded", "none"),
+                ("classified", "degraded", "full_resync"),
             ):
                 return False
         managed = status.get("managed_ports")
