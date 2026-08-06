@@ -63,6 +63,20 @@ class EventMergerTestCase(unittest.TestCase):
         clock.advance(0.2)
         self.assertTrue(merger.ready(0.2))
 
+    def test_merge_window_is_measured_from_latest_event(self):
+        clock = FakeClock()
+        merger = EventMerger(clock=clock)
+
+        merger.record_port_update("p1")
+        clock.advance(0.15)
+        merger.record_port_update("p2")
+        clock.advance(0.05)
+
+        self.assertFalse(merger.ready(0.2))
+        self.assertEqual(0.15, merger.last_pending_at())
+        clock.advance(0.15)
+        self.assertTrue(merger.ready(0.2))
+
     def test_queue_overflow_collapses_to_full_resync(self):
         merger = EventMerger(max_pending_ports=1)
 

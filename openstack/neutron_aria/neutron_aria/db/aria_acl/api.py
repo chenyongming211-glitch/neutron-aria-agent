@@ -204,6 +204,13 @@ def _neutron_write(constraint_kind=None):
 def _sqlite_write(constraint_kind=None):
     def decorate(method):
         def transactional(self, *args, **kwargs):
+            if getattr(self, "_bulk_write_active", False):
+                try:
+                    return method(self, *args, **kwargs)
+                except sqlite3.IntegrityError as exc:
+                    if constraint_kind is not None:
+                        self._raise_known_constraint(exc, constraint_kind)
+                    raise
             self.connection.execute("BEGIN IMMEDIATE")
             try:
                 result = method(self, *args, **kwargs)
@@ -238,6 +245,33 @@ class InMemoryAriaAclRepository(object):
         self.address_sets = {}
         self.bindings = {}
         self.port_statuses = {}
+
+    def bulk_create(self, resource, values_list):
+        creators = {
+            "policy": self.create_policy,
+            "rule": self.create_rule,
+            "address_set": self.create_address_set,
+            "binding": self.create_binding,
+            "port_status": self.upsert_port_status,
+        }
+        creator = creators[resource]
+        with self._write_lock:
+            snapshot = {
+                "policies": _clone(self.policies),
+                "rules": _clone(self.rules),
+                "address_sets": _clone(self.address_sets),
+                "bindings": _clone(self.bindings),
+                "port_statuses": _clone(self.port_statuses),
+            }
+            try:
+                return [creator(values) for values in values_list]
+            except Exception:
+                self.policies = snapshot["policies"]
+                self.rules = snapshot["rules"]
+                self.address_sets = snapshot["address_sets"]
+                self.bindings = snapshot["bindings"]
+                self.port_statuses = snapshot["port_statuses"]
+                raise
 
     @_locked_write
     def create_policy(self, values):
@@ -616,6 +650,18 @@ class NeutronDbAriaAclRepository(object):
         self.tables = self._define_tables()
         if auto_create:
             self.ensure_schema()
+
+    def bulk_create(self, resource, values_list):
+        creators = {
+            "policy": self.create_policy,
+            "rule": self.create_rule,
+            "address_set": self.create_address_set,
+            "binding": self.create_binding,
+            "port_status": self.upsert_port_status,
+        }
+        creator = creators[resource]
+        with self._write_transaction():
+            return [creator(values) for values in values_list]
 
     @_neutron_write()
     def create_policy(self, values):
@@ -1377,12 +1423,34 @@ class SqliteAriaAclRepository(object):
     def __init__(self, path):
         self.path = path
         self.connection = sqlite3.connect(path)
+        self._bulk_write_active = False
         self.connection.create_function(
             "aria_json_scalar",
             2,
             _sqlite_json_scalar,
         )
         self._ensure_schema()
+
+    def bulk_create(self, resource, values_list):
+        creators = {
+            "policy": self.create_policy,
+            "rule": self.create_rule,
+            "address_set": self.create_address_set,
+            "binding": self.create_binding,
+            "port_status": self.upsert_port_status,
+        }
+        creator = creators[resource]
+        self.connection.execute("BEGIN IMMEDIATE")
+        self._bulk_write_active = True
+        try:
+            result = [creator(values) for values in values_list]
+            self.connection.commit()
+            return result
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            self._bulk_write_active = False
 
     def close(self):
         self.connection.close()

@@ -24,6 +24,7 @@ DEFAULT_PORT_STATUS_STALE_SECONDS = 90
 class AriaAclPlugin(object):
     __native_sorting_support = True
     __native_pagination_support = True
+    __native_bulk_support = True
     supported_extension_aliases = ["aria-acl"]
 
     def __init__(
@@ -51,6 +52,15 @@ class AriaAclPlugin(object):
         )
         self._notify_acl_change(context, "policy", "create", current=policy)
         return policy
+
+    def create_aria_acl_policy_bulk(self, context, aria_acl_policies):
+        return self._create_acl_bulk(
+            context,
+            "policy",
+            "aria_acl_policy",
+            "aria_acl_policies",
+            aria_acl_policies,
+        )
 
     def get_aria_acl_policies(
         self,
@@ -100,6 +110,15 @@ class AriaAclPlugin(object):
         )
         self._notify_acl_change(context, "rule", "create", current=rule)
         return rule
+
+    def create_aria_acl_rule_bulk(self, context, aria_acl_rules):
+        return self._create_acl_bulk(
+            context,
+            "rule",
+            "aria_acl_rule",
+            "aria_acl_rules",
+            aria_acl_rules,
+        )
 
     def get_aria_acl_rules(
         self,
@@ -154,6 +173,15 @@ class AriaAclPlugin(object):
             current=address_set,
         )
         return address_set
+
+    def create_aria_acl_address_set_bulk(self, context, aria_acl_address_sets):
+        return self._create_acl_bulk(
+            context,
+            "address_set",
+            "aria_acl_address_set",
+            "aria_acl_address_sets",
+            aria_acl_address_sets,
+        )
 
     def get_aria_acl_address_sets(
         self,
@@ -212,6 +240,15 @@ class AriaAclPlugin(object):
         self._notify_acl_change(context, "binding", "create", current=binding)
         return binding
 
+    def create_aria_acl_binding_bulk(self, context, aria_acl_bindings):
+        return self._create_acl_bulk(
+            context,
+            "binding",
+            "aria_acl_binding",
+            "aria_acl_bindings",
+            aria_acl_bindings,
+        )
+
     def get_aria_acl_bindings(
         self,
         context,
@@ -263,6 +300,16 @@ class AriaAclPlugin(object):
 
     def create_aria_acl_port_status(self, context, aria_acl_port_status):
         return self.report_aria_acl_port_status(context, aria_acl_port_status)
+
+    def create_aria_acl_port_status_bulk(self, context, aria_acl_port_statuses):
+        return self._create_acl_bulk(
+            context,
+            "port_status",
+            "aria_acl_port_status",
+            "aria_acl_port_statuses",
+            aria_acl_port_statuses,
+            notify=False,
+        )
 
     def update_aria_acl_port_status(self, context, port_id, aria_acl_port_status):
         values = self._unwrap(aria_acl_port_status, "aria_acl_port_status")
@@ -400,6 +447,36 @@ class AriaAclPlugin(object):
             )
         return ErrorMappingRepositoryProxy(self._fallback_repository)
 
+    def _create_acl_bulk(
+        self,
+        context,
+        resource,
+        item_key,
+        collection_key,
+        body,
+        notify=True,
+    ):
+        items = self._unwrap(body, collection_key)
+        values_list = [self._unwrap(item, item_key) for item in (items or [])]
+        created = self._repo(context).bulk_create(resource, values_list)
+        if notify and created:
+            summary = {"resource_count": len(created)}
+            for field in ("policy_id", "target_type", "target_id"):
+                values = set(
+                    value.get(field)
+                    for value in created
+                    if value.get(field) is not None
+                )
+                if len(values) == 1:
+                    summary[field] = values.pop()
+            self._notify_acl_change(
+                context,
+                resource,
+                "bulk_create",
+                current=summary,
+            )
+        return created
+
     def _notify_acl_change(self, context, resource, operation, current=None, resource_id=None):
         payload = {
             "domain": "acl",
@@ -412,6 +489,7 @@ class AriaAclPlugin(object):
             "target_type",
             "target_id",
             "revision_number",
+            "resource_count",
         ):
             if current and current.get(field) is not None:
                 payload[field] = current.get(field)

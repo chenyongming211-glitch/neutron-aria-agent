@@ -75,13 +75,13 @@ class EventMerger(object):
         self._reasons = []
         self._overflowed = False
         self._first_pending_at = None
+        self._last_pending_at = None
 
     def record_port_update(self, port_id, binding_host=None, revision_number=None):
         if not port_id:
             self.request_full_resync("port_update_missing_port_id")
             return
         with self._lock:
-            self._mark_pending_locked()
             revision = _coerce_revision(revision_number)
             existing = self._port_updates.get(port_id)
             if existing is not None:
@@ -89,6 +89,7 @@ class EventMerger(object):
                 if old_revision is not None and revision is not None:
                     if revision < old_revision:
                         return
+            self._mark_pending_locked()
             self._deleted_ports.discard(port_id)
             self._port_updates[port_id] = {
                 "port_id": port_id,
@@ -159,11 +160,15 @@ class EventMerger(object):
         with self._lock:
             return self._first_pending_at
 
+    def last_pending_at(self):
+        with self._lock:
+            return self._last_pending_at
+
     def ready(self, merge_interval):
         with self._lock:
             if not self._has_pending_locked():
                 return False
-            return self.clock() >= self._first_pending_at + float(merge_interval)
+            return self.clock() >= self._last_pending_at + float(merge_interval)
 
     def drain(self):
         with self._lock:
@@ -182,11 +187,14 @@ class EventMerger(object):
             self._reasons = []
             self._overflowed = False
             self._first_pending_at = None
+            self._last_pending_at = None
             return batch
 
     def _mark_pending_locked(self):
+        now = self.clock()
         if self._first_pending_at is None:
-            self._first_pending_at = self.clock()
+            self._first_pending_at = now
+        self._last_pending_at = now
 
     def _has_pending_locked(self):
         return bool(

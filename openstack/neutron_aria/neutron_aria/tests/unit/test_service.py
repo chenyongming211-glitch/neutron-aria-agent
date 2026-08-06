@@ -305,6 +305,36 @@ class AgentServiceTestCase(unittest.TestCase):
             result["status"]["last_event_decision_counts"],
         )
 
+    def test_sustained_acl_events_wait_for_trailing_quiet_window(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_domain_update("acl", resource="rule", resource_id="r1")
+        clock.advance(0.15)
+        merger.record_domain_update("acl", resource="rule", resource_id="r2")
+        clock.advance(0.05)
+
+        self.assertEqual(None, service.run_once())
+        self.assertEqual(1, sync.resync_calls)
+        self.assertEqual(0.35, service._event_deadline())
+
+        clock.advance(0.15)
+        result = service.run_once()
+
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(2, len(result["events"]["reasons"]))
+
     def test_incremental_rpc_single_local_port_update_uses_port_scoped_apply(self):
         clock = FakeClock()
         sync = FakeSynchronizer()

@@ -217,10 +217,10 @@ class AgentService(object):
     def _event_deadline(self):
         if self.event_merger is None or not self.event_merger.has_pending():
             return None
-        first_pending_at = self.event_merger.first_pending_at()
-        if first_pending_at is None:
+        last_pending_at = self.event_merger.last_pending_at()
+        if last_pending_at is None:
             return None
-        return first_pending_at + self.event_merge_interval
+        return last_pending_at + self.event_merge_interval
 
     def _process_event_batch(self):
         batch = self.event_merger.drain()

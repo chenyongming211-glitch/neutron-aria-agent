@@ -1235,6 +1235,172 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual("port", payloads[-1]["target_type"])
         self.assertEqual("port-1", payloads[-1]["target_id"])
 
+    def test_native_rule_bulk_create_emits_one_transaction_notification(self):
+        notifier = FakeNotifier()
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, notifier=notifier)
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+        })
+        notifier.events = []
+
+        rules = plugin.create_aria_acl_rule_bulk(None, {
+            "aria_acl_rules": [
+                {"aria_acl_rule": {
+                    "id": "rule-1",
+                    "project_id": "project-1",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 100,
+                    "action": "drop",
+                    "protocol": "tcp",
+                    "dst_port_min": 8080,
+                    "dst_port_max": 8080,
+                }},
+                {"aria_acl_rule": {
+                    "id": "rule-2",
+                    "project_id": "project-1",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 101,
+                    "action": "drop",
+                    "protocol": "udp",
+                    "dst_port_min": 1080,
+                    "dst_port_max": 1080,
+                }},
+            ],
+        })
+
+        self.assertTrue(
+            getattr(plugin, "_AriaAclPlugin__native_bulk_support")
+        )
+        self.assertEqual(["rule-1", "rule-2"], [rule["id"] for rule in rules])
+        self.assertEqual(1, len(notifier.events))
+        payload = notifier.events[0][1]
+        self.assertEqual("rule", payload["resource"])
+        self.assertEqual("bulk_create", payload["operation"])
+        self.assertEqual(2, payload["resource_count"])
+        self.assertEqual("policy-1", payload["policy_id"])
+
+    def test_failed_native_rule_bulk_create_rolls_back_without_notification(self):
+        notifier = FakeNotifier()
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, notifier=notifier)
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+        })
+        notifier.events = []
+
+        with self.assertRaises(AriaAclConflict):
+            plugin.create_aria_acl_rule_bulk(None, {
+                "aria_acl_rules": [
+                    {"aria_acl_rule": {
+                        "id": "rule-1",
+                        "project_id": "project-1",
+                        "policy_id": "policy-1",
+                        "direction": "ingress",
+                        "priority": 100,
+                        "action": "drop",
+                    }},
+                    {"aria_acl_rule": {
+                        "id": "rule-2",
+                        "project_id": "project-1",
+                        "policy_id": "policy-1",
+                        "direction": "ingress",
+                        "priority": 100,
+                        "action": "drop",
+                    }},
+                ],
+            })
+
+        self.assertEqual([], repository.list_rules())
+        self.assertEqual([], notifier.events)
+
+    def test_sqlite_native_rule_bulk_failure_is_atomic(self):
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        repository = None
+        try:
+            repository = SqliteAriaAclRepository(path)
+            plugin = AriaAclPlugin(repository=repository, notifier=FakeNotifier())
+            plugin.create_aria_acl_policy(None, {
+                "id": "policy-1",
+                "project_id": "project-1",
+            })
+
+            with self.assertRaises(AriaAclConflict):
+                plugin.create_aria_acl_rule_bulk(None, {
+                    "aria_acl_rules": [
+                        {"aria_acl_rule": {
+                            "id": "rule-1",
+                            "project_id": "project-1",
+                            "policy_id": "policy-1",
+                            "direction": "ingress",
+                            "priority": 100,
+                            "action": "drop",
+                        }},
+                        {"aria_acl_rule": {
+                            "id": "rule-2",
+                            "project_id": "project-1",
+                            "policy_id": "policy-1",
+                            "direction": "ingress",
+                            "priority": 100,
+                            "action": "drop",
+                        }},
+                    ],
+                })
+
+            self.assertEqual([], repository.list_rules())
+        finally:
+            if repository is not None:
+                repository.close()
+            os.unlink(path)
+
+    def test_native_bulk_entry_points_cover_creatable_resources(self):
+        notifier = FakeNotifier()
+        plugin = AriaAclPlugin(notifier=notifier)
+
+        policies = plugin.create_aria_acl_policy_bulk(None, {
+            "aria_acl_policies": [{"aria_acl_policy": {
+                "id": "policy-1",
+                "project_id": "project-1",
+            }}],
+        })
+        address_sets = plugin.create_aria_acl_address_set_bulk(None, {
+            "aria_acl_address_sets": [{"aria_acl_address_set": {
+                "id": "set-1",
+                "project_id": "project-1",
+                "members": [{"address": "192.0.2.2/32"}],
+            }}],
+        })
+        bindings = plugin.create_aria_acl_binding_bulk(None, {
+            "aria_acl_bindings": [{"aria_acl_binding": {
+                "id": "binding-1",
+                "project_id": "project-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": "port-1",
+            }}],
+        })
+        statuses = plugin.create_aria_acl_port_status_bulk(None, {
+            "aria_acl_port_statuses": [{"aria_acl_port_status": {
+                "port_id": "port-1",
+                "host": "compute-1.example.test",
+                "status": "ready",
+            }}],
+        })
+
+        self.assertEqual("policy-1", policies[0]["id"])
+        self.assertEqual("set-1", address_sets[0]["id"])
+        self.assertEqual("binding-1", bindings[0]["id"])
+        self.assertEqual("port-1", statuses[0]["port_id"])
+        self.assertEqual(
+            ["policy", "address_set", "binding"],
+            [event[1]["resource"] for event in notifier.events],
+        )
+
     def test_acl_agent_notifier_uses_legacy_agent_fanout_topic(self):
         client = FakeRpcClient()
         notifier = AriaAclAgentNotifier(client, FakeTopics)
