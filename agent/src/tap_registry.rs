@@ -195,26 +195,6 @@ impl TapRegistry {
         .persisted_live_iface_names()
     }
 
-    fn remove_orphaned_managed_link_pins(&self, ifname: &str) -> Result<(), String> {
-        let shared_pin_path = self.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
-        let mut errors = Vec::new();
-        for suffix in ["xdp", "tc_egress", "tc_ingress"] {
-            let path = shared_pin_path.join(format!("{}_{}_link", ifname, suffix));
-            if !path.exists() {
-                continue;
-            }
-            if let Err(e) = std::fs::remove_file(&path) {
-                errors.push(format!("remove {}: {}", path.display(), e));
-            }
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
     /// Reconcile actual pinned managed runtime against Neutron WAL committed ports.
     ///
     /// This claims/rebuilds committed interfaces through the normal attach path,
@@ -291,7 +271,8 @@ impl TapRegistry {
             let cleanup = (|| {
                 let tap_id = load_orphan_tap_id(&self.base_state_path, &ifname)
                     .map_err(|error| format!("load_tap_id:{}", error))?;
-                self.remove_orphaned_managed_link_pins(&ifname)
+                instance
+                    .detach_orphaned_managed_links()
                     .map_err(|error| format!("detach_links:{}", error))?;
                 Ok(tap_id)
             })();
@@ -755,26 +736,28 @@ mod tests {
         let registry = test_registry(&root);
         let shared_pin = registry.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
         std::fs::create_dir_all(&shared_pin).unwrap();
+        let ifname = "tap-orphan-does-not-exist";
         for suffix in ["xdp", "tc_egress", "tc_ingress"] {
-            std::fs::write(shared_pin.join(format!("lo_{}_link", suffix)), b"pin").unwrap();
+            std::fs::write(shared_pin.join(format!("{}_{}_link", ifname, suffix)), b"pin")
+                .unwrap();
         }
         let instance = FirewallInstance::new(
-            "lo",
+            ifname,
             PathBuf::from(registry.control_plane.managed_pin_path()),
-            registry.base_state_path.join("lo"),
+            registry.base_state_path.join(ifname),
             true,
             registry.control_plane.trace_map_mode(),
         );
         instance.reserve_persisted_live_iface().unwrap();
 
-        registry
-            .remove_orphaned_managed_link_pins("lo")
+        instance
+            .detach_orphaned_managed_links()
             .expect("link-only phase should remove test pins");
 
         assert!(instance
             .persisted_live_iface_names()
             .unwrap()
-            .contains("lo"));
+            .contains(ifname));
         assert!(registry.managed_link_pin_ifaces().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }

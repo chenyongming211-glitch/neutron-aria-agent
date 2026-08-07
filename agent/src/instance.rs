@@ -2162,6 +2162,10 @@ impl FirewallInstance {
     pub fn detach(&self) -> Result<(), String> {
         self.detach_with_cleanup(!self.shared_runtime)
     }
+
+    pub(crate) fn detach_orphaned_managed_links(&self) -> Result<(), String> {
+        self.detach_with_cleanup(false)
+    }
 }
 
 #[cfg(test)]
