@@ -1470,6 +1470,128 @@ class EventLoopTestCase(unittest.TestCase):
         finally:
             shutil.rmtree(state_dir)
 
+    def test_full_resync_resubmits_when_v1_host_is_degraded_but_acl_port_is_ready(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            ready_port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            degraded_port_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            port_source = StaticPortSource([
+                {
+                    "id": ready_port_id,
+                    "network_id": "net-1",
+                    "device_owner": "compute:nova",
+                    "binding:host_id": "compute-1",
+                    "binding:vif_type": "ovs",
+                    "binding:vnic_type": "normal",
+                },
+                {
+                    "id": degraded_port_id,
+                    "network_id": "net-1",
+                    "device_owner": "compute:nova",
+                    "binding:host_id": "compute-1",
+                    "binding:vif_type": "ovs",
+                    "binding:vnic_type": "normal",
+                },
+            ])
+            acl_index = EffectiveAclIndex(
+                policies=[{"id": "ready-policy", "default_action": "allow"}],
+                rules=[{
+                    "id": "drop-icmp",
+                    "policy_id": "ready-policy",
+                    "direction": "ingress",
+                    "priority": 100,
+                    "action": "drop",
+                    "ethertype": "IPv4",
+                    "protocol": "icmp",
+                    "src_cidr": "192.0.2.2/32",
+                }],
+                bindings=[
+                    {
+                        "id": "ready-binding",
+                        "policy_id": "ready-policy",
+                        "target_type": "port",
+                        "target_id": ready_port_id,
+                    },
+                    {
+                        "id": "second-ready-binding",
+                        "policy_id": "ready-policy",
+                        "target_type": "port",
+                        "target_id": degraded_port_id,
+                    },
+                ],
+            )
+            first_client = StatusAfterApplyLocalClient()
+            first = SnapshotSynchronizer(
+                "compute-1",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                acl_index=acl_index,
+            )
+            first_result = first.full_resync()
+            mixed_status = first_client.status()
+            mixed_status.update({
+                "status_schema_version": 1,
+                "status_contract_hash": "v0.9-neutron-status-1",
+                "transaction_state": "classified",
+                "overall_readiness": "degraded",
+                "required_action": "none",
+                "recovery_cause": None,
+                "last_classified_generation": mixed_status[
+                    "applied_generation"
+                ],
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+            })
+            for managed_port in mixed_status["managed_ports"]:
+                managed_port["managed_domains"] = ["acl"]
+            for port_status in mixed_status["port_statuses"]:
+                if port_status["port_id"] == degraded_port_id:
+                    port_status.update({
+                        "status": "degraded",
+                        "reason": "runtime_projection_degraded",
+                    })
+                    port_status["domains"][0].update({
+                        "status": "degraded",
+                        "reason": "runtime_projection_degraded",
+                        "effective_action": "bypass",
+                    })
+                for domain in port_status.get("domains") or []:
+                    domain["support_disposition"] = (
+                        "supported"
+                        if domain.get("status") == "ready"
+                        else "unknown"
+                    )
+
+            class MixedV1ThenAppliedClient(FixedStatusLocalClient):
+                def status(self):
+                    if not self.snapshots:
+                        return copy.deepcopy(self.fixed_status)
+                    return copy.deepcopy(self.fixed_status)
+
+            second_client = MixedV1ThenAppliedClient(mixed_status)
+            second = SnapshotSynchronizer(
+                "compute-1",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                acl_index=acl_index,
+            )
+            second_result = second.full_resync()
+
+            self.assertEqual(
+                first_result["snapshot"]["generation"],
+                second_result["snapshot"]["generation"],
+            )
+            self.assertEqual(1, len(second_client.snapshots))
+            self.assertFalse(second_result["response"].get("already_classified"))
+        finally:
+            shutil.rmtree(state_dir)
+
     def test_full_resync_waits_when_remote_pending_same_hash(self):
         state_dir = tempfile.mkdtemp()
         try:
