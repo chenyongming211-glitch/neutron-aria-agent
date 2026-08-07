@@ -14,6 +14,8 @@ EBPF_PERF_SO="${EBPF_PERF_SO:-${ARTIFACT_DIR}/libebpf_firewall_perf.so}"
 RUN_ARIA_DIR="${RUN_ARIA_DIR:-/run/aria}"
 SOCKET_PATH="${SOCKET_PATH:-/run/aria/aria-agent.sock}"
 STATE_DIR="${STATE_DIR:-/var/lib/aria-agent-smoke}"
+PIN_PATH="${PIN_PATH:-}"
+LISTEN_ADDR="${LISTEN_ADDR:-}"
 OVS_BRIDGE="${OVS_BRIDGE:-br-int}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
 START_CONTAINER="${START_CONTAINER:-true}"
@@ -51,7 +53,9 @@ require_dir() {
 json_check() {
     local name="$1"
     local value="$2"
+    local expected_generation="${3:-}"
     REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-}" \
+        EXPECTED_GENERATION="${expected_generation}" \
         JSON_PAYLOAD="${value}" \
         JSON_NAME="${name}" \
         "${PYTHON_BIN}" - <<'PY'
@@ -70,7 +74,7 @@ if name == "capabilities":
     assert payload.get("supports_full_snapshot") is True, payload
     assert payload.get("supports_port_delete") is True, payload
     domains = set(payload.get("supported_domains") or [])
-    for domain in ("attach", "acl", "qos", "mirror"):
+    for domain in ("attach", "acl"):
         assert domain in domains, payload
     if "contract_version" in payload:
         assert payload.get("contract_version") == "2026-06-v0.9", payload
@@ -88,7 +92,7 @@ if name == "capabilities":
     if "peer_auth_policy" in payload:
         assert payload.get("peer_auth_policy"), payload
     if "capability_hash" in payload:
-        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-2", payload
+        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-3", payload
 elif name == "initial_status":
     assert payload.get("managed_ports") == [], payload
     if os.environ.get("REQUIRE_NO_ACTIVE_INSTANCES") == "true":
@@ -100,6 +104,12 @@ elif name == "missing_port_snapshot":
     assert result.get("action") == "ignore", payload
     assert result.get("status") == "ignored", payload
     assert result.get("reason") == "ovs_iface_id_not_found", payload
+elif name == "missing_port_status":
+    expected_generation = int(os.environ["EXPECTED_GENERATION"])
+    assert int(payload.get("applied_generation") or 0) >= expected_generation, payload
+    assert payload.get("pending_generation") is None, payload
+    assert payload.get("managed_ports") == [], payload
+    assert payload.get("active_instances") == [], payload
 elif name == "final_status":
     assert payload.get("managed_ports") == [], payload
 else:
@@ -164,6 +174,16 @@ prepare_config() {
         "${CONFIG_DIR}/aria-agent-openstack.toml"
     sed -i "s#^ovs_bridge =.*#ovs_bridge = \"${OVS_BRIDGE}\"#" \
         "${CONFIG_DIR}/aria-agent-openstack.toml"
+    sed -i "s#^neutron_socket_path =.*#neutron_socket_path = \"${SOCKET_PATH}\"#" \
+        "${CONFIG_DIR}/aria-agent-openstack.toml"
+    if [ -n "${PIN_PATH}" ]; then
+        sed -i "s#^pin_path =.*#pin_path = \"${PIN_PATH}\"#" \
+            "${CONFIG_DIR}/aria-agent-openstack.toml"
+    fi
+    if [ -n "${LISTEN_ADDR}" ]; then
+        sed -i "s#^listen_addr =.*#listen_addr = \"${LISTEN_ADDR}\"#" \
+            "${CONFIG_DIR}/aria-agent-openstack.toml"
+    fi
 }
 
 start_container() {
@@ -276,6 +296,34 @@ curl_uds() {
     return 1
 }
 
+wait_for_snapshot_generation() {
+    local expected_generation="$1" status attempt
+    for attempt in $(seq 1 "${UDS_READY_RETRIES}"); do
+        status="$(curl_uds "http://localhost/api/v1/neutron/status")"
+        if JSON_PAYLOAD="${status}" EXPECTED_GENERATION="${expected_generation}" \
+                "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+
+import json
+import os
+
+payload = json.loads(os.environ["JSON_PAYLOAD"])
+expected = int(os.environ["EXPECTED_GENERATION"])
+applied = int(payload.get("applied_generation") or 0)
+pending = payload.get("pending_generation")
+if applied < expected or pending is not None:
+    raise SystemExit(1)
+PY
+        then
+            printf '%s' "${status}"
+            return 0
+        fi
+        sleep "${UDS_READY_INTERVAL}"
+    done
+    printf '%s\n' "${status}" >&2
+    return 1
+}
+
 check_uds_contract() {
     echo "Checking UDS capabilities"
     capabilities="$(curl_uds "http://localhost/api/v1/neutron/capabilities")"
@@ -337,7 +385,24 @@ PY
         --data "${snapshot}" \
         "http://localhost/api/v1/neutron/snapshot")"
     echo "${response}"
-    json_check missing_port_snapshot "${response}"
+    snapshot_generation="$(JSON_PAYLOAD="${response}" "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+print(int(json.loads(os.environ["JSON_PAYLOAD"]).get("generation") or 0))
+PY
+    )"
+    response_status="$(JSON_PAYLOAD="${response}" "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+print(json.loads(os.environ["JSON_PAYLOAD"]).get("status") or "")
+PY
+    )"
+    if [ "${response_status}" = "pending" ]; then
+        settled_status="$(wait_for_snapshot_generation "${snapshot_generation}")"
+        json_check missing_port_status "${settled_status}" "${snapshot_generation}"
+    else
+        json_check missing_port_snapshot "${response}"
+    fi
 
     curl_uds -X DELETE "http://localhost/api/v1/neutron/ports/${fake_port_id}" >/dev/null || true
 

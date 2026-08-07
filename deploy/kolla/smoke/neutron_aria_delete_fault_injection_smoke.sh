@@ -29,6 +29,12 @@ PYTHON_BIN="${PYTHON_BIN:-}"
 PIN_ROOT="${PIN_ROOT:-/sys/fs/bpf/aria/global-v2}"
 NEUTRON_STATE_PATH="${NEUTRON_STATE_PATH:-/var/lib/aria-agent}"
 MANAGED_TRANSACTION_SMOKE="${MANAGED_TRANSACTION_SMOKE:-false}"
+DIRECT_SNAPSHOT_MODE="${DIRECT_SNAPSHOT_MODE:-false}"
+DATAPATH_CONFIG_DIR="${DATAPATH_CONFIG_DIR:-}"
+DATAPATH_RUN_ARIA_DIR="${DATAPATH_RUN_ARIA_DIR:-}"
+DATAPATH_STATE_DIR="${DATAPATH_STATE_DIR:-}"
+DATAPATH_PIN_PATH="${DATAPATH_PIN_PATH:-}"
+DATAPATH_LISTEN_ADDR="${DATAPATH_LISTEN_ADDR:-}"
 WORK_DIR="${WORK_DIR:-/tmp/neutron-aria-delete-transaction-$(date +%Y%m%d%H%M%S)-$(hostname -s)}"
 
 RESULT="fail"
@@ -344,6 +350,12 @@ start_datapath_with_fault() {
         REPO_ROOT="${REPO_ROOT}" \
         ARTIFACT_DIR="${ARTIFACT_DIR}" \
         REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES}" \
+        CONFIG_DIR="${DATAPATH_CONFIG_DIR:-/etc/kolla/aria-datapath}" \
+        RUN_ARIA_DIR="${DATAPATH_RUN_ARIA_DIR:-/run/aria}" \
+        SOCKET_PATH="${SOCKET_PATH}" \
+        STATE_DIR="${DATAPATH_STATE_DIR:-/var/lib/aria-agent-smoke}" \
+        PIN_PATH="${DATAPATH_PIN_PATH}" \
+        LISTEN_ADDR="${DATAPATH_LISTEN_ADDR}" \
         FAULT_INJECTION_ENABLED=1 \
         FAULT_POINT="${point}" \
         FAULT_ACTION="${FAULT_ACTION}" \
@@ -359,11 +371,121 @@ start_datapath_without_fault() {
         REPO_ROOT="${REPO_ROOT}" \
         ARTIFACT_DIR="${ARTIFACT_DIR}" \
         REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES}" \
+        CONFIG_DIR="${DATAPATH_CONFIG_DIR:-/etc/kolla/aria-datapath}" \
+        RUN_ARIA_DIR="${DATAPATH_RUN_ARIA_DIR:-/run/aria}" \
+        SOCKET_PATH="${SOCKET_PATH}" \
+        STATE_DIR="${DATAPATH_STATE_DIR:-/var/lib/aria-agent-smoke}" \
+        PIN_PATH="${DATAPATH_PIN_PATH}" \
+        LISTEN_ADDR="${DATAPATH_LISTEN_ADDR}" \
         bash "${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+}
+
+submit_direct_acl_snapshot() {
+    local acl_fixture_json="$1" ifindex
+    ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")"
+    docker_agent_exec python - \
+        "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" "${ifindex}" \
+        "${acl_fixture_json}" <<'PY'
+from __future__ import print_function
+
+import json
+import sys
+import time
+
+from neutron_aria.agent.uds_client import LocalClient
+
+socket_path, port_id, ifname, ifindex, fixture_json = sys.argv[1:6]
+fixture = json.loads(fixture_json)
+policy = fixture["policies"][0]
+binding = fixture["bindings"][0]
+rules = []
+for rule in fixture.get("rules") or []:
+    rules.append({
+        "id": rule.get("id"),
+        "direction": rule.get("direction"),
+        "priority": int(rule.get("priority") or 0),
+        "action": rule.get("action"),
+        "ethertype": rule.get("ethertype"),
+        "protocol": rule.get("protocol"),
+        "src_cidrs": [rule["src_cidr"]] if rule.get("src_cidr") else [],
+        "dst_cidrs": [rule["dst_cidr"]] if rule.get("dst_cidr") else [],
+        "src_port_min": rule.get("src_port_min"),
+        "src_port_max": rule.get("src_port_max"),
+        "dst_port_min": rule.get("dst_port_min"),
+        "dst_port_max": rule.get("dst_port_max"),
+    })
+
+client = LocalClient(socket_path, timeout=3.0)
+client.capabilities(required_domains=["acl"])
+status = client.status()
+generation = max(
+    int(status.get("generation") or 0),
+    int(status.get("accepted_generation") or 0),
+    int(status.get("applied_generation") or 0),
+) + 1
+snapshot = {
+    "schema_version": 1,
+    "generation": generation,
+    "host": "isolated-transaction-smoke",
+    "ports": [{
+        "port_id": port_id,
+        "ifname": ifname,
+        "ifindex": int(ifindex),
+        "eligible": True,
+        "disposition": "eligible_ovs_tap",
+        "device_owner": "compute:nova",
+        "vif_type": "ovs",
+        "vnic_type": "normal",
+        "network_backend": "openvswitch",
+        "ovs_iface_id": port_id,
+        "managed_domains": ["acl"],
+        "acl": {
+            "enabled": True,
+            "status": "ready",
+            "reason": "ready",
+            "effective_action": "enforce",
+            "policy_id": policy.get("id"),
+            "policy_name": policy.get("name"),
+            "binding_id": binding.get("id"),
+            "source": "port",
+            "default_action": policy.get("default_action") or "allow",
+            "stateful": bool(policy.get("stateful")),
+            "revision": max(
+                int(policy.get("revision_number") or 0),
+                int(binding.get("revision_number") or 0),
+            ),
+            "rules": rules,
+        },
+    }],
+}
+response = client.put_snapshot(snapshot)
+print("direct_snapshot_response=%s" % json.dumps(response, sort_keys=True))
+deadline = time.time() + 15.0
+while True:
+    settled = client.status()
+    applied = int(settled.get("applied_generation") or 0)
+    pending = settled.get("pending_generation")
+    if applied >= generation and pending is None:
+        break
+    if time.time() >= deadline:
+        raise SystemExit(
+            "direct snapshot generation %s did not settle: %s" % (
+                generation,
+                json.dumps(settled, sort_keys=True),
+            )
+        )
+    time.sleep(0.05)
+print("direct_snapshot_settled=%s" % json.dumps(settled, sort_keys=True))
+PY
 }
 
 apply_acl_snapshot_without_rollback() {
     local acl_fixture_json="$1"
+
+    if [ "${DIRECT_SNAPSHOT_MODE}" = "true" ]; then
+        submit_direct_acl_snapshot "${acl_fixture_json}"
+        return
+    fi
 
     ACL_FIXTURE_JSON="${acl_fixture_json}" \
         ROLLBACK=false \
@@ -381,7 +503,7 @@ record_cleanup_error() {
 }
 
 restore_renamed_pins() {
-    local index record source destination rc=0 separator=$'\x1f'
+    local index record source destination expected_id actual_id rc=0 separator=$'\x1f'
     for ((index=${#renamed_pin_records[@]}-1; index>=0; index--)); do
         record="${renamed_pin_records[index]}"
         source="${record%%${separator}*}"
@@ -391,7 +513,20 @@ restore_renamed_pins() {
             rc=1
             continue
         fi
-        if [ -e "${destination}" ]; then
+        if [[ "${destination}" == id:* ]]; then
+            expected_id="${destination#id:}"
+            if [ -e "${source}" ]; then
+                actual_id="$(bpftool -j map show pinned "${source}" | "${PYTHON_BIN}" -c \
+                    'import json,sys; value=json.load(sys.stdin); value=value[0] if isinstance(value,list) else value; print(value["id"])')" || rc=1
+                if [ "${actual_id:-}" != "${expected_id}" ]; then
+                    echo "pin restoration identity mismatch: ${source}" >&2
+                    rc=1
+                fi
+            elif ! bpftool map pin id "${expected_id}" "${source}"; then
+                echo "failed to restore map id ${expected_id} to ${source}" >&2
+                rc=1
+            fi
+        elif [ -e "${destination}" ]; then
             if [ -e "${source}" ]; then
                 echo "pin restoration collision: ${source} and ${destination} both exist" >&2
                 rc=1
@@ -411,23 +546,40 @@ restore_renamed_pins() {
 }
 
 hold_pin_for_fault() {
-    local map_name="$1" label="$2" source destination separator=$'\x1f'
+    local map_name="$1" label="$2" source destination map_id separator=$'\x1f'
     source="${PIN_ROOT}/${map_name}"
     destination="${PIN_ROOT}/.${map_name}.acl046-transaction-held"
     [ -e "${source}" ] || die "required pin is missing before fault fixture: ${source}"
     [ ! -e "${destination}" ] || die "pin fault destination already exists: ${destination}"
     guard_dedicated_host "${label}-pre-pin-rename" target
-    renamed_pin_records+=("${source}${separator}${destination}")
-    mv -- "${source}" "${destination}" || die "failed to hold pin ${source}"
+    if mv -- "${source}" "${destination}" 2>/dev/null; then
+        renamed_pin_records+=("${source}${separator}${destination}")
+        return
+    fi
+    map_id="$(bpftool -j map show pinned "${source}" | "${PYTHON_BIN}" -c \
+        'import json,sys; value=json.load(sys.stdin); value=value[0] if isinstance(value,list) else value; print(value["id"])')" \
+        || die "failed to resolve map id for ${source}"
+    rm -- "${source}" || die "failed to unpin ${source}"
+    renamed_pin_records+=("${source}${separator}id:${map_id}")
 }
 
 capture_wal() {
     local output="$1"
+    if [ "${DIRECT_SNAPSHOT_MODE}" = "true" ]; then
+        docker exec "${DATAPATH_SERVICE_NAME}" cat \
+            "${NEUTRON_STATE_PATH}/neutron-snapshot.wal" >"${output}"
+        return
+    fi
     docker_agent_exec cat "${NEUTRON_STATE_PATH}/neutron-snapshot.wal" >"${output}"
 }
 
 capture_instance_state() {
     local output="$1"
+    if [ "${DIRECT_SNAPSHOT_MODE}" = "true" ]; then
+        docker exec "${DATAPATH_SERVICE_NAME}" cat \
+            "${NEUTRON_STATE_PATH}/${EXPECTED_IFNAME}/state.json" >"${output}"
+        return
+    fi
     docker_agent_exec cat "${NEUTRON_STATE_PATH}/${EXPECTED_IFNAME}/state.json" >"${output}"
 }
 
@@ -459,17 +611,89 @@ if remaining:
 PY
 }
 
+capture_tc_filter() {
+    local direction="$1" output="$2" temporary error_file
+    temporary="${output}.tmp"
+    error_file="${output}.err"
+    if tc -j filter show dev "${EXPECTED_IFNAME}" "${direction}" \
+            >"${temporary}" 2>"${error_file}" && \
+            "${PYTHON_BIN}" -m json.tool "${temporary}" >/dev/null 2>&1; then
+        mv "${temporary}" "${output}"
+        return
+    fi
+    rm -f "${temporary}"
+    tc filter show dev "${EXPECTED_IFNAME}" "${direction}" | \
+        "${PYTHON_BIN}" -c \
+        'import json,sys; print(json.dumps([{"raw": line.rstrip()} for line in sys.stdin if line.rstrip()]))' \
+        >"${output}"
+}
+
 capture_tc_identity() {
-    local directory="$1" ifindex
+    local directory="$1" ifindex attach_mode ingress_link egress_link direction net_rc=0
     ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")" || return 1
     ip -details link show dev "${EXPECTED_IFNAME}" >"${directory}/link.txt" || return 1
-    tc -j filter show dev "${EXPECTED_IFNAME}" ingress >"${directory}/tc-ingress.json" || return 1
-    tc -j filter show dev "${EXPECTED_IFNAME}" egress >"${directory}/tc-egress.json" || return 1
-    bpftool -j net show >"${directory}/bpftool-net.json" || return 1
-    bpftool -j link show pinned "${PIN_ROOT}/${EXPECTED_IFNAME}_tc_ingress_link" \
-        >"${directory}/pinned-ingress-link.json" || return 1
-    bpftool -j link show pinned "${PIN_ROOT}/${EXPECTED_IFNAME}_tc_egress_link" \
-        >"${directory}/pinned-egress-link.json" || return 1
+    capture_tc_filter ingress "${directory}/tc-ingress.json" || return 1
+    capture_tc_filter egress "${directory}/tc-egress.json" || return 1
+    bpftool -j net show >"${directory}/bpftool-net.json" \
+        2>"${directory}/bpftool-net.err" || net_rc=$?
+    printf '{"available":%s,"exit_code":%s}\n' \
+        "$([ "${net_rc}" -eq 0 ] && printf true || printf false)" "${net_rc}" \
+        >"${directory}/bpftool-net-status.json"
+    ingress_link="${PIN_ROOT}/${EXPECTED_IFNAME}_tc_ingress_link"
+    egress_link="${PIN_ROOT}/${EXPECTED_IFNAME}_tc_egress_link"
+    if [ -e "${ingress_link}" ] && [ -e "${egress_link}" ]; then
+        attach_mode="tcx"
+        bpftool -j link show pinned "${ingress_link}" \
+            >"${directory}/pinned-ingress-link.json" || return 1
+        bpftool -j link show pinned "${egress_link}" \
+            >"${directory}/pinned-egress-link.json" || return 1
+    elif [ ! -e "${ingress_link}" ] && [ ! -e "${egress_link}" ]; then
+        attach_mode="legacy"
+        for direction in ingress egress; do
+            bpftool -j prog show pinned "${PIN_ROOT}/tc_${direction}" \
+                >"${directory}/pinned-${direction}-prog.json" || return 1
+            "${PYTHON_BIN}" - \
+                "${directory}/pinned-${direction}-prog.json" \
+                "${directory}/tc-${direction}.json" \
+                "${ifindex}" "${direction}" \
+                >"${directory}/pinned-${direction}-link.json" <<'PY' || return 1
+from __future__ import print_function
+
+import json
+import sys
+
+program_path, filters_path, ifindex, direction = sys.argv[1:]
+program = json.load(open(program_path, encoding="utf-8"))
+if isinstance(program, list):
+    assert len(program) == 1, program
+    program = program[0]
+assert isinstance(program, dict), program
+program_id = int(program.get("id") or 0)
+program_tag = str(program.get("tag") or "").lower()
+program_name = "tc_%s" % direction
+assert program_id > 0 and program_tag, program
+filters = json.load(open(filters_path, encoding="utf-8"))
+rendered = json.dumps(filters, sort_keys=True).lower()
+assert program_name in rendered, (program_name, filters)
+assert program_tag in rendered or str(program_id) in rendered, (
+    program_name,
+    program_id,
+    program_tag,
+    filters,
+)
+print(json.dumps({
+    "ifindex": int(ifindex),
+    "prog_id": program_id,
+    "attach_type": "legacy_tc_%s" % direction,
+    "legacy_tc": True,
+    "tag": program_tag,
+}, sort_keys=True))
+PY
+        done
+    else
+        echo "mixed TC attachment state for ${EXPECTED_IFNAME}" >&2
+        return 1
+    fi
     "${PYTHON_BIN}" - "${directory}" "${ifindex}" <<'PY'
 from __future__ import print_function
 
@@ -503,6 +727,7 @@ for direction in ("ingress", "egress"):
         "ifindex": int(link["ifindex"]),
         "prog_id": int(link["prog_id"]),
         "attach_type": link.get("attach_type"),
+        "legacy_tc": bool(link.get("legacy_tc")),
     }
 print(json.dumps(evidence, sort_keys=True))
 PY
@@ -539,8 +764,15 @@ PY
     tap_id="$("${PYTHON_BIN}" - "${directory}/iface-ctx.json" <<'PY'
 from __future__ import print_function
 import json,struct,sys
+
+def decode_bpftool_bytes(values):
+    return bytes(bytearray(
+        int(value, 16) if isinstance(value, (str, type(u""))) else value
+        for value in values
+    ))
+
 value=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
-print(struct.unpack("=I",bytes(value[:4]))[0])
+print(struct.unpack("=I",decode_bpftool_bytes(value[:4]))[0])
 PY
     )" || return 1
     config_hex="$("${PYTHON_BIN}" - "${tap_id}" <<'PY'
@@ -554,8 +786,18 @@ PY
     "${PYTHON_BIN}" - "${directory}/tap-config.json" "${tap_id}" >"${directory}/bank.json" <<'PY' || return 1
 from __future__ import print_function
 import json,sys
+
+def decode_bpftool_int(value):
+    if isinstance(value, (str, type(u""))):
+        return int(value, 0)
+    return int(value)
+
 value=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
-print(json.dumps({"tap_id":int(sys.argv[2]),"tap_config":value,"active_bank":int(value[6])},sort_keys=True))
+print(json.dumps({
+    "tap_id": int(sys.argv[2]),
+    "tap_config": value,
+    "active_bank": decode_bpftool_int(value[6]),
+}, sort_keys=True))
 PY
     capture_wal "${directory}/neutron-snapshot.wal" || return 1
     capture_instance_state "${directory}/state.json" || return 1
@@ -678,6 +920,12 @@ assert_ready_enforced_baseline() {
     OWNER_PREFIX="neutron:${EXPECTED_PORT_ID}:" "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 import json,os
+
+def decode_bpftool_int(value):
+    if isinstance(value, (str, type(u""))):
+        return int(value, 0)
+    return int(value)
+
 root=os.environ["DIRECTORY"]
 port_id=os.environ["PORT_ID"]
 status=json.load(open(os.path.join(root,"status.json"),encoding="utf-8"))
@@ -689,8 +937,8 @@ assert len(domains)==1,row
 assert domains[0].get("status")=="ready",domains[0]
 assert domains[0].get("effective_action")=="enforce",domains[0]
 tap_config=json.load(open(os.path.join(root,"tap-config.json"),encoding="utf-8"))["value"]
-assert int(tap_config[0])==1,tap_config
-assert int(tap_config[2])==1,tap_config
+assert decode_bpftool_int(tap_config[0])==1,tap_config
+assert decode_bpftool_int(tap_config[2])==1,tap_config
 prefix=os.environ["OWNER_PREFIX"]
 groups=json.load(open(os.path.join(root,"groups.json"),encoding="utf-8")).get("groups") or []
 owned_groups=[group for group in groups if str(group.get("name") or "").startswith(prefix)]
@@ -714,6 +962,11 @@ from __future__ import print_function
 
 import json
 import os
+
+def decode_bpftool_int(value):
+    if isinstance(value, (str, type(u""))):
+        return int(value, 0)
+    return int(value)
 
 before=os.environ["BEFORE"]
 after=os.environ["AFTER"]
@@ -783,8 +1036,8 @@ assert after_entries[-1].get("type")=="delete_intent",after_entries[-1]
 assert after_entries[-1].get("port_id")==port_id,after_entries[-1]
 
 tap_config=load(after,"tap-config.json")["value"]
-assert int(tap_config[0])==0,tap_config
-assert int(tap_config[2])==0,tap_config
+assert decode_bpftool_int(tap_config[0])==0,tap_config
+assert decode_bpftool_int(tap_config[2])==0,tap_config
 
 after_owned=owned(after)
 if os.environ["REQUIRE_EQUAL"]=="true":
@@ -839,7 +1092,7 @@ capture_api_outcome() {
 }
 
 capture_detached_state() {
-    local label="$1" tap_id="$2" directory map_name ifindex
+    local label="$1" tap_id="$2" directory map_name ifindex net_rc=0 link_rc=0
     directory="${WORK_DIR}/${label}"
     mkdir -p "${directory}" || return 1
     printf '%s\n' "${tap_id}" >"${directory}/pre-delete-tap-id.txt" || return 1
@@ -849,10 +1102,18 @@ capture_detached_state() {
     curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/instances" \
         >"${directory}/instances.json" || return 1
     ip -details link show dev "${EXPECTED_IFNAME}" >"${directory}/link.txt" || return 1
-    tc -j filter show dev "${EXPECTED_IFNAME}" ingress >"${directory}/tc-ingress.json" || return 1
-    tc -j filter show dev "${EXPECTED_IFNAME}" egress >"${directory}/tc-egress.json" || return 1
-    bpftool -j net show >"${directory}/bpftool-net.json" || return 1
-    bpftool -j link show >"${directory}/bpftool-link.json" || return 1
+    capture_tc_filter ingress "${directory}/tc-ingress.json" || return 1
+    capture_tc_filter egress "${directory}/tc-egress.json" || return 1
+    bpftool -j net show >"${directory}/bpftool-net.json" \
+        2>"${directory}/bpftool-net.err" || net_rc=$?
+    printf '{"available":%s,"exit_code":%s}\n' \
+        "$([ "${net_rc}" -eq 0 ] && printf true || printf false)" "${net_rc}" \
+        >"${directory}/bpftool-net-status.json"
+    bpftool -j link show >"${directory}/bpftool-link.json" \
+        2>"${directory}/bpftool-link.err" || link_rc=$?
+    printf '{"available":%s,"exit_code":%s}\n' \
+        "$([ "${link_rc}" -eq 0 ] && printf true || printf false)" "${link_rc}" \
+        >"${directory}/bpftool-link-status.json"
     for map_name in POLICY_TABLE SRC_IPV4_TRIE DST_IPV4_TRIE SRC_IPV6_TRIE DST_IPV6_TRIE \
             ACL_SRC_IPV4_TRIE ACL_DST_IPV4_TRIE ACL_SRC_IPV6_TRIE ACL_DST_IPV6_TRIE; do
         capture_optional_map "${directory}" "${map_name}" || return 1
@@ -1135,6 +1396,13 @@ cleanup_managed_transaction_smoke() {
     if ! restore_renamed_pins; then
         pin_restoration_succeeded=false
         record_cleanup_error "restore-renamed-pins failed"
+    fi
+    if [ "${DIRECT_SNAPSHOT_MODE}" = "true" ] && [ "${body_rc}" -ne 0 ]; then
+        # The outer isolated runner owns all synthetic state. Stop the faulted
+        # process and let that runner remove its private pins/state atomically.
+        docker rm -f "${DATAPATH_SERVICE_NAME}" >/dev/null 2>&1 || true
+        TARGET_ROLLBACK_ARMED=false
+        DATAPATH_RESTORE_ARMED=false
     fi
     if [ "${pin_restoration_succeeded}" = "true" ] && \
             [ "${GUARD_REFUSED}" = "false" ] && \

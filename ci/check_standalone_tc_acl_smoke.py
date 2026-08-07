@@ -32,7 +32,8 @@ def main():
     if not bash:
         print("ERROR: bash is required to validate standalone TC ACL smoke")
         return 1
-    if subprocess.call([bash, "-n", SMOKE]) != 0:
+    smoke_path = os.path.relpath(SMOKE, ROOT).replace(os.sep, "/")
+    if subprocess.call([bash, "-n", smoke_path], cwd=ROOT) != 0:
         return 1
     with open(SMOKE, encoding="utf-8") as handle:
         source = handle.read()

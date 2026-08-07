@@ -286,6 +286,10 @@ def check_production_acl_smoke():
         "event_batch_drained",
         "pending_generation",
         "BAD_LOG_PATTERN",
+        "STARTUP_BAD_LOG_PATTERN",
+        "observation_log_cursor_reset",
+        "status_health_signature",
+        "baseline_health_signature",
         "KEEP_ENABLED",
         "config_restored",
         "rpc_p2_soak=pass",
@@ -323,6 +327,19 @@ def check_production_acl_smoke():
             raise SystemExit("ERROR: stage-two release governance missing %s" % term)
 
 
+def check_datapath_apply_error_observability():
+    print("==> checking datapath apply error observability")
+    neutron_api = _read(os.path.join("agent", "src", "neutron_api.rs"))
+    if "reason = %attach_error_reason" not in neutron_api:
+        raise SystemExit(
+            "ERROR: Neutron attach failure log must include the concrete reason"
+        )
+    if "reason = %domain_error_reason" not in neutron_api:
+        raise SystemExit(
+            "ERROR: Neutron domain reconcile failure log must include the concrete reason"
+        )
+
+
 def main():
     # Executable behavior is owned by the required full Python discovery in
     # check_neutron_stage1.py.  This script intentionally checks only artifacts
@@ -330,6 +347,7 @@ def main():
     check_plugin_entrypoint()
     check_neutron_server_contract_files()
     check_production_acl_smoke()
+    check_datapath_apply_error_observability()
     print("stage-two static/artifact contract passed")
     print("evidence_class=static_artifact")
     print("runtime_evidence=not_evaluated")

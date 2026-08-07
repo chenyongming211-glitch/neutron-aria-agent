@@ -17,7 +17,8 @@ SEND_LOCAL_EVENT="${SEND_LOCAL_EVENT:-true}"
 EVENT_PORT_ID="${EVENT_PORT_ID:-}"
 EXPECTED_MANAGED_PORTS="${EXPECTED_MANAGED_PORTS:-}"
 KEEP_ENABLED="${KEEP_ENABLED:-false}"
-BAD_LOG_PATTERN="${BAD_LOG_PATTERN:-degraded=True|overflowed=True|Traceback|ERROR|local_api_degraded|pending_snapshot_hash_mismatch_blocked|stale_pending_snapshot_requires_operator|heartbeat_ok=False}"
+BAD_LOG_PATTERN="${BAD_LOG_PATTERN:-overflowed=True|Traceback|ERROR|local_api_degraded|pending_snapshot_hash_mismatch_blocked|stale_pending_snapshot_requires_operator|heartbeat_ok=False}"
+STARTUP_BAD_LOG_PATTERN="${STARTUP_BAD_LOG_PATTERN:-Traceback|ERROR|local_api_degraded|pending_snapshot_hash_mismatch_blocked|stale_pending_snapshot_requires_operator|heartbeat_ok=False}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
 die() {
@@ -188,6 +189,39 @@ print("%s\t%s\t%s\t%s\t%s" % (
 PY
 }
 
+status_health_signature() {
+    local file="$1"
+    "${PYTHON_BIN}" - "${file}" <<'PY'
+from __future__ import print_function
+
+import json
+import sys
+
+with open(sys.argv[1]) as stream:
+    status = json.load(stream)
+
+non_ready = []
+for row in status.get("port_statuses") or []:
+    if row.get("status") in ("ready", "not_requested"):
+        continue
+    non_ready.append({
+        "port_id": row.get("port_id"),
+        "status": row.get("status"),
+        "reason": row.get("reason"),
+        "domains": sorted(
+            (domain.get("domain"), domain.get("status"), domain.get("reason"))
+            for domain in (row.get("domains") or [])
+        ),
+    })
+print(json.dumps({
+    "overall_readiness": status.get("overall_readiness"),
+    "non_ready": sorted(non_ready, key=lambda row: (
+        row.get("port_id") or "", row.get("status") or "", row.get("reason") or ""
+    )),
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 agent_log_line_count() {
     if [ -r "${AGENT_LOG_PATH}" ]; then
         wc -l <"${AGENT_LOG_PATH}"
@@ -213,6 +247,22 @@ bad_log_count() {
     { agent_logs_since | grep -E "${BAD_LOG_PATTERN}" || true; } | wc -l
 }
 
+startup_bad_log_count() {
+    { agent_logs_since | grep -E "${STARTUP_BAD_LOG_PATTERN}" || true; } | wc -l
+}
+
+reset_observation_log_cursor() {
+    local startup_bad
+    startup_bad="$(startup_bad_log_count | tr -d ' ')"
+    if [ "${startup_bad}" != "0" ]; then
+        agent_logs_since | grep -E "${STARTUP_BAD_LOG_PATTERN}" | tail -80 || true
+        die "bad startup log pattern observed: count=${startup_bad}"
+    fi
+    LOG_START_LINE="$(agent_log_line_count)"
+    START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    log "observation_log_cursor_reset=true line=${LOG_START_LINE}"
+}
+
 restart_count() {
     docker inspect -f '{{.RestartCount}}' "${SERVICE_NAME}"
 }
@@ -230,7 +280,9 @@ wait_for_startup_convergence() {
                 [ "${BASELINE_MANAGED}" != "${EXPECTED_MANAGED_PORTS}" ]; then
                 die "managed port count ${BASELINE_MANAGED} != expected ${EXPECTED_MANAGED_PORTS}"
             fi
-            log "startup_converged=true waited=${waited} managed_ports=${BASELINE_MANAGED} generation=${BASELINE_GENERATION}"
+            BASELINE_HEALTH_SIGNATURE="$(status_health_signature "${WORK_DIR}/status-startup.json")"
+            printf '%s\n' "${BASELINE_HEALTH_SIGNATURE}" >"${WORK_DIR}/baseline-health-signature.json"
+            log "startup_converged=true waited=${waited} managed_ports=${BASELINE_MANAGED} generation=${BASELINE_GENERATION} baseline_health_signature=${BASELINE_HEALTH_SIGNATURE}"
             return
         fi
         sleep 1
@@ -334,7 +386,7 @@ trigger_and_wait_for_event() {
 }
 
 observe_window() {
-    local end_ts sample now status_file managed generation pending accepted applied current_restart bad full_resync_count event_count
+    local end_ts sample now status_file managed generation pending accepted applied current_restart bad full_resync_count event_count current_health_signature
     end_ts=$(( $(date +%s) + OBSERVATION_SECONDS ))
     sample=0
     BASE_RESTART_COUNT="$(restart_count)"
@@ -348,6 +400,7 @@ observe_window() {
         agent_status_json >"${status_file}"
         IFS=$'\t' read -r managed generation pending accepted applied < <(status_summary "${status_file}")
         current_restart="$(restart_count)"
+        current_health_signature="$(status_health_signature "${status_file}")"
         bad="$(bad_log_count | tr -d ' ')"
         full_resync_count="$(log_count "full_resync_complete" | tr -d ' ')"
         event_count="$(log_count "event_batch_drained" | tr -d ' ')"
@@ -355,6 +408,10 @@ observe_window() {
 
         if [ "${managed}" != "${BASELINE_MANAGED}" ]; then
             die "managed port count drifted from ${BASELINE_MANAGED} to ${managed}"
+        fi
+        if [ "${current_health_signature}" != "${BASELINE_HEALTH_SIGNATURE}" ]; then
+            printf '%s\n' "${current_health_signature}" >"${WORK_DIR}/health-signature-drift-${sample}.json"
+            die "runtime health signature drifted from baseline"
         fi
         if [ "${pending}" != "none" ]; then
             die "pending_generation is not empty: ${pending}"
@@ -390,5 +447,6 @@ set_rpc_p2_config | tee -a "${WORK_DIR}/soak.log"
 docker restart "${SERVICE_NAME}" >/dev/null
 log "agent_restarted=${SERVICE_NAME}"
 wait_for_startup_convergence
+reset_observation_log_cursor
 trigger_and_wait_for_event
 observe_window

@@ -46,6 +46,14 @@ def list_rules():
     return dict(ARIA_ACL_POLICIES)
 
 
+def _replace_file(source, destination):
+    replace = getattr(os, "replace", None)
+    if replace is not None:
+        replace(source, destination)
+    else:
+        os.rename(source, destination)
+
+
 def merge_policy_file(path):
     """Merge ACL rules without changing an existing policy file's identity."""
     previous_stat = None
@@ -70,7 +78,7 @@ def merge_policy_file(path):
         with open(tmp, "w") as handle:
             json.dump(data, handle, indent=4, sort_keys=True)
             handle.write("\n")
-        os.rename(tmp, path)
+        _replace_file(tmp, path)
         if previous_stat is None:
             os.chmod(path, 0o644)
         else:

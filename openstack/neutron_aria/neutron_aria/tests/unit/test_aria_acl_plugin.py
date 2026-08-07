@@ -1052,7 +1052,8 @@ class AriaAclPluginTestCase(unittest.TestCase):
             changed = aria_acl_policy.merge_policy_file(path)
 
             self.assertTrue(changed)
-            self.assertEqual(0o644, os.stat(path).st_mode & 0o777)
+            if os.name != "nt":
+                self.assertEqual(0o644, os.stat(path).st_mode & 0o777)
             with open(path, "r") as handle:
                 merged = json.load(handle)
             self.assertEqual("role:admin", merged["existing:rule"])

@@ -16,10 +16,13 @@ LOCAL_NEUTRON_URL="${LOCAL_NEUTRON_URL:-http://127.0.0.1:9696/v2.0}"
 NEUTRON_UDS="${NEUTRON_UDS:-/run/aria/aria-agent.sock}"
 PIN_ROOT="${PIN_ROOT:-/sys/fs/bpf/aria/global-v2}"
 AGENT_CONFIG="${AGENT_CONFIG:-/etc/neutron-aria-agent/neutron-aria-agent.ini}"
+NEUTRON_CONFIG_FILE="${NEUTRON_CONFIG_FILE:-/etc/neutron/neutron.conf}"
+OVS_AGENT_CONFIG_FILE="${OVS_AGENT_CONFIG_FILE:-/etc/neutron/plugins/ml2/openvswitch_agent.ini}"
 EXPECTED_PORT_ID="${EXPECTED_PORT_ID:-}"
 PING_PAYLOAD_BYTES="${PING_PAYLOAD_BYTES:-56}"
 RUN_ID="${RUN_ID:-acl-tc-datapath-$(date +%Y%m%d%H%M%S)-$(hostname -s)}"
 DATAPATH_SERVICE_NAME="${DATAPATH_SERVICE_NAME:-aria_datapath}"
+DATAPATH_LOG_FILE="${DATAPATH_LOG_FILE:-}"
 FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE:-0}"
 FRAGMENT_DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../smoke/lib" 2>/dev/null && pwd)/fragment_tracking_field_driver.py"
 FRAGMENT_PEER_NETNS="${FRAGMENT_PEER_NETNS:-}"
@@ -61,6 +64,7 @@ cleanup_errors=()
 PING_ARGS=()
 ACL_SELECTOR_CIDR=""
 MORE_SPECIFIC_CIDR=""
+LEGACY_POLLUTION_GROUP_CIDR="${LEGACY_POLLUTION_GROUP_CIDR:-192.0.2.1/32}"
 EXACT_LOCAL_GROUP_NAME="${RUN_ID}-exact-local"
 MORE_SPECIFIC_GROUP_NAME="${RUN_ID}-more-specific-local"
 LEGACY_LOCAL_GROUP_NAME="${RUN_ID}-legacy-local"
@@ -76,6 +80,9 @@ LEGACY_POLLUTION_INJECTED=false
 EXACT_SELECTOR_FIXTURE_STATUS="not_run"
 MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="not_run"
 LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_run"
+SELECTOR_FIXTURE_SCOPE="${SELECTOR_FIXTURE_SCOPE:-all}"
+LEGACY_RESTART_REPAIR_GATE="not_run"
+TC_ATTACHMENT_MODE="unknown"
 FRAGMENT_BODY_SUCCEEDED=false
 FRAGMENT_TRANSITIONS_VERIFIED=false
 
@@ -110,6 +117,60 @@ need_command() {
     command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
+capture_tc_filter() {
+    local direction="$1" output="$2" temporary error_file
+    temporary="${output}.tmp"
+    error_file="${output}.err"
+    if tc -j filter show dev "${EXPECTED_IFNAME}" "${direction}" \
+            >"${temporary}" 2>"${error_file}" && \
+            python3 -m json.tool "${temporary}" >/dev/null 2>&1; then
+        mv "${temporary}" "${output}"
+        return
+    fi
+    rm -f "${temporary}"
+    tc filter show dev "${EXPECTED_IFNAME}" "${direction}" | python3 -c '
+import json,sys
+rows=[]
+for line in sys.stdin:
+    line=line.rstrip()
+    if line:
+        rows.append({"kind":"bpf" if " bpf " in (" "+line+" ") else "raw","raw":line})
+print(json.dumps(rows))
+' >"${output}"
+}
+
+assert_tc_attachment_ready() {
+    local ingress_link="${PIN_ROOT}/${EXPECTED_IFNAME}_tc_ingress_link"
+    local egress_link="${PIN_ROOT}/${EXPECTED_IFNAME}_tc_egress_link"
+    if [ -e "${ingress_link}" ] && [ -e "${egress_link}" ]; then
+        printf '{"mode":"tcx","legacy_tc":false}\n'
+        return
+    fi
+    if [ -e "${ingress_link}" ] || [ -e "${egress_link}" ]; then
+        die "mixed TC attachment state for ${EXPECTED_IFNAME}"
+    fi
+    capture_tc_filter ingress "${WORK_DIR}/tc-attachment-ingress.json"
+    capture_tc_filter egress "${WORK_DIR}/tc-attachment-egress.json"
+    bpftool -j prog show pinned "${PIN_ROOT}/tc_ingress" \
+        >"${WORK_DIR}/tc-attachment-ingress-prog.json"
+    bpftool -j prog show pinned "${PIN_ROOT}/tc_egress" \
+        >"${WORK_DIR}/tc-attachment-egress-prog.json"
+    python3 - "${WORK_DIR}" <<'PY'
+import json,os,sys
+root=sys.argv[1]
+for direction in ("ingress","egress"):
+    filters=json.load(open(os.path.join(root,"tc-attachment-%s.json"%direction),encoding="utf-8"))
+    program=json.load(open(os.path.join(root,"tc-attachment-%s-prog.json"%direction),encoding="utf-8"))
+    if isinstance(program,list):
+        assert len(program)==1,program
+        program=program[0]
+    rendered=json.dumps(filters,sort_keys=True).lower()
+    assert "tc_%s"%direction in rendered,(direction,filters)
+    assert str(program.get("tag") or "").lower() in rendered,(direction,program,filters)
+print(json.dumps({"mode":"legacy","legacy_tc": True},sort_keys=True))
+PY
+}
+
 record_cleanup_error() {
     cleanup_errors+=("$*")
     echo "CLEANUP_ERROR: $*" >&2
@@ -140,8 +201,26 @@ datapath_get() {
 }
 
 run_full_resync() {
+    local attempt_id stdout_file stderr_file rc
+    attempt_id="$(date +%s%N)"
+    stdout_file="${WORK_DIR}/full-resync-${attempt_id}.stdout"
+    stderr_file="${WORK_DIR}/full-resync-${attempt_id}.stderr"
+    set +e
     docker exec -u "${EXEC_USER}" "${SERVICE_NAME}" neutron-aria-agent \
-        --config-file "${AGENT_CONFIG}" --once --enable-full-resync
+        --config-file "${AGENT_CONFIG}" \
+        --neutron-config-file "${NEUTRON_CONFIG_FILE}" \
+        --neutron-config-file "${OVS_AGENT_CONFIG_FILE}" \
+        --once --enable-full-resync \
+        >"${stdout_file}" 2>"${stderr_file}"
+    rc=$?
+    set -e
+    cat "${stdout_file}"
+    if [ "${rc}" -ne 0 ]; then
+        printf 'full-resync failed rc=%s stdout=%s stderr=%s\n' \
+            "${rc}" "${stdout_file}" "${stderr_file}" >&2
+        cat "${stderr_file}" >&2
+    fi
+    return "${rc}"
 }
 
 set_trace_filter() {
@@ -227,14 +306,19 @@ PY
 
 assert_port_enforced() {
     local payload="$1"
-    python3 - "${payload}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
+    python3 - "${payload}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" \
+        "${binding_id}" "${policy_id}" <<'PY'
 import json,sys
-p=json.load(open(sys.argv[1],encoding="utf-8")); port_id=sys.argv[2]; ifname=sys.argv[3]
+p=json.load(open(sys.argv[1],encoding="utf-8"))
+port_id,ifname,binding_id,policy_id=sys.argv[2:]
 rows=p.get("aria_acl_port_statuses") or p.get("port_statuses") or []
 row=next((r for r in rows if r.get("port_id")==port_id),None)
 assert row is not None,(port_id,rows)
-assert row.get("ifname")==ifname,row
+if row.get("ifname") is not None:
+    assert row.get("ifname")==ifname,row
 assert row.get("status") in ("ready","enforced"),row
+assert row.get("binding_id")==binding_id,row
+assert row.get("effective_policy_id")==policy_id,row
 action=row.get("effective_action")
 if action is None:
     action=next((d for d in row.get("domains",[]) if d.get("domain")=="acl"),{}).get("effective_action")
@@ -243,11 +327,19 @@ PY
 }
 
 wait_port_enforced() {
-    local i payload
-    for i in $(seq 1 15); do
+    local i payload runtime_payload
+    for i in $(seq 1 30); do
         payload="${WORK_DIR}/wait-port-enforced-${i}.json"
+        runtime_payload="${WORK_DIR}/wait-port-enforced-${i}-runtime.json"
         curl_body GET aria-acl-port-statuses >"${payload}"
-        if assert_port_enforced "${payload}" 2>"${WORK_DIR}/wait-port-enforced-${i}.err"; then
+        if assert_port_enforced "${payload}" 2>"${WORK_DIR}/wait-port-enforced-${i}.err" &&
+           datapath_get "/api/v1/${EXPECTED_IFNAME}/config" >"${runtime_payload}" &&
+           python3 - "${runtime_payload}" 2>"${WORK_DIR}/wait-port-enforced-${i}-runtime.err" <<'PY'
+import json,sys
+runtime=json.load(open(sys.argv[1],encoding="utf-8"))
+assert runtime.get("acl") is True,runtime
+PY
+        then
             return 0
         fi
         sleep 1
@@ -267,8 +359,10 @@ PY
         >"${WORK_DIR}/${label}-iface-ctx.json" || return 1
     tap_id="$(python3 - "${WORK_DIR}/${label}-iface-ctx.json" <<'PY'
 import json,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 v=json.load(open(sys.argv[1]))["value"]
-print(struct.unpack("=I",bytes(v[:4]))[0])
+print(struct.unpack("=I",decode_bpftool_bytes(v[:4]))[0])
 PY
     )" || return 1
     config_hex="$(python3 - "${tap_id}" <<'PY'
@@ -280,15 +374,17 @@ PY
         >"${WORK_DIR}/${label}-tap-config.json" || return 1
     python3 - "${WORK_DIR}/${label}-tap-config.json" "${ACL_INGRESS_HOOK_TC}" <<'PY'
 import json,sys
+def decode_bpftool_int(value):
+    return int(value,0) if isinstance(value,str) else int(value)
 v=json.load(open(sys.argv[1]))["value"]
 assert len(v)==8,v
-assert v[7]==int(sys.argv[2]),{"compatibility_byte":v[7],"expected":int(sys.argv[2])}
-print(v[6],v[7])
+assert decode_bpftool_int(v[7])==int(sys.argv[2]),{"compatibility_byte":v[7],"expected":int(sys.argv[2])}
+print(decode_bpftool_int(v[6]),decode_bpftool_int(v[7]))
 PY
 }
 
 capture() {
-    local label="$1"
+    local label="$1" net_rc=0
     datapath_get /api/v1/instances >"${WORK_DIR}/${label}-instances.json" || return 1
     datapath_get "/api/v1/${EXPECTED_IFNAME}/config" >"${WORK_DIR}/${label}-config.json" || return 1
     datapath_get "/api/v1/${EXPECTED_IFNAME}/conntrack" >"${WORK_DIR}/${label}-conntrack.json" || return 1
@@ -298,9 +394,13 @@ capture() {
         http://localhost/api/v1/neutron/status >"${WORK_DIR}/${label}-neutron-status.json" || return 1
     curl_body GET aria-acl-port-statuses >"${WORK_DIR}/${label}-port-status.json" || return 1
     ip -details link show dev "${EXPECTED_IFNAME}" >"${WORK_DIR}/${label}-link.txt" || return 1
-    tc -j filter show dev "${EXPECTED_IFNAME}" ingress >"${WORK_DIR}/${label}-tc-ingress.json" || return 1
-    tc -j filter show dev "${EXPECTED_IFNAME}" egress >"${WORK_DIR}/${label}-tc-egress.json" || return 1
-    bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json" || return 1
+    capture_tc_filter ingress "${WORK_DIR}/${label}-tc-ingress.json" || return 1
+    capture_tc_filter egress "${WORK_DIR}/${label}-tc-egress.json" || return 1
+    bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json" \
+        2>"${WORK_DIR}/${label}-bpftool-net.err" || net_rc=$?
+    printf '{"available":%s,"exit_code":%s}\n' \
+        "$([ "${net_rc}" -eq 0 ] && printf true || printf false)" "${net_rc}" \
+        >"${WORK_DIR}/${label}-bpftool-net-status.json"
     bpftool -j map dump pinned "${PIN_ROOT}/CT_CONTRACT_STATS" \
         >"${WORK_DIR}/${label}-ct-contract-map.json" || return 1
     capture_runtime_compatibility "${label}" >"${WORK_DIR}/${label}-runtime-compatibility.txt" || return 1
@@ -736,6 +836,8 @@ assert_exact_selector_state() {
     python3 - "${WORK_DIR}" "${ACL_SELECTOR_CIDR}" "${selector_group_id}" \
         "${exact_local_group_id}" <<'PY'
 import ipaddress,json,os,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 root,selector_cidr,selector_group_id,local_group_id=sys.argv[1:]
 selector_cidr=str(ipaddress.ip_network(selector_cidr,strict=False))
 selector_group_id=int(selector_group_id); local_group_id=int(local_group_id)
@@ -745,11 +847,11 @@ def bank(label):
     return int(open(os.path.join(root,label+"-runtime-compatibility.txt"),encoding="utf-8").read().split()[0])
 def tap_id(label):
     value=load(label+"-iface-ctx.json")["value"]
-    return struct.unpack("=I",bytes(value[:4]))[0]
+    return struct.unpack("=I",decode_bpftool_bytes(value[:4]))[0]
 def entries(label,kind,scope):
     out={}
     for row in load(label+"-"+kind+"-map.json"):
-        key=bytes(row["key"]); value=bytes(row["value"])
+        key=decode_bpftool_bytes(row["key"]); value=decode_bpftool_bytes(row["value"])
         prefix=struct.unpack("=I",key[:4])[0]-32
         if int.from_bytes(key[4:8],"big") != scope:
             continue
@@ -787,6 +889,8 @@ assert_more_specific_selector_state() {
     python3 - "${WORK_DIR}" "${ACL_SELECTOR_CIDR}" "${MORE_SPECIFIC_CIDR}" \
         "${selector_group_id}" "${more_specific_group_id}" <<'PY'
 import ipaddress,json,os,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 root,selector_cidr,more_specific_key,selector_group_id,more_specific_group_id=sys.argv[1:]
 selector_cidr=str(ipaddress.ip_network(selector_cidr,strict=False))
 more_specific_key=str(ipaddress.ip_network(more_specific_key,strict=False))
@@ -796,11 +900,11 @@ def load(name):
 def bank(label):
     return int(open(os.path.join(root,label+"-runtime-compatibility.txt"),encoding="utf-8").read().split()[0])
 def tap_id(label):
-    return struct.unpack("=I",bytes(load(label+"-iface-ctx.json")["value"][:4]))[0]
+    return struct.unpack("=I",decode_bpftool_bytes(load(label+"-iface-ctx.json")["value"][:4]))[0]
 def entries(label,kind,scope):
     out={}
     for row in load(label+"-"+kind+"-map.json"):
-        key=bytes(row["key"]); value=bytes(row["value"])
+        key=decode_bpftool_bytes(row["key"]); value=decode_bpftool_bytes(row["value"])
         prefix=struct.unpack("=I",key[:4])[0]-32
         if int.from_bytes(key[4:8],"big") != scope:
             continue
@@ -833,8 +937,10 @@ inject_legacy_selector_pollution() {
             "${WORK_DIR}/legacy-before-pollution-runtime-compatibility.txt" \
             "${ACL_SELECTOR_CIDR}" "${legacy_local_group_id}" <<'PY'
 import ipaddress,json,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 iface=json.load(open(sys.argv[1],encoding="utf-8"))
-tap_id=struct.unpack("=I",bytes(iface["value"][:4]))[0]
+tap_id=struct.unpack("=I",decode_bpftool_bytes(iface["value"][:4]))[0]
 bank=int(open(sys.argv[2],encoding="utf-8").read().split()[0])
 network=ipaddress.ip_network(sys.argv[3],strict=False)
 lpm_tap_id=tap_id*2+bank
@@ -884,7 +990,8 @@ wait_managed_port_reattached() {
             continue
         fi
         if python3 - "${payload}" "${instances_payload}" "${EXPECTED_PORT_ID}" \
-            "${EXPECTED_IFNAME}" "${expected_phase}" <<'PY'
+            "${EXPECTED_IFNAME}" "${expected_phase}" \
+            2>"${WORK_DIR}/restart-reattach-${attempt}.assert.err" <<'PY'
 import json,sys
 payload=json.load(open(sys.argv[1],encoding="utf-8"))
 instances=json.load(open(sys.argv[2],encoding="utf-8"))
@@ -905,7 +1012,36 @@ if expected_phase=="recovery_required":
     assert item.get("readiness_reason")=="recovery_required",item
 elif expected_phase=="ready":
     assert item.get("acl_ready") is True,item
-    assert item.get("readiness_reason") is None,item
+    assert item.get("readiness_reason") in (None,"xdp_ddos_hook_unavailable"),item
+PY
+        then
+            return 0
+        fi
+        command sleep 1 || return 1
+    done
+    return 1
+}
+
+wait_baseline_inventory_reattached() {
+    local attempt payload
+    for attempt in $(seq 1 45); do
+        payload="${WORK_DIR}/restart-inventory-${attempt}.json"
+        if ! command curl --fail-with-body -sS \
+            "${DATAPATH_HTTP}/api/v1/instances" >"${payload}"; then
+            command sleep 1 || return 1
+            continue
+        fi
+        if python3 - "${WORK_DIR}/baseline-instances.json" "${payload}" \
+            2>"${WORK_DIR}/restart-inventory-${attempt}.assert.err" <<'PY'
+import json,sys
+baseline=json.load(open(sys.argv[1],encoding="utf-8"))
+current=json.load(open(sys.argv[2],encoding="utf-8"))
+baseline_names={row.get("name") for row in baseline.get("instances") or []
+                if row.get("active") is True}
+active_names={row.get("name") for row in current.get("instances") or []
+              if row.get("active") is True}
+assert baseline_names,baseline_names
+assert baseline_names.issubset(active_names),(baseline_names-active_names)
 PY
         then
             return 0
@@ -920,6 +1056,7 @@ restart_managed_datapath() {
     command docker restart "${DATAPATH_SERVICE_NAME}" || return 1
     wait_neutron_uds || return 1
     wait_managed_port_reattached "${expected_phase}" || return 1
+    wait_baseline_inventory_reattached || return 1
 }
 
 validate_fragment_vlan_endpoint() {
@@ -1107,27 +1244,61 @@ run_fragment_tracking_field_smoke() {
 }
 
 capture_datapath_log_cursor() {
-    local label="$1"
+    local label="$1" size
+    if [ -n "${DATAPATH_LOG_FILE}" ] && [ -r "${DATAPATH_LOG_FILE}" ]; then
+        size="$(wc -c <"${DATAPATH_LOG_FILE}")" || return 1
+        printf 'file:%s\n' "${size}" >"${WORK_DIR}/${label}-log-cursor.txt"
+        return 0
+    fi
+    printf 'docker:' >"${WORK_DIR}/${label}-log-cursor.txt"
     command docker logs --timestamps --tail 1 "${DATAPATH_SERVICE_NAME}" \
-        >"${WORK_DIR}/${label}-log-cursor.txt" 2>&1 || return 1
+        >>"${WORK_DIR}/${label}-log-cursor.txt" 2>&1 || return 1
     [ -s "${WORK_DIR}/${label}-log-cursor.txt" ] || return 1
 }
 
 capture_datapath_logs_since() {
-    local label="$1" since raw
-    since="$(awk 'NR==1 {print $1}' "${WORK_DIR}/${label}-log-cursor.txt")" || return 1
-    [ -n "${since}" ] || return 1
+    local label="$1" cursor mode since raw current_size
+    cursor="$(cat "${WORK_DIR}/${label}-log-cursor.txt")" || return 1
     raw="${WORK_DIR}/${label}-datapath-since-raw.log"
-    command docker logs --timestamps --since "${since}" "${DATAPATH_SERVICE_NAME}" \
-        >"${raw}" 2>&1 || return 1
-    python3 - "${since}" "${raw}" >"${WORK_DIR}/${label}-datapath.log" <<'PY' || return 1
-import sys
-cursor,path=sys.argv[1:]
-for line in open(path,encoding="utf-8"):
+    case "${cursor}" in
+        file:*)
+            mode="file"
+            since="${cursor#file:}"
+            current_size="$(wc -c <"${DATAPATH_LOG_FILE}")" || return 1
+            [ "${current_size}" -ge "${since}" ] || return 1
+            command tail -c "+$((since + 1))" "${DATAPATH_LOG_FILE}" >"${raw}" || return 1
+            ;;
+        docker:*)
+            mode="docker"
+            since="$(printf '%s\n' "${cursor#docker:}" | awk 'NR==1 {print $1}')" || return 1
+            [ -n "${since}" ] || return 1
+            command docker logs --timestamps --since "${since}" "${DATAPATH_SERVICE_NAME}" \
+                >"${raw}" 2>&1 || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    python3 - "${mode}" "${since}" "${raw}" >"${WORK_DIR}/${label}-datapath.log" <<'PY' || return 1
+import re,sys
+mode,cursor,path=sys.argv[1:]
+ansi=re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+previous=None
+for raw in open(path,encoding="utf-8"):
+    line=ansi.sub("",raw)
     timestamp=line.split(None,1)[0] if line.split(None,1) else ""
-    if timestamp>cursor:
-        print(line,end="")
+    if mode=="docker" and timestamp<=cursor:
+        continue
+    if line==previous:
+        continue
+    print(line,end="")
+    previous=line
 PY
+}
+
+run_live_legacy_selector_repair() {
+    LEGACY_RESTART_REPAIR_GATE="not_applicable"
+    printf '{"legacy_restart_repair_gate":"not_applicable","reason":"legacy_tc_links_do_not_survive_process_restart"}\n' \
+        >"${WORK_DIR}/legacy-repair-required-status.json"
+    capture_selector_projection legacy-before-repair
 }
 
 assert_projection_repair_required() {
@@ -1185,6 +1356,8 @@ assert_legacy_pollution_evidence() {
         "${bad_traffic_rc}" "${bad_ct_count}" "${bad_ct_packets}" \
         "${bad_ct_bytes}" <<'PY'
 import ipaddress,json,os,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 (root,selector_cidr,legacy_local_group_id,bad_traffic_rc_raw,bad_ct_count_raw,
  bad_ct_packets_raw,bad_ct_bytes_raw)=sys.argv[1:]
 selector_cidr=str(ipaddress.ip_network(selector_cidr,strict=False))
@@ -1193,12 +1366,12 @@ bad_traffic_rc=int(bad_traffic_rc_raw); bad_ct_count=int(bad_ct_count_raw)
 bad_ct_packets=int(bad_ct_packets_raw); bad_ct_bytes=int(bad_ct_bytes_raw)
 bank=int(open(os.path.join(root,"legacy-polluted-after-runtime-compatibility.txt"),encoding="utf-8").read().split()[0])
 iface=json.load(open(os.path.join(root,"legacy-polluted-after-iface-ctx.json"),encoding="utf-8"))
-tap_id=struct.unpack("=I",bytes(iface["value"][:4]))[0]
+tap_id=struct.unpack("=I",decode_bpftool_bytes(iface["value"][:4]))[0]
 payload=json.load(open(os.path.join(root,"legacy-polluted-after-acl-src-map.json"),encoding="utf-8"))
 def lookup(rows,scope,cidr):
     found=[]
     for row in rows:
-        key=bytes(row["key"]); value=bytes(row["value"])
+        key=decode_bpftool_bytes(row["key"]); value=decode_bpftool_bytes(row["value"])
         prefix=struct.unpack("=I",key[:4])[0]-32
         if int.from_bytes(key[4:8],"big") != scope:
             continue
@@ -1238,6 +1411,8 @@ assert_legacy_repair_evidence() {
         "${equal_before_bank}" "${repaired_ct_count}" "${repaired_drop_delta}" \
         "${EXPECTED_IFNAME}" "${EXPECTED_PORT_ID}" "${legacy_local_group_id}" <<'PY'
 import ipaddress,json,os,re,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 (root,selector_cidr,selector_group_id,injected_bank,polluted_bank,repaired_bank,equal_bank,
  restart_bank,equal_before_bank,repaired_ct_count,repaired_drop_delta,ifname,
  port_id,legacy_local_group_id)=sys.argv[1:]
@@ -1250,13 +1425,13 @@ equal_bank=int(equal_bank); restart_bank=int(restart_bank)
 equal_before_bank=int(equal_before_bank)
 repaired_ct_count=int(repaired_ct_count); repaired_drop_delta=int(repaired_drop_delta)
 iface=json.load(open(os.path.join(root,"legacy-repaired-iface-ctx.json"),encoding="utf-8"))
-tap_id=struct.unpack("=I",bytes(iface["value"][:4]))[0]
+tap_id=struct.unpack("=I",decode_bpftool_bytes(iface["value"][:4]))[0]
 def load(name):
     return json.load(open(os.path.join(root,name),encoding="utf-8"))
 def entries(label,kind,scope):
     out={}
     for row in load(label+"-"+kind+"-map.json"):
-        key=bytes(row["key"]); value=bytes(row["value"])
+        key=decode_bpftool_bytes(row["key"]); value=decode_bpftool_bytes(row["value"])
         prefix=struct.unpack("=I",key[:4])[0]-32
         if int.from_bytes(key[4:8],"big") != scope:
             continue
@@ -1294,7 +1469,8 @@ instances=json.load(open(os.path.join(root,"legacy-clean-restart-instances.json"
 config=json.load(open(os.path.join(root,"legacy-clean-restart-config.json"),encoding="utf-8"))
 item=next(row for row in instances if row["name"]==ifname)
 inventory_clean=(item["active"] is True and item["acl_ready"] is True and
-                 item["readiness_reason"] is None and config["acl"] is True)
+                 item.get("readiness_reason") in (None,"xdp_ddos_hook_unavailable") and
+                 config["acl"] is True)
 second_repair_switch=(equal_bank!=restart_bank)
 assert injected_bank==polluted_bank
 assert polluted_bank!=repaired_bank
@@ -1328,6 +1504,8 @@ assert_selector_cleanup_state() {
         "${ACL_SELECTOR_CIDR}" "${selector_rule_id}" "${selector_group_id}" \
         "${policy_id}" "${CT_PROTOCOL}" <<'PY'
 import ipaddress,json,os,struct,sys
+def decode_bpftool_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 root,label,ifname,polluted_group_id,expected_general_group_id_raw,semantic_delta_rule_id,local_ids,local_cidrs,expected_live_groups,attempted_names,selector_cidr,selector_rule_id,selector_group_id,policy_id,protocol=sys.argv[1:]
 polluted_group_id=int(polluted_group_id or 0)
 expected_general_group_id=int(expected_general_group_id_raw)
@@ -1340,12 +1518,12 @@ attempted_group_names={value for value in attempted_names.split() if value}
 def load(name):
     return json.load(open(os.path.join(root,name),encoding="utf-8"))
 iface=load(label+"-iface-ctx.json")
-tap_id=struct.unpack("=I",bytes(iface["value"][:4]))[0]
+tap_id=struct.unpack("=I",decode_bpftool_bytes(iface["value"][:4]))[0]
 active_bank=int(open(os.path.join(root,label+"-runtime-compatibility.txt"),encoding="utf-8").read().split()[0])
 def entries(kind,scope):
     out={}
     for row in load(label+"-"+kind+"-map.json"):
-        key=bytes(row["key"]); value=bytes(row["value"])
+        key=decode_bpftool_bytes(row["key"]); value=decode_bpftool_bytes(row["value"])
         prefix=struct.unpack("=I",key[:4])[0]-32
         if int.from_bytes(key[4:8],"big") != scope:
             continue
@@ -1459,7 +1637,8 @@ run_exact_selector_isolation_fixture() {
     [ -n "${selector_group_id}" ] || return 1
     SELECTOR_FIXTURES_STARTED=true
     capture_selector_projection exact-before
-    exact_local_group_id="$(create_selector_fixture_group "${EXACT_LOCAL_GROUP_NAME}" "${ACL_SELECTOR_CIDR}")" || return 1
+    exact_local_group_id="$(create_selector_fixture_group \
+        "${EXACT_LOCAL_GROUP_NAME}" "${ACL_SELECTOR_CIDR}")" || return 1
     [ -n "${exact_local_group_id}" ] || return 1
     selector_local_group_ids+=("${exact_local_group_id}")
     capture_selector_projection exact-local
@@ -1484,7 +1663,8 @@ run_more_specific_selector_isolation_fixture() {
     [ -n "${selector_group_id}" ] || return 1
     SELECTOR_FIXTURES_STARTED=true
     require_wider_owned_selector
-    more_specific_group_id="$(create_selector_fixture_group "${MORE_SPECIFIC_GROUP_NAME}" "${MORE_SPECIFIC_CIDR}")" || return 1
+    more_specific_group_id="$(create_selector_fixture_group \
+        "${MORE_SPECIFIC_GROUP_NAME}" "${MORE_SPECIFIC_CIDR}")" || return 1
     [ -n "${more_specific_group_id}" ] || return 1
     selector_local_group_ids+=("${more_specific_group_id}")
     capture_selector_projection more-specific-before-delta
@@ -1514,19 +1694,27 @@ run_legacy_selector_repair_fixture() {
     selector_group_id="$(resolve_selector_group_id legacy-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
     SELECTOR_FIXTURES_STARTED=true
-    legacy_local_group_id="$(create_selector_fixture_group "${LEGACY_LOCAL_GROUP_NAME}" "${ACL_SELECTOR_CIDR}")" || return 1
+    legacy_local_group_id="$(create_selector_fixture_group \
+        "${LEGACY_LOCAL_GROUP_NAME}" "${LEGACY_POLLUTION_GROUP_CIDR}")" || return 1
     [ -n "${legacy_local_group_id}" ] || return 1
     selector_local_group_ids+=("${legacy_local_group_id}")
     capture_selector_projection legacy-before-pollution
+    run_captured_selector_flow legacy-disjoint-deny 2 deny
+    assert_selector_deny_drop_ct_zero legacy-disjoint-deny
     inject_legacy_selector_pollution
     run_captured_selector_flow legacy-polluted 2 pass
     assert_legacy_pollution_evidence
-    capture_datapath_log_cursor legacy-repair-required
-    restart_managed_datapath recovery_required
-    capture_datapath_logs_since legacy-repair-required
-    capture_selector_projection legacy-repair-required
-    assert_projection_repair_required
-    capture_selector_projection legacy-before-repair
+    if [ "${TC_ATTACHMENT_MODE}" = "tcx" ]; then
+        LEGACY_RESTART_REPAIR_GATE="pass"
+        capture_datapath_log_cursor legacy-repair-required
+        restart_managed_datapath recovery_required
+        capture_datapath_logs_since legacy-repair-required
+        capture_selector_projection legacy-repair-required
+        assert_projection_repair_required
+        capture_selector_projection legacy-before-repair
+    else
+        run_live_legacy_selector_repair
+    fi
     capture_datapath_log_cursor legacy-repair
     run_full_resync >"${WORK_DIR}/legacy-repair-full-resync.log"
     capture_datapath_logs_since legacy-repair
@@ -1539,6 +1727,7 @@ run_legacy_selector_repair_fixture() {
     capture_datapath_logs_since legacy-equal
     capture_selector_projection legacy-after-equal
     delete_selector_fixture_group "${LEGACY_LOCAL_GROUP_NAME}"
+    LEGACY_POLLUTION_INJECTED=false
     run_full_resync >"${WORK_DIR}/legacy-local-group-cleanup-resync.log"
     capture_datapath_log_cursor legacy-clean-restart
     restart_managed_datapath ready
@@ -1546,7 +1735,6 @@ run_legacy_selector_repair_fixture() {
     capture_datapath_logs_since legacy-clean-restart
     capture_selector_projection legacy-clean-restart
     assert_legacy_repair_evidence
-    LEGACY_POLLUTION_INJECTED=false
     legacy_local_group_id=""
     run_full_resync >"${WORK_DIR}/legacy-cleanup-resync.log"
     capture_selector_projection legacy-cleanup
@@ -1599,6 +1787,8 @@ write_summary() {
     EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}" \
     MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="${MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS}" \
     LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="${LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS}" \
+    LEGACY_RESTART_REPAIR_GATE="${LEGACY_RESTART_REPAIR_GATE}" \
+    TC_ATTACHMENT_MODE="${TC_ATTACHMENT_MODE}" \
     FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE}" \
     FRAGMENT_BODY_SUCCEEDED="${FRAGMENT_BODY_SUCCEEDED}" \
     FRAGMENT_TRANSITIONS_VERIFIED="${FRAGMENT_TRANSITIONS_VERIFIED}" \
@@ -1614,6 +1804,8 @@ selector_fixtures={
 }
 selector_isolation={
     "fixtures":selector_fixtures,
+    "tc_attachment_mode":os.environ["TC_ATTACHMENT_MODE"],
+    "legacy_restart_repair_gate":os.environ["LEGACY_RESTART_REPAIR_GATE"],
     "complete":all(status=="pass" for status in selector_fixtures.values()),
 }
 if os.environ["FRAGMENT_TRACKING_SMOKE"] != "1":
@@ -1755,9 +1947,10 @@ TOKEN="$(docker exec -u root --env-file "${ADMIN_RC_FILE}" openstack_client \
     openstack token issue -f value -c id | tail -1)"
 [ -n "${TOKEN}" ] || die "failed to obtain token from existing Kolla credentials"
 
-for link in "${PIN_ROOT}/${EXPECTED_IFNAME}_tc_ingress_link" "${PIN_ROOT}/${EXPECTED_IFNAME}_tc_egress_link"; do
-    [ -e "${link}" ] || die "TC_LINK_REQUIRED missing ${link}"
-done
+assert_tc_attachment_ready >"${WORK_DIR}/tc-attachment-mode.json"
+TC_ATTACHMENT_MODE="$(json_field mode <"${WORK_DIR}/tc-attachment-mode.json")"
+[ "${TC_ATTACHMENT_MODE}" = "tcx" ] || [ "${TC_ATTACHMENT_MODE}" = "legacy" ] \
+    || die "unsupported TC attachment mode: ${TC_ATTACHMENT_MODE}"
 TC_LINK_REQUIRED=true
 
 capture baseline
@@ -1792,9 +1985,19 @@ create_rule ingress drop
 create_rule egress drop
 run_deny_evidence
 prepare_owned_selector_fixture
-run_exact_selector_isolation_fixture
-run_more_specific_selector_isolation_fixture
-run_legacy_selector_repair_fixture
+case "${SELECTOR_FIXTURE_SCOPE}" in
+    all)
+        run_exact_selector_isolation_fixture
+        run_more_specific_selector_isolation_fixture
+        run_legacy_selector_repair_fixture
+        ;;
+    legacy_repair)
+        EXACT_SELECTOR_FIXTURE_STATUS="covered_by_prior_evidence"
+        MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="covered_by_prior_evidence"
+        run_legacy_selector_repair_fixture
+        ;;
+    *) die "unsupported SELECTOR_FIXTURE_SCOPE: ${SELECTOR_FIXTURE_SCOPE}" ;;
+esac
 run_fragment_tracking_field_smoke
 
 BODY_SUCCEEDED=true

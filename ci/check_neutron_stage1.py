@@ -122,7 +122,7 @@ REQUIRED_PYTHON_BEHAVIORS = (
 )
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
-STATUS_FIXTURE_PATH = os.path.join("docs", "neutron-status-contract-v1-scenarios.json")
+STATUS_FIXTURE_PATH = "docs/neutron-status-contract-v1-scenarios.json"
 DOMAIN_STATUS_DOC_PATH = os.path.join(
     "docs", "openstack-neutron-aria-details", "05-domain-status-heartbeat.md"
 )
@@ -217,6 +217,10 @@ def read_json(path):
 def run(command, cwd=ROOT, env=None):
     print("==> %s" % " ".join(command))
     subprocess.check_call(command, cwd=cwd, env=env)
+
+
+def bash_path(*parts):
+    return os.path.join(*parts).replace(os.sep, "/")
 
 
 def python_client():
@@ -604,7 +608,7 @@ def run_smoke_syntax():
         print("SKIP: bash not found; cannot syntax-check smoke scripts")
         return
     for path in smoke_scripts():
-        run([bash, "-n", path])
+        run([bash, "-n", bash_path(path)])
 
 def run_fragment_tracking_field_driver_self_test():
     print("==> checking fragment tracking field driver")
@@ -620,7 +624,7 @@ def run_agent_package_installer_test():
         print("SKIP: bash not found; cannot test agent package rollback")
         return
     print("==> checking agent package first-install rollback")
-    run([bash, os.path.join("ci", "test_neutron_agent_package_installer.sh")])
+    run([bash, bash_path("ci", "test_neutron_agent_package_installer.sh")])
 
 
 def run_plugin_policy_rollback_test():
@@ -629,7 +633,7 @@ def run_plugin_policy_rollback_test():
         print("SKIP: bash not found; cannot test plugin policy rollback")
         return
     print("==> checking plugin policy first-install rollback")
-    run([bash, os.path.join(
+    run([bash, bash_path(
         "ci", "test_neutron_acl_plugin_policy_rollback.sh"
     )])
 
@@ -640,7 +644,7 @@ def run_transaction_state_smoke_test():
         print("SKIP: bash not found; cannot test transaction smoke coverage")
         return
     print("==> checking transaction smoke port coverage")
-    run([bash, os.path.join("ci", "test_neutron_transaction_state_smoke.sh")])
+    run([bash, bash_path("ci", "test_neutron_transaction_state_smoke.sh")])
 
 
 def run_db_crud_adminrc_test():
@@ -649,9 +653,9 @@ def run_db_crud_adminrc_test():
         print("SKIP: bash not found; cannot test DB CRUD adminrc routing")
         return
     print("==> checking DB CRUD adminrc routing")
-    run([bash, os.path.join("ci", "test_neutron_acl_db_crud_adminrc.sh")])
+    run([bash, bash_path("ci", "test_neutron_acl_db_crud_adminrc.sh")])
     print("==> checking neutronclient CLI adminrc routing")
-    run([bash, os.path.join("ci", "test_neutronclient_aria_cli_adminrc.sh")])
+    run([bash, bash_path("ci", "test_neutronclient_aria_cli_adminrc.sh")])
 
 
 def run_fast_contracts():
