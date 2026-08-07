@@ -1363,6 +1363,113 @@ class EventLoopTestCase(unittest.TestCase):
         finally:
             shutil.rmtree(state_dir)
 
+    def test_full_resync_resubmits_same_generation_when_v1_remote_converged(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "network_id": "net-1",
+                "device_owner": "compute:nova",
+                "binding:host_id": "compute-1",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            acl_index = EffectiveAclIndex(
+                policies=[{"id": "acl-policy", "default_action": "allow"}],
+                rules=[{
+                    "id": "drop-icmp",
+                    "policy_id": "acl-policy",
+                    "direction": "ingress",
+                    "priority": 100,
+                    "action": "drop",
+                    "ethertype": "IPv4",
+                    "protocol": "icmp",
+                    "src_cidr": "192.0.2.2/32",
+                }],
+                bindings=[{
+                    "id": "acl-binding",
+                    "policy_id": "acl-policy",
+                    "target_type": "port",
+                    "target_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                }],
+            )
+            first_client = StatusAfterApplyLocalClient()
+            first = SnapshotSynchronizer(
+                "compute-1",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                acl_index=acl_index,
+            )
+            first_result = first.full_resync()
+            converged_status = first_client.status()
+            converged_status.update({
+                "status_schema_version": 1,
+                "status_contract_hash": "v0.9-neutron-status-1",
+                "transaction_state": "classified",
+                "overall_readiness": "ready",
+                "required_action": "none",
+                "recovery_cause": None,
+                "last_classified_generation": converged_status[
+                    "applied_generation"
+                ],
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+            })
+            for managed_port in converged_status["managed_ports"]:
+                managed_port["managed_domains"] = ["acl"]
+            for port_status in converged_status["port_statuses"]:
+                for domain in port_status.get("domains") or []:
+                    domain["support_disposition"] = "supported"
+
+            class V1FixedThenAppliedClient(FixedStatusLocalClient):
+                def status(self):
+                    if not self.snapshots:
+                        return copy.deepcopy(self.fixed_status)
+                    status = _terminal_status_for_snapshot(self.snapshots[-1])
+                    status.update({
+                        "status_schema_version": 1,
+                        "status_contract_hash": "v0.9-neutron-status-1",
+                        "transaction_state": "classified",
+                        "overall_readiness": "ready",
+                        "required_action": "none",
+                        "recovery_cause": None,
+                        "last_classified_generation": status[
+                            "applied_generation"
+                        ],
+                        "wal_status": "committed",
+                        "wal_replay_failures": 0,
+                    })
+                    for managed_port in status["managed_ports"]:
+                        managed_port["managed_domains"] = ["acl"]
+                    for port_status in status["port_statuses"]:
+                        for domain in port_status.get("domains") or []:
+                            domain["support_disposition"] = "supported"
+                    return status
+
+            second_client = V1FixedThenAppliedClient(converged_status)
+            second = SnapshotSynchronizer(
+                "compute-1",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                acl_index=acl_index,
+            )
+            second_result = second.full_resync()
+
+            self.assertEqual(
+                first_result["snapshot"]["generation"],
+                second_result["snapshot"]["generation"],
+            )
+            self.assertEqual(1, len(second_client.snapshots))
+            self.assertFalse(second_result["response"].get("already_classified"))
+        finally:
+            shutil.rmtree(state_dir)
+
     def test_full_resync_waits_when_remote_pending_same_hash(self):
         state_dir = tempfile.mkdtemp()
         try:
