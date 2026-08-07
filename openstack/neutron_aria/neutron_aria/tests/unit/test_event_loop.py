@@ -1569,7 +1569,26 @@ class EventLoopTestCase(unittest.TestCase):
                 def status(self):
                     if not self.snapshots:
                         return copy.deepcopy(self.fixed_status)
-                    return copy.deepcopy(self.fixed_status)
+                    status = _terminal_status_for_snapshot(self.snapshots[-1])
+                    status.update({
+                        "status_schema_version": 1,
+                        "status_contract_hash": "v0.9-neutron-status-1",
+                        "transaction_state": "classified",
+                        "overall_readiness": "ready",
+                        "required_action": "none",
+                        "recovery_cause": None,
+                        "last_classified_generation": status[
+                            "applied_generation"
+                        ],
+                        "wal_status": "committed",
+                        "wal_replay_failures": 0,
+                    })
+                    for managed_port in status["managed_ports"]:
+                        managed_port["managed_domains"] = ["acl"]
+                    for port_status in status["port_statuses"]:
+                        for domain in port_status.get("domains") or []:
+                            domain["support_disposition"] = "supported"
+                    return status
 
             second_client = MixedV1ThenAppliedClient(mixed_status)
             second = SnapshotSynchronizer(
@@ -1581,11 +1600,15 @@ class EventLoopTestCase(unittest.TestCase):
                 state_store=SnapshotStateStore(state_dir),
                 acl_index=acl_index,
             )
+            self.assertTrue(second._requires_live_acl_verification(
+                first_result["snapshot"],
+                mixed_status,
+            ))
             second_result = second.full_resync()
 
-            self.assertEqual(
-                first_result["snapshot"]["generation"],
+            self.assertGreaterEqual(
                 second_result["snapshot"]["generation"],
+                first_result["snapshot"]["generation"],
             )
             self.assertEqual(1, len(second_client.snapshots))
             self.assertFalse(second_result["response"].get("already_classified"))

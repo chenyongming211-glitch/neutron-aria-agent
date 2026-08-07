@@ -332,9 +332,9 @@ class SnapshotSynchronizer(object):
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         projected_port_ids = self._projected_port_ids(snapshot)
-        requires_live_acl_verification = any(
-            "acl" in (port.get("managed_domains") or [])
-            for port in snapshot.get("ports") or []
+        requires_live_acl_verification = self._requires_live_acl_verification(
+            snapshot,
+            remote_status,
         )
         existing_terminal_status = None
         if (
@@ -347,11 +347,8 @@ class SnapshotSynchronizer(object):
                 remote_status,
             )
             if (
-                existing_verdict == "classified_degraded" or
-                (
-                    existing_verdict == "ready" and
-                    not requires_live_acl_verification
-                )
+                existing_verdict in ("ready", "classified_degraded") and
+                not requires_live_acl_verification
             ):
                 existing_terminal_status = remote_status
         if (
@@ -503,6 +500,39 @@ class SnapshotSynchronizer(object):
             "status": self.runtime_status.to_dict(),
             "heartbeat": heartbeat,
         }
+
+    def _requires_live_acl_verification(self, snapshot, remote_status):
+        runtime_by_port = dict(
+            (row.get("port_id"), row)
+            for row in (remote_status or {}).get("port_statuses") or []
+            if row.get("port_id")
+        )
+        for port in snapshot.get("ports") or []:
+            if "acl" not in (port.get("managed_domains") or []):
+                continue
+            runtime_port = runtime_by_port.get(port.get("port_id")) or {}
+            runtime_acl = next((
+                domain for domain in runtime_port.get("domains") or []
+                if _status_token(domain.get("domain")) == "acl"
+            ), {})
+            if (
+                _status_token(runtime_acl.get("status")) == "ready" and
+                _status_token(runtime_acl.get("effective_action")) == "enforce"
+            ):
+                return True
+        if runtime_by_port:
+            return False
+
+        for port in snapshot.get("ports") or []:
+            if "acl" not in (port.get("managed_domains") or []):
+                continue
+            desired_acl = port.get("acl") or {}
+            if (
+                desired_acl.get("enabled") is True and
+                _status_token(desired_acl.get("effective_action")) == "enforce"
+            ):
+                return True
+        return False
 
     def _load_acl_index(self):
         if self.acl_source is not None:
