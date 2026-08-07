@@ -245,18 +245,29 @@ pub fn plan_projection_drift(
 ) -> ProjectionDrift {
     let candidate_index = legacy_candidate_index(committed);
     let captured_maps = [
-        ("general source", &captured.general_src, &committed.general),
+        (
+            "general source",
+            &captured.general_src,
+            &committed.general,
+            false,
+        ),
         (
             "general destination",
             &captured.general_dst,
             &committed.general,
+            false,
         ),
-        ("ACL source", &captured.acl_src, &committed.acl_src),
-        ("ACL destination", &captured.acl_dst, &committed.acl_dst),
+        ("ACL source", &captured.acl_src, &committed.acl_src, true),
+        (
+            "ACL destination",
+            &captured.acl_dst,
+            &committed.acl_dst,
+            true,
+        ),
     ];
 
     let mut repair_required = false;
-    for (label, actual_entries, expected_entries) in captured_maps {
+    for (label, actual_entries, expected_entries, authoritative_values) in captured_maps {
         let actual = match normalize_entries(actual_entries, label) {
             Ok(entries) => entries,
             Err(error) => return ProjectionDrift::Fatal(error),
@@ -265,7 +276,13 @@ pub fn plan_projection_drift(
             Ok(entries) => entries,
             Err(error) => return ProjectionDrift::Fatal(error),
         };
-        match classify_map_drift(label, &actual, &expected, &candidate_index) {
+        match classify_map_drift(
+            label,
+            &actual,
+            &expected,
+            &candidate_index,
+            authoritative_values,
+        ) {
             Ok(is_drifted) => repair_required |= is_drifted,
             Err(error) => return ProjectionDrift::Fatal(error),
         }
@@ -536,6 +553,7 @@ fn classify_map_drift(
     actual: &BTreeMap<CanonicalNetwork, u32>,
     expected: &BTreeMap<CanonicalNetwork, u32>,
     candidates: &BTreeMap<CanonicalNetwork, BTreeSet<u32>>,
+    authoritative_values: bool,
 ) -> Result<bool, String> {
     let mut repair_required = false;
 
@@ -547,6 +565,10 @@ fn classify_map_drift(
             ));
         };
         if !candidate_ids.contains(actual_group_id) {
+            if authoritative_values && expected.contains_key(network) {
+                repair_required = true;
+                continue;
+            }
             return Err(format!(
                 "{} contains unknown group ID {} for persisted key {}",
                 label, actual_group_id, network
