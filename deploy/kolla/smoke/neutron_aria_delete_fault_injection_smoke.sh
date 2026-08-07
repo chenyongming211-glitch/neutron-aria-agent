@@ -817,8 +817,8 @@ PY
 delete_target_port_evidence() {
     local directory="$1"
     write_delete_request "${directory}" || return 2
-    docker_agent_exec python - "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" <<'PY' \
-        >"${directory}/response.json.tmp"
+    docker_agent_exec python - "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" \
+        >"${directory}/response.json.tmp" <<'PY'
 from __future__ import print_function
 
 import json
@@ -1123,8 +1123,8 @@ capture_detached_state() {
     capture_api_outcome "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/policies" \
         "${directory}/policies-response.json" "${directory}/policies-http-status.txt" || return 1
     capture_wal "${directory}/neutron-snapshot.wal" || return 1
-    docker_agent_exec python - "${NEUTRON_STATE_PATH}/${EXPECTED_IFNAME}/state.json" <<'PY' \
-        >"${directory}/state-observation.json" || return 1
+    docker_agent_exec python - "${NEUTRON_STATE_PATH}/${EXPECTED_IFNAME}/state.json" \
+        >"${directory}/state-observation.json" <<'PY' || return 1
 from __future__ import print_function
 import json,os,sys
 path=sys.argv[1]

@@ -1109,8 +1109,7 @@ managed_fragment_preflight() {
         || die "fragment peer interface is unavailable"
     python3 - "${FRAGMENT_VLAN_A}" "${FRAGMENT_VLAN_B}" "${FRAGMENT_EXPECTED_CAPACITY}" \
         "${FRAGMENT_IPV4_HOST}" "${FRAGMENT_IPV4_PEER}" \
-        "${FRAGMENT_IPV6_HOST}" "${FRAGMENT_IPV6_PEER}" <<'PY' \
-        || die "invalid managed fragment VLAN/address contract"
+        "${FRAGMENT_IPV6_HOST}" "${FRAGMENT_IPV6_PEER}" <<'PY' || die "invalid managed fragment VLAN/address contract"
 import ipaddress,sys
 vlan_a,vlan_b,capacity=map(int,sys.argv[1:4])
 assert 1 <= vlan_a <= 4094 and 1 <= vlan_b <= 4094 and vlan_a != vlan_b
