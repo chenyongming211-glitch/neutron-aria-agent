@@ -18,6 +18,7 @@ from neutron_aria.policies import aria_acl as aria_acl_policy
 from neutron_aria.services.aria_acl.exceptions import AriaAclBadRequest
 from neutron_aria.services.aria_acl.exceptions import AriaAclConflict
 from neutron_aria.services.aria_acl.exceptions import map_repository_error
+from neutron_aria.services.aria_acl import plugin as aria_acl_plugin
 from neutron_aria.services.aria_acl import port_projection
 from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
@@ -209,6 +210,58 @@ class FakeCorePlugin(object):
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
+    def test_collection_lists_enforce_read_policy_before_repository_access(self):
+        class ListDenied(Exception):
+            pass
+
+        class DenyPolicy(object):
+            calls = []
+
+            @classmethod
+            def enforce(cls, context, action, target, pluralized=None):
+                cls.calls.append((context, action, target, pluralized))
+                raise ListDenied(action)
+
+        repository = RecordingListRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        context = object()
+        methods = (
+            ("get_aria_acl_policy", "aria_acl_policies", plugin.get_aria_acl_policies),
+            ("get_aria_acl_rule", "aria_acl_rules", plugin.get_aria_acl_rules),
+            (
+                "get_aria_acl_address_set",
+                "aria_acl_address_sets",
+                plugin.get_aria_acl_address_sets,
+            ),
+            ("get_aria_acl_binding", "aria_acl_bindings", plugin.get_aria_acl_bindings),
+            (
+                "get_aria_acl_port_status",
+                "aria_acl_port_statuses",
+                plugin.get_aria_acl_port_statuses,
+            ),
+        )
+        saved_policy = getattr(aria_acl_plugin, "neutron_policy", None)
+        had_policy = hasattr(aria_acl_plugin, "neutron_policy")
+        aria_acl_plugin.neutron_policy = DenyPolicy
+        try:
+            for _action, _collection, method in methods:
+                with self.assertRaises(ListDenied):
+                    method(context)
+        finally:
+            if had_policy:
+                aria_acl_plugin.neutron_policy = saved_policy
+            else:
+                del aria_acl_plugin.neutron_policy
+
+        self.assertEqual([], repository.calls)
+        self.assertEqual(
+            [
+                (context, action, {}, collection)
+                for action, collection, _method in methods
+            ],
+            DenyPolicy.calls,
+        )
+
     def test_plugin_constructor_does_not_reenter_neutron_manager(self):
         fake_neutron = types.ModuleType("neutron")
         fake_manager = types.ModuleType("neutron.manager")

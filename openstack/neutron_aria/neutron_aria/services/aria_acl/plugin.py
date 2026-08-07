@@ -4,6 +4,11 @@ import logging
 import os
 import time
 
+try:
+    from neutron import policy as neutron_policy
+except ImportError:
+    neutron_policy = None
+
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.acl_contract import port_contract_eligibility
 from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
@@ -19,6 +24,16 @@ LOG = logging.getLogger(__name__)
 PLUGIN_TYPE = "aria_acl"
 PLUGIN_DESCRIPTION = "Aria ACL Neutron service plugin"
 DEFAULT_PORT_STATUS_STALE_SECONDS = 90
+
+
+def _enforce_collection_read(context, action, collection):
+    if neutron_policy is not None:
+        neutron_policy.enforce(
+            context,
+            action,
+            {},
+            pluralized=collection,
+        )
 
 
 class AriaAclPlugin(object):
@@ -72,6 +87,11 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
+        _enforce_collection_read(
+            context,
+            "get_aria_acl_policy",
+            "aria_acl_policies",
+        )
         return self._repo(context).list_policies(
             filters=filters,
             fields=fields,
@@ -130,6 +150,11 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
+        _enforce_collection_read(
+            context,
+            "get_aria_acl_rule",
+            "aria_acl_rules",
+        )
         return self._repo(context).list_rules(
             filters=filters,
             fields=fields,
@@ -193,6 +218,11 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
+        _enforce_collection_read(
+            context,
+            "get_aria_acl_address_set",
+            "aria_acl_address_sets",
+        )
         return self._repo(context).list_address_sets(
             filters=filters,
             fields=fields,
@@ -259,6 +289,11 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
+        _enforce_collection_read(
+            context,
+            "get_aria_acl_binding",
+            "aria_acl_bindings",
+        )
         return self._repo(context).list_bindings(
             filters=filters,
             fields=fields,
@@ -341,6 +376,11 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
+        _enforce_collection_read(
+            context,
+            "get_aria_acl_port_status",
+            "aria_acl_port_statuses",
+        )
         return self._repo(context).list_port_statuses(
             filters=filters,
             fields=fields,
