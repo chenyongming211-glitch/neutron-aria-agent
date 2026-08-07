@@ -3395,6 +3395,10 @@ async fn apply_snapshot_runtime_transaction(
                         "neutron_port_apply_profile"
                     );
                 } else {
+                    let domain_error_reason = domain_result
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "unknown_domain_reconcile_error".to_string());
                     let purge_failed = if let Err(purge_err) =
                         purge_neutron_acl_transactionally(state, &port.ifname, &port.port_id).await
                     {
@@ -3445,6 +3449,7 @@ async fn apply_snapshot_runtime_transaction(
                         ifname = %port.ifname,
                         action = "attach",
                         status = "error",
+                        reason = %domain_error_reason,
                         attach_ms,
                         domain_ms,
                         total_ms = elapsed_ms(port_started),
