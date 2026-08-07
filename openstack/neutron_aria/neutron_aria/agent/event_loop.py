@@ -332,6 +332,10 @@ class SnapshotSynchronizer(object):
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         projected_port_ids = self._projected_port_ids(snapshot)
+        requires_live_acl_verification = any(
+            "acl" in (port.get("managed_domains") or [])
+            for port in snapshot.get("ports") or []
+        )
         existing_terminal_status = None
         if (
             not pending_action.get("action") and
@@ -342,7 +346,13 @@ class SnapshotSynchronizer(object):
                 projected_port_ids,
                 remote_status,
             )
-            if existing_verdict in ("ready", "classified_degraded"):
+            if (
+                existing_verdict == "classified_degraded" or
+                (
+                    existing_verdict == "ready" and
+                    not requires_live_acl_verification
+                )
+            ):
                 existing_terminal_status = remote_status
         if (
             existing_terminal_status is None and
