@@ -1869,12 +1869,16 @@ fn project_status_v1_ports(
         {
             valid = false;
         }
-        if valid && top_level_class != StatusV1EvidenceClass::Blocked {
-            aggregate = aggregate.max(top_level_class);
+        if valid {
+            if top_level_class != StatusV1EvidenceClass::Blocked {
+                aggregate = aggregate.max(top_level_class);
+            } else {
+                aggregate = StatusV1EvidenceClass::Blocked;
+            }
+            projected_rows.push(projected.evidence);
         } else {
             aggregate = StatusV1EvidenceClass::Blocked;
         }
-        projected_rows.push(projected.evidence);
     }
 
     for (status_key, status) in &runtime.port_statuses {
@@ -1884,7 +1888,6 @@ fn project_status_v1_ports(
         match project_status_v1_detached_tombstone(runtime, status_key, status) {
             Some(tombstone) => projected_rows.push(tombstone),
             None => {
-                projected_rows.push(project_status_v1_port_row(status).evidence);
                 aggregate = StatusV1EvidenceClass::Blocked;
             }
         }
