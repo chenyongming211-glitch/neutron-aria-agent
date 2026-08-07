@@ -8765,6 +8765,16 @@ mod tests {
                 case.expected_generation,
             ));
 
+            if case.label == "managed-row-generation-future" {
+                match actual.get("port_statuses").and_then(Value::as_array) {
+                    Some(rows) if rows.is_empty() => {}
+                    other => mismatches.push(format!(
+                        "{}: future-generation rows must stay internal, got {other:?}",
+                        case.label
+                    )),
+                }
+            }
+
             if case.historical_control {
                 let historical_rows = actual
                     .get("port_statuses")
