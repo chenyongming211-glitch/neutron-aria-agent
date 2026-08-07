@@ -984,11 +984,11 @@ fn acl_projection_drift_distinguishes_clean_and_fatal_runtime() {
         other => panic!("unknown runtime key/value must be fatal, got {other:?}"),
     }
 
-    let mut unknown_value = CapturedProjection::from(&committed);
-    unknown_value.acl_src = vec![entry("10.0.0.0/24", 999)];
+    let mut unknown_value_for_owned_key = CapturedProjection::from(&committed);
+    unknown_value_for_owned_key.acl_src = vec![entry("10.0.0.0/24", 999)];
     assert!(matches!(
-        plan_projection_drift(&unknown_value, &committed, &committed),
-        ProjectionDrift::Fatal(_)
+        plan_projection_drift(&unknown_value_for_owned_key, &committed, &committed),
+        ProjectionDrift::RepairRequired(_)
     ));
 
     let mut unexplained_missing = CapturedProjection::from(&committed);
