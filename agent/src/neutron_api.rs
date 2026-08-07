@@ -3454,6 +3454,7 @@ async fn apply_snapshot_runtime_transaction(
             }
             Err(e) => {
                 let attach_ms = elapsed_ms(attach_started);
+                let attach_error_reason = e.clone();
                 next_statuses.insert(
                     port.port_id.clone(),
                     port_runtime_status(
@@ -3481,6 +3482,7 @@ async fn apply_snapshot_runtime_transaction(
                     ifname = %ifname,
                     action = "attach",
                     status = "error",
+                    reason = %attach_error_reason,
                     attach_ms,
                     total_ms = elapsed_ms(port_started),
                     "neutron_port_apply_profile"
