@@ -64,6 +64,22 @@ esac
 EOF
 chmod +x "${ROOT}/bin/docker"
 
+capability_handshakes="$(
+    grep -c 'capabilities(required_domains=\["acl"\])' "${SMOKE}" || true
+)"
+if [ "${capability_handshakes}" -lt 3 ]; then
+    echo "transaction smoke write paths must negotiate the UDS capability contract" >&2
+    exit 1
+fi
+grep -Fq 'state["pending_scope"] = "full_host"' "${SMOKE}" || {
+    echo "transaction smoke pending snapshot must record full-host scope" >&2
+    exit 1
+}
+grep -Fq 'state["pending_affected_port_ids"] = list(projected)' "${SMOKE}" || {
+    echo "transaction smoke pending snapshot must record affected ports" >&2
+    exit 1
+}
+
 run_case() {
     local scenario="$1"
     local expected="$2"

@@ -377,6 +377,47 @@ class MainLoggingTestCase(unittest.TestCase):
         self.assertNotIn("bearer-secret", rendered)
         self.assertIn("[REDACTED]", rendered)
 
+    def test_once_reapplies_logging_protection_after_neutron_init(self):
+        fd, path = tempfile.mkstemp()
+        os.write(
+            fd,
+            b"[agent]\nfull_resync_enabled = true\n"
+            b"[neutron]\nport_source = neutronclient\n",
+        )
+        os.close(fd)
+        original_reporter = agent_main.build_once_status_reporter
+        original_synchronizer = agent_main.build_synchronizer
+
+        class FakeSynchronizer(object):
+            def full_resync(inner_self):
+                self.third_party_logger.debug(
+                    "request headers={'X-Auth-Token': 'once-secret'}",
+                )
+                return {"snapshot": {"generation": 1}}
+
+        try:
+            def fake_reporter(config, neutron_config_files=None):
+                self.third_party_logger.setLevel(logging.DEBUG)
+                return None
+
+            def fake_synchronizer(config, status_reporter=None):
+                return FakeSynchronizer()
+
+            agent_main.build_once_status_reporter = fake_reporter
+            agent_main.build_synchronizer = fake_synchronizer
+
+            self.assertEqual(0, agent_main.main(["-c", path, "--once"]))
+
+            self.assertNotIn("once-secret", self.output.getvalue())
+            self.assertGreaterEqual(
+                self.third_party_logger.getEffectiveLevel(),
+                logging.WARNING,
+            )
+        finally:
+            agent_main.build_once_status_reporter = original_reporter
+            agent_main.build_synchronizer = original_synchronizer
+            os.unlink(path)
+
 
 if __name__ == "__main__":
     unittest.main()

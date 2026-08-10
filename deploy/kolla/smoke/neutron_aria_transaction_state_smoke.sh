@@ -104,6 +104,7 @@ import sys
 from neutron_aria.agent.uds_client import LocalClient
 
 client = LocalClient(sys.argv[1], timeout=3.0)
+client.capabilities(required_domains=["acl"])
 status = client.status()
 for port in status.get("managed_ports") or []:
     port_id = port.get("port_id")
@@ -204,6 +205,8 @@ state["pending_generation"] = generation
 state["pending_desired_hash"] = desired_hash
 state["pending_snapshot_ports"] = len(projected)
 state["pending_projected_port_ids"] = projected
+state["pending_scope"] = "full_host"
+state["pending_affected_port_ids"] = list(projected)
 state["pending_since"] = time.time()
 state["updated_at"] = time.time()
 parent = os.path.dirname(state_file)
@@ -263,7 +266,9 @@ with open(tmp, "w") as fh:
     fh.flush()
     os.fsync(fh.fileno())
 os.rename(tmp, state_file)
-response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
+client = LocalClient(socket_path, timeout=3.0)
+client.capabilities(required_domains=["acl"])
+response = client.delete_port(port_id)
 print("injected_pending_delete port_id=%s response=%s" % (
     port_id,
     json.dumps(response, sort_keys=True),
@@ -303,13 +308,15 @@ class EmptyPortSource(object):
     def get_ports(self):
         return []
 
+client = LocalClient(socket_path, timeout=3.0)
 sync = SnapshotSynchronizer(
     host,
     EmptyPortSource(),
     None,
-    LocalClient(socket_path, timeout=3.0),
+    client,
     state_store=SnapshotStateStore(state_dir),
 )
+client.capabilities(required_domains=["acl"])
 response = sync.delete_port(port_id, reason="migration_source_cleanup")
 print("migration_source_cleanup_delete=%s" % json.dumps(response, sort_keys=True))
 PY

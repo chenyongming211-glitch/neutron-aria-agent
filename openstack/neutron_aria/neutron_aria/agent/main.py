@@ -262,12 +262,14 @@ def main(argv=None):
         enable_eventlet_for_rpc()
 
     if options.once:
+        status_reporter = build_once_status_reporter(
+            config,
+            options.neutron_config_files,
+        )
+        configure_logging()
         result = build_synchronizer(
             config,
-            status_reporter=build_once_status_reporter(
-                config,
-                options.neutron_config_files,
-            ),
+            status_reporter=status_reporter,
         ).full_resync()
         print("snapshot generation %s submitted" % result["snapshot"]["generation"])
         return 0
