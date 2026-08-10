@@ -32,7 +32,7 @@ ACL release path.
 | --- | --- | --- |
 | P0 trusted source baseline | complete | Shared ACL error contract locked; Windows and Linux fast contracts and public-term scan green; generated outputs excluded; source/history boundary recorded. |
 | P1 legacy-kernel stack architecture | implemented, verify-only | Two-slot CT key scratch and 448-byte budget gate exist. No tail-call expansion is planned. |
-| P2 exact-candidate CI artifacts | pending | One clean candidate SHA produces `aria-agent`, `libebpf_firewall.so`, and `stack-budget.json` in one workflow run, with recorded hashes. |
+| P2 exact-candidate CI artifacts | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Run `31373688900` produced `aria-agent`, `ariactl`, `libebpf_firewall.so`, `stack-budget.json`, and the Kolla bundle in one successful workflow run; hashes are recorded in the P2 evidence summary. |
 | P3 4.18 isolated canary | pending revalidation | P2 artifacts pass both TC directions on the exact maintained kernel and leave no fixture residue. |
 | P4 single-node release candidate | pending | One compute passes readiness, peercred, managed ACL, recovery, detach/purge, and real rollback without restarting OVS or OVS-agent. |
 | P5 three-node final acceptance | blocked on unavailable compute | Current-hash evidence covers rolling deployment, traffic, lifecycle, RPC regression, cleanup, and rollback on all target computes. |
@@ -122,3 +122,10 @@ P0 is complete only when all of the following hold:
   not restart an unchanged service merely because an earlier rollout did.
 - Do not start QoS, Mirror, Storm/DDoS, or tail-call architecture work inside
   P0-P6 unless a recorded release blocker requires it.
+
+## Current Candidate Evidence
+
+- P0 source baseline:
+  `docs/evidence/openstack-n05-lite/20260810-p0-trusted-source-baseline/summary.md`
+- P2 exact-candidate CI artifacts:
+  `docs/evidence/openstack-n05-lite/20260810-p2-exact-candidate-artifacts/summary.md`
