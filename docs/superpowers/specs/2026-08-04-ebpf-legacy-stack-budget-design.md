@@ -2,7 +2,9 @@
 
 Date: 2026-08-04
 
-Status: approved architecture baseline; implementation in progress
+Status: implemented architecture baseline; current-candidate CI and field
+revalidation are tracked by P2-P5 in
+`docs/openstack-neutron-aria-details/18-v09-release-candidate-gates.md`
 
 Analyzed target: `origin/v0.9-neutron-agent@850832b`
 

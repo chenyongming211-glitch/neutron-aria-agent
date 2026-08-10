@@ -8,6 +8,12 @@
 
 **Tech Stack:** Rust 2021, Aya eBPF 0.1, Python 3 `unittest`, final-ELF BPF instruction analysis, pyelftools 0.32, GitHub Actions, Rocky Linux 8 kernel `4.18.0-553.5.1.el8_10.x86_64`.
 
+**Current Status:** The implementation and CI/canary contracts in this plan
+have landed. The unchecked task boxes below preserve the original execution
+plan and are not the current release tracker. Current-candidate rebuild,
+exact-artifact canary, node rollout, and release evidence are tracked by P2-P6
+in `docs/openstack-neutron-aria-details/18-v09-release-candidate-gates.md`.
+
 ## Global Constraints
 
 - The worst analyzed call path from `tc_ingress` or `tc_egress` must be at most 448 bytes.

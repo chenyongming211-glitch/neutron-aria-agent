@@ -42,6 +42,7 @@ or an explicitly approved later phase.
 | `15-acl-operator-ux-backlog.md` | Track read-only ACL operator UX improvements such as policy-with-rules and effective-port inspection commands. |
 | `16-versioned-rust-python-status-contract.md` | Define the independently versioned status projection, stable transaction/readiness/action vocabulary, rolling compatibility, and shared Rust-Python scenarios. |
 | `17-acl-selector-ownership-isolation.md` | Define rule-derived managed ACL selectors, conflict-aware general identity, ownership lifecycle, legacy-bank repair, replay/inventory migration, and CT-safe publication for `REVIEW-ACL-046`. |
+| `18-v09-release-candidate-gates.md` | Track the status-aware P0-P7 release path from a trusted source baseline through current-artifact field acceptance and later QoS/Mirror work. |
 
 ## Refinement Order
 

@@ -4,8 +4,14 @@
 /dist/
 /release/
 /.downloads/
+/.artifacts/
 __pycache__/
 *.py[cod]
+
+# Python packaging outputs
+**/build/
+**/dist/
+**/*.egg-info/
 
 # macOS resource forks and metadata
 ._*

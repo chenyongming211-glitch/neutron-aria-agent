@@ -112,6 +112,38 @@ class CountingEffectiveAclIndex(EffectiveAclIndex):
 
 
 class EffectiveAclTestCase(unittest.TestCase):
+    def test_unsupported_policy_uses_shared_contract_reason(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "deny"}],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": PORT_ID,
+            }],
+        )
+
+        result = index.effective_for_port(port(), snapshot())
+
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertEqual(
+            "unsupported_policy:default_action must be allow",
+            result["reason"],
+        )
+
+    def test_unsupported_source_port_uses_shared_rule_reason(self):
+        result = effective_acl([
+            acl_rule("src-port", 10, src_port_min=80, src_port_max=80),
+        ])
+
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertEqual(
+            "unsupported_rule:src-port:source port matching is unsupported",
+            result["reason"],
+        )
+
     def test_shared_large_selector_is_interned_once_for_1000_rules(self):
         shared = tuple(selector_members(2048))
         rules = [compiled_acl_rule(
