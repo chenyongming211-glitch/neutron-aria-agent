@@ -1,8 +1,9 @@
 # v0.9 Release Candidate Gates
 
-Status: normative release sequence; P0-P3 complete for candidate
-`1051b677063ebe337e977c52a253b907027e6fad`, P4-P7 pending or deferred as
-recorded below.
+Status: normative release sequence; P0-P4 complete. P3 and the P4 datapath use
+candidate `1051b677063ebe337e977c52a253b907027e6fad`; the P4 Python adapter uses
+security-fix candidate `bb973a202e560cce9158e8c6fd0da904fbdf81e7`. P5-P7
+remain pending, blocked, or deferred as recorded below.
 
 ## Purpose
 
@@ -35,7 +36,7 @@ ACL release path.
 | P1 legacy-kernel stack architecture | implemented, verify-only | Two-slot CT key scratch and 448-byte budget gate exist. No tail-call expansion is planned. |
 | P2 exact-candidate CI artifacts | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Run `31373688900` produced `aria-agent`, `ariactl`, `libebpf_firewall.so`, `stack-budget.json`, and the Kolla bundle in one successful workflow run; hashes are recorded in the P2 evidence summary. |
 | P3 4.18 isolated canary | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Exact P2 artifacts passed legacy TC ingress/egress load, isolated ACL behavior, restart recovery, missing-TC safety, and zero-residue checks on `4.18.0-553.5.1.el8_10.x86_64`; OVS and running service identities were unchanged. |
-| P4 single-node release candidate | pending | One compute passes readiness, peercred, managed ACL, recovery, detach/purge, and real rollback without restarting OVS or OVS-agent. |
+| P4 single-node release candidate | complete | One compute passed readiness, peercred, managed ACL, TC identity, WAL recovery, detach/purge, datapath restart recovery, real old-version rollback, Python one-shot log protection, and final traffic canary without restarting OVS or OVS-agent. |
 | P5 three-node final acceptance | blocked on unavailable compute | Current-hash evidence covers rolling deployment, traffic, lifecycle, RPC regression, cleanup, and rollback on all target computes. |
 | P6 release governance | pending | Version, license, manifest, checksums, support matrix, change log, upgrade, and rollback rules are frozen. |
 | P7 QoS then Mirror | deferred | Starts only after P6; no ACL release work is displaced by new feature scope. |
@@ -132,3 +133,5 @@ P0 is complete only when all of the following hold:
   `docs/evidence/openstack-n05-lite/20260810-p2-exact-candidate-artifacts/summary.md`
 - P3 maintained-kernel isolated canary:
   `docs/evidence/openstack-n05-lite/20260810-p3-legacy-kernel-canary/summary.md`
+- P4 single-node release candidate:
+  `docs/evidence/openstack-n05-lite/20260810-p4-single-node-release-candidate/summary.md`
