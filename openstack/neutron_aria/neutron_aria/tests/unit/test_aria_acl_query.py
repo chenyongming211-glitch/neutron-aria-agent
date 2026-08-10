@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import base64
+import re
 import unittest
 
 from neutron_aria.db.aria_acl.errors import AriaAclNotFound
@@ -107,7 +108,9 @@ class AriaAclQueryTestCase(unittest.TestCase):
         status_id = contract.encode_port_status_id(
             "port-1", "compute-1.example.test"
         )
-        self.assertTrue(status_id.startswith("aria-status-v1."))
+        self.assertTrue(status_id.startswith("aria-status-v1_"))
+        self.assertNotIn(".", status_id)
+        self.assertIsNotNone(re.match(r"^[A-Za-z0-9_-]+$", status_id))
         self.assertEqual(
             ("port-1", "compute-1.example.test"),
             contract.decode_port_status_id(status_id),
@@ -128,6 +131,52 @@ class AriaAclQueryTestCase(unittest.TestCase):
         )
         result = contract.apply_memory_query(rows, query, projection=projection)
         self.assertEqual([status_id], [row["id"] for row in result])
+
+    def test_legacy_dotted_status_id_remains_read_compatible(self):
+        contract = self._query_contract()
+        legacy_id = "aria-status-v1." + _b64(
+            b"port-1\x00compute-1.example.test"
+        )
+
+        self.assertEqual(
+            ("port-1", "compute-1.example.test"),
+            contract.decode_port_status_id(legacy_id),
+        )
+        self.assertTrue(contract.is_port_status_id(legacy_id))
+
+        query = contract.normalize_query(
+            "port_statuses",
+            marker=legacy_id,
+            limit=1,
+        )
+        rows = [{
+            "port_id": "port-1",
+            "host": "compute-1.example.test",
+            "status": "ready",
+            "updated_at": "1970-01-01T00:01:00.000000Z",
+        }]
+        projection = contract.PortStatusProjection(
+            now_epoch=60.0,
+            stale_seconds=90,
+        )
+        self.assertEqual(
+            [],
+            contract.apply_memory_query(rows, query, projection=projection),
+        )
+        legacy_filter = contract.normalize_query(
+            "port_statuses",
+            filters={"id": [legacy_id]},
+        )
+        self.assertEqual(
+            [contract.encode_port_status_id(
+                "port-1", "compute-1.example.test"
+            )],
+            [row["id"] for row in contract.apply_memory_query(
+                rows,
+                legacy_filter,
+                projection=projection,
+            )],
+        )
 
     def test_status_id_rejects_every_noncanonical_form(self):
         contract = self._query_contract()

@@ -12,6 +12,10 @@
 
 **Starting Head:** `v0.9-neutron-agent@7e5e2d98c6c3defab40bf91031db03f39e3d14f0`
 
+**Status-ID correction:** `REVIEW-ACL-071` supersedes this completed plan's
+original dotted `aria-status-v1.` examples. Current API responses emit the
+route-safe `aria-status-v1_` prefix; the dotted form is input-only compatibility.
+
 ## Global Constraints
 
 - Work only on local and remote `v0.9-neutron-agent`; do not create a branch, stacked PR, or worktree.
@@ -155,7 +159,7 @@ class AriaAclQueryTestCase(unittest.TestCase):
 
     def test_status_id_and_projected_filters_are_stable(self):
         status_id = encode_port_status_id("port-1", "compute-1.example.test")
-        self.assertTrue(status_id.startswith("aria-status-v1."))
+        self.assertTrue(status_id.startswith("aria-status-v1_"))
         self.assertEqual(
             ("port-1", "compute-1.example.test"),
             decode_port_status_id(status_id),
@@ -497,11 +501,11 @@ def encode_port_status_id(port_id, host):
     host_bytes = _identity_utf8(host, "host", 255)
     payload = port_bytes + b"\x00" + host_bytes
     encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
-    return "aria-status-v1." + encoded.decode("ascii")
+    return "aria-status-v1_" + encoded.decode("ascii")
 
 
 def decode_port_status_id(value):
-    prefix = "aria-status-v1."
+    prefix = "aria-status-v1_"
     if not isinstance(value, STRING_TYPES) or not value.startswith(prefix):
         raise AriaAclValidationError("invalid aria_acl_port_status id prefix")
     encoded = value[len(prefix):]
@@ -783,7 +787,7 @@ SQLite:
 
 ```python
 def get_port_status_resource(self, resource_id):
-    if resource_id.startswith("aria-status-v1."):
+    if is_port_status_id(resource_id):
         port_id, host = decode_port_status_id(resource_id)
         value = self.get_port_status(port_id, host=host)
         if value is None:
@@ -797,7 +801,7 @@ def get_port_status_resource(self, resource_id):
 
 
 def delete_port_status_resource(self, resource_id):
-    if resource_id.startswith("aria-status-v1."):
+    if is_port_status_id(resource_id):
         port_id, host = decode_port_status_id(resource_id)
         return self.delete_port_status(port_id, host=host)
     return self.delete_port_status(resource_id, host=None)
@@ -1050,7 +1054,7 @@ duplicate those parameters. Add `id` as the first port-status list column.
 Add CLI tests that build a real parser and assert `--page-size 25 --sort-key
 name --sort-dir desc` reaches `list_ext()` unchanged. Add a status-show test
 whose positional ID is
-`aria-status-v1.cG9ydC0xAG9zdGFjazI` and assert the same value reaches
+`aria-status-v1_cG9ydC0xAG9zdGFjazI` and assert the same value reaches
 `show_ext()`.
 
 - [x] **Step 5: Put CLI tests in fast-contracts**

@@ -15,6 +15,7 @@ from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
 from neutron_aria.db.aria_acl.query import PortStatusProjection
 from neutron_aria.db.aria_acl.query import decode_port_status_id
+from neutron_aria.db.aria_acl.query import is_port_status_id
 from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
 from neutron_aria.services.aria_acl.port_projection import PortSummarySnapshot
@@ -349,7 +350,7 @@ class AriaAclPlugin(object):
     def update_aria_acl_port_status(self, context, port_id, aria_acl_port_status):
         values = self._unwrap(aria_acl_port_status, "aria_acl_port_status")
         repository = self._repo(context)
-        if port_id.startswith("aria-status-v1."):
+        if is_port_status_id(port_id):
             exact_port_id, exact_host = decode_port_status_id(port_id)
             existing = repository.get_port_status(
                 exact_port_id,

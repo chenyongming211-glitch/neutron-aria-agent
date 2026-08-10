@@ -108,7 +108,7 @@ class AriaAclCliTest(unittest.TestCase):
         )
 
     def test_status_show_forwards_derived_id_unchanged(self):
-        derived_id = "aria-status-v1.cG9ydC0xAG9zdGFjazI"
+        derived_id = "aria-status-v1_cG9ydC0xAG9zdGFjazI"
 
         class FakeClient(object):
             def __init__(self):

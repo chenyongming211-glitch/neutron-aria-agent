@@ -14,6 +14,7 @@ from neutron_aria.db.aria_acl.errors import AriaAclNotFound
 from neutron_aria.db.aria_acl.errors import AriaAclValidationError
 from neutron_aria.db.aria_acl.query import apply_memory_query
 from neutron_aria.db.aria_acl.query import decode_port_status_id
+from neutron_aria.db.aria_acl.query import is_port_status_id
 from neutron_aria.db.aria_acl.query import normalize_query
 from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.db.aria_acl.query import require_one_legacy_port_status
@@ -571,7 +572,7 @@ class InMemoryAriaAclRepository(object):
             del self.port_statuses[key]
 
     def get_port_status_resource(self, resource_id):
-        if resource_id.startswith("aria-status-v1."):
+        if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             value = self.get_port_status(port_id, host=host)
             if value is None:
@@ -585,7 +586,7 @@ class InMemoryAriaAclRepository(object):
         )
 
     def delete_port_status_resource(self, resource_id):
-        if resource_id.startswith("aria-status-v1."):
+        if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             return self.delete_port_status(port_id, host=host)
         return self.delete_port_status(resource_id, host=None)
@@ -988,7 +989,7 @@ class NeutronDbAriaAclRepository(object):
             raise AriaAclNotFound("aria_acl_port_status %s not found" % port_id)
 
     def get_port_status_resource(self, resource_id):
-        if resource_id.startswith("aria-status-v1."):
+        if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             value = self.get_port_status(port_id, host=host)
             if value is None:
@@ -1002,7 +1003,7 @@ class NeutronDbAriaAclRepository(object):
         )
 
     def delete_port_status_resource(self, resource_id):
-        if resource_id.startswith("aria-status-v1."):
+        if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             return self.delete_port_status(port_id, host=host)
         return self.delete_port_status(resource_id, host=None)
@@ -1777,7 +1778,7 @@ class SqliteAriaAclRepository(object):
             raise AriaAclNotFound("aria_acl_port_status %s not found" % port_id)
 
     def get_port_status_resource(self, resource_id):
-        if resource_id.startswith("aria-status-v1."):
+        if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             value = self.get_port_status(port_id, host=host)
             if value is None:
@@ -1791,7 +1792,7 @@ class SqliteAriaAclRepository(object):
         )
 
     def delete_port_status_resource(self, resource_id):
-        if resource_id.startswith("aria-status-v1."):
+        if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             return self.delete_port_status(port_id, host=host)
         return self.delete_port_status(resource_id, host=None)

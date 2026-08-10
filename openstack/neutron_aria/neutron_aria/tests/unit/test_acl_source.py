@@ -359,8 +359,8 @@ class AclSourceTestCase(unittest.TestCase):
         self.assertEqual({"limit": 1, "marker": "policy-1"}, client.calls[1][1])
 
     def test_aria_acl_rest_client_pages_status_rows_by_derived_id(self):
-        first_id = "aria-status-v1.cG9ydC0xAG9zdGFjazI"
-        second_id = "aria-status-v1.cG9ydC0yAG9zdGFjazI"
+        first_id = "aria-status-v1_cG9ydC0xAG9zdGFjazI"
+        second_id = "aria-status-v1_cG9ydC0yAG9zdGFjazI"
 
         class FakeNeutronClient(object):
             def __init__(self):

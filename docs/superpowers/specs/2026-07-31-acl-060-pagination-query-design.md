@@ -294,15 +294,18 @@ resync and preserves the agent's last-good desired snapshot.
 Every projected per-host status row includes:
 
 ```text
-id = "aria-status-v1." + base64url(port_id_utf8 + NUL + host_utf8)
+id = "aria-status-v1_" + base64url(port_id_utf8 + NUL + host_utf8)
 ```
 
-Base64 padding is omitted. The encoder and decoder use only the Python
-standard library and remain compatible with Python 2.7.
+Base64 padding is omitted. The complete emitted ID uses only
+`[A-Za-z0-9_-]`, so legacy Neutron routes cannot reinterpret part of it as a
+response-format suffix. The encoder and decoder use only the Python standard
+library and remain compatible with Python 2.7.
 
 The decoder must:
 
-1. require the exact `aria-status-v1.` prefix;
+1. require the route-safe `aria-status-v1_` prefix, or accept the former
+   `aria-status-v1.` prefix as input-only upgrade compatibility;
 2. restore only valid base64 padding;
 3. reject invalid alphabet and decoding errors;
 4. require exactly one NUL separator;
@@ -310,7 +313,8 @@ The decoder must:
 6. enforce the existing storage limits of 36 bytes for `port_id` and 255 bytes
    for UTF-8 `host`;
 7. reject embedded NUL values; and
-8. re-encode and compare with the input to reject non-canonical aliases.
+8. re-encode and compare the payload component to reject non-canonical
+   aliases while allowing either recognized prefix.
 
 The ID is stable for the lifetime of the `(port_id, host)` row. It is a public
 row identity, not a secret and not an authorization token.
@@ -324,8 +328,13 @@ default and makes the pagination contract auditable in the extension map.
 
 ### 5.3 Exact and legacy show behavior
 
-`GET /aria-acl-port-statuses/{aria-status-v1...}` resolves exactly one
+`GET /aria-acl-port-statuses/{aria-status-v1_...}` resolves exactly one
 `(port_id, host)` row.
+
+The former dotted form remains valid for direct plugin calls and pagination
+markers during a rolling upgrade. It is never emitted after this correction,
+because the target Neutron 9 controller interprets the dot as the start of a
+format extension before plugin dispatch.
 
 The existing port-ID form remains a compatibility path:
 

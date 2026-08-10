@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import inspect
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -926,6 +927,40 @@ class AriaAclPluginTestCase(unittest.TestCase):
         exact_id = query_contract.encode_port_status_id("port-1", "compute-2")
         status = plugin.get_aria_acl_port_status(None, exact_id)
         self.assertIsNotNone(status)
+        self.assertEqual("compute-2", status["host"])
+
+    def test_derived_status_id_survives_legacy_neutron_item_route(self):
+        from neutron_aria.db.aria_acl.query import encode_port_status_id
+
+        status_id = encode_port_status_id("port-1", "compute-2")
+        path = "/aria-acl-port-statuses/%s" % status_id
+        formatted = re.match(
+            r"^/aria-acl-port-statuses/(?P<id>[^/]+)\.(?P<format>[^/]+)$",
+            path,
+        )
+        plain = re.match(
+            r"^/aria-acl-port-statuses/(?P<id>[^/]+)$",
+            path,
+        )
+
+        self.assertIsNone(formatted)
+        self.assertIsNotNone(plain)
+        self.assertEqual(status_id, plain.group("id"))
+
+    def test_legacy_dotted_status_id_show_remains_exact(self):
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+        for host in ("compute-1", "compute-2"):
+            plugin.report_aria_acl_port_status(None, {
+                "aria_acl_port_status": {
+                    "port_id": "port-1",
+                    "host": host,
+                    "status": "ready",
+                }
+            })
+
+        legacy_id = "aria-status-v1.cG9ydC0xAGNvbXB1dGUtMg"
+        status = plugin.get_aria_acl_port_status(None, legacy_id)
+
         self.assertEqual("compute-2", status["host"])
 
     def test_missing_status_for_explicit_host_remains_none(self):
@@ -1971,6 +2006,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
     def test_sqlite_status_resource_identity_is_exact(self):
         from neutron_aria.db.aria_acl.query import encode_port_status_id
+        from neutron_aria.db.aria_acl.query import PortStatusProjection
 
         fd, path = tempfile.mkstemp()
         os.close(fd)
@@ -1990,6 +2026,18 @@ class AriaAclPluginTestCase(unittest.TestCase):
             self.assertEqual(
                 "compute-2",
                 plugin.get_aria_acl_port_status(None, exact_id)["host"],
+            )
+            legacy_id = "aria-status-v1." + exact_id[len("aria-status-v1_"):]
+            legacy_filtered = repository.list_port_statuses(
+                filters={"id": [legacy_id]},
+                projection=PortStatusProjection(
+                    now_epoch=200.0,
+                    stale_seconds=-1,
+                ),
+            )
+            self.assertEqual(
+                ["compute-2"],
+                [row["host"] for row in legacy_filtered],
             )
             plugin.delete_aria_acl_port_status(None, exact_id)
             self.assertEqual(

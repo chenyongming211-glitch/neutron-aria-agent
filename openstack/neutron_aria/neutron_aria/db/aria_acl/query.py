@@ -22,6 +22,14 @@ except NameError:
     INTEGER_TYPES = (int,)
 
 
+_PORT_STATUS_ID_PREFIX = "aria-status-v1_"
+_LEGACY_PORT_STATUS_ID_PREFIX = "aria-status-v1."
+_PORT_STATUS_ID_PREFIXES = (
+    _PORT_STATUS_ID_PREFIX,
+    _LEGACY_PORT_STATUS_ID_PREFIX,
+)
+
+
 class QuerySpec(object):
     def __init__(
         self,
@@ -223,13 +231,23 @@ def encode_port_status_id(port_id, host):
     host_bytes = _identity_utf8(host, "host", 255)
     payload = port_bytes + b"\x00" + host_bytes
     encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
-    return "aria-status-v1." + encoded.decode("ascii")
+    return _PORT_STATUS_ID_PREFIX + encoded.decode("ascii")
+
+
+def is_port_status_id(value):
+    return (
+        isinstance(value, STRING_TYPES) and
+        value.startswith(_PORT_STATUS_ID_PREFIXES)
+    )
 
 
 def decode_port_status_id(value):
-    prefix = "aria-status-v1."
-    if not isinstance(value, STRING_TYPES) or not value.startswith(prefix):
+    if not is_port_status_id(value):
         raise AriaAclValidationError("invalid aria_acl_port_status id prefix")
+    prefix = next(
+        candidate for candidate in _PORT_STATUS_ID_PREFIXES
+        if value.startswith(candidate)
+    )
     encoded = value[len(prefix):]
     if (
         not encoded or
@@ -253,7 +271,8 @@ def decode_port_status_id(value):
         raise AriaAclValidationError("invalid aria_acl_port_status id utf8")
     _identity_utf8(port_id, "port_id", 36)
     _identity_utf8(host, "host", 255)
-    if encode_port_status_id(port_id, host) != value:
+    canonical = encode_port_status_id(port_id, host)
+    if canonical[len(_PORT_STATUS_ID_PREFIX):] != encoded:
         raise AriaAclValidationError("noncanonical aria_acl_port_status id")
     return port_id, host
 
@@ -284,7 +303,19 @@ def apply_memory_query(rows, query, projection=None):
             )
     projected = [_project_row(row, query.spec, projection) for row in rows]
     marker_row = _marker_row(projected, query)
-    filtered = [row for row in projected if _matches(row, query.filters)]
+    filters = dict(query.filters)
+    status_identities = None
+    if query.spec.name == "port_statuses" and "id" in filters:
+        status_identities = frozenset(
+            decode_port_status_id(value) for value in filters.pop("id")
+        )
+    filtered = [
+        row for row in projected
+        if _matches(row, filters) and (
+            status_identities is None or
+            (row.get("port_id"), row.get("host")) in status_identities
+        )
+    ]
     ordered = sorted(filtered, key=_sort_key(query.sorts))
 
     if marker_row is not None:
@@ -485,7 +516,13 @@ def _marker_row(rows, query):
     if query.marker is None:
         return None
     if query.spec.name == "port_statuses":
-        decode_port_status_id(query.marker)
+        marker_identity = decode_port_status_id(query.marker)
+        for row in rows:
+            if (row.get("port_id"), row.get("host")) == marker_identity:
+                return row
+        raise AriaAclNotFound(
+            "%s marker %s not found" % (query.spec.name, query.marker)
+        )
     for row in rows:
         if row.get(query.spec.public_identity_field) == query.marker:
             return row

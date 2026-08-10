@@ -37,8 +37,9 @@ Date: 2026-08-07
 - `REVIEW-SEC-003` (P1, closed in the working tree on 2026-08-10): inherited
   OVS debug configuration enabled third-party HTTP DEBUG logs containing
   authentication headers. See the dedicated SEC-003 field summary.
-- `REVIEW-ACL-071` (P2): the dot in the exact composite port-status ID is
-  interpreted as a format suffix by the target legacy route.
+- `REVIEW-ACL-071` (P2, closed on 2026-08-10): new status IDs use a route-safe
+  separator while old dotted IDs remain input-compatible. Exact two-host HTTP
+  show/delete passed on the active controller.
 - `REVIEW-ACL-060` (P2): repository pagination is implemented, but the target
   production HTTP route has global pagination disabled.
 - `REVIEW-ACL-073` (P3): wrong-shaped resource bodies inherit a Neutron 9
@@ -54,8 +55,6 @@ Date: 2026-08-07
 - `REVIEW-SEC-003` was fixed and deployed on the two available test nodes on
   2026-08-10. Fresh logs were token-free; pre-fix logs were rotated into
   restricted audit archives without restarting OVS or ovs-agent.
-- Design a route-safe composite status ID and test it through the real legacy
-  HTTP controller, not only the plugin method.
 - Review the blast radius of global Neutron pagination before changing the
   production Kolla configuration; validate built-in APIs and Aria pagination
   together.

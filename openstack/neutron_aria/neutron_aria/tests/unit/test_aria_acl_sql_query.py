@@ -152,6 +152,7 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
     def test_status_composite_marker_visits_each_row_once(self):
         self._require_list_contract(self.repository.list_port_statuses)
         from neutron_aria.db.aria_acl.query import PortStatusProjection
+        from neutron_aria.db.aria_acl.query import encode_port_status_id
 
         expected_hosts = (
             ("port-1", "compute-1"),
@@ -208,6 +209,19 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             ),
         )
         self.assertEqual(3, len(null_policy))
+        current_id = encode_port_status_id("port-1", "compute-2")
+        legacy_id = "aria-status-v1." + current_id[len("aria-status-v1_"):]
+        legacy_filtered = self.repository.list_port_statuses(
+            filters={"id": [legacy_id]},
+            projection=PortStatusProjection(
+                now_epoch=200.0,
+                stale_seconds=-1,
+            ),
+        )
+        self.assertEqual(
+            [("port-1", "compute-2")],
+            [(row["port_id"], row["host"]) for row in legacy_filtered],
+        )
 
     def test_concurrent_port_status_upserts_converge_without_conflict(self):
         from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository

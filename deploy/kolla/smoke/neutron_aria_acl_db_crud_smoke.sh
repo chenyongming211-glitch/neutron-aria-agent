@@ -135,9 +135,17 @@ REST_PORT_ID="${REST_PORT_ID:-00000000-0000-0000-0000-${REST_PORT_SUFFIX}}"
 policy_id=""
 rule_id=""
 binding_id=""
+status_id=""
+status_id_peer=""
 
 cleanup_rest() {
     set +e
+    if [ -n "${status_id}" ]; then
+        curl_body DELETE "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id}" >/dev/null 2>&1
+    fi
+    if [ -n "${status_id_peer}" ]; then
+        curl_body DELETE "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id_peer}" >/dev/null 2>&1
+    fi
     if [ -n "${REST_PORT_ID}" ]; then
         curl_body DELETE "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${REST_PORT_ID}" >/dev/null 2>&1
     fi
@@ -166,8 +174,28 @@ curl_body() {
     fi
 }
 
+curl_status() {
+    local method="$1"
+    local url="$2"
+    curl -sS -o /dev/null -w '%{http_code}' \
+        -H "X-Auth-Token: ${TOKEN}" -X "${method}" "${url}"
+}
+
 json_id() {
     sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -1
+}
+
+json_field() {
+    docker exec -i "${CONTAINER}" python -c '
+from __future__ import print_function
+import json
+import sys
+
+value = json.load(sys.stdin)
+for part in sys.argv[1].split("."):
+    value = value.get(part) if isinstance(value, dict) else None
+print(value or "")
+' "$1"
 }
 
 require_body_contains() {
@@ -207,11 +235,36 @@ fi
 status_create="$(curl_body POST "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses" \
     "{\"aria_acl_port_status\":{\"port_id\":\"${REST_PORT_ID}\",\"host\":\"$(hostname)\",\"effective_policy_id\":\"${policy_id}\",\"binding_id\":\"${binding_id}\",\"status\":\"ready\",\"effective_action\":\"enforce\",\"generation\":2}}")"
 require_body_contains "${status_create}" 'aria_acl_port_status' 'status create'
+status_id="$(printf '%s' "${status_create}" | json_field aria_acl_port_status.id)"
+if ! printf '%s' "${status_id}" | grep -Eq '^aria-status-v1_[A-Za-z0-9_-]+$'; then
+    echo "Status create returned a legacy-route-unsafe id: ${status_id}" >&2
+    exit 1
+fi
+status_create_peer="$(curl_body POST "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses" \
+    "{\"aria_acl_port_status\":{\"port_id\":\"${REST_PORT_ID}\",\"host\":\"$(hostname)-peer\",\"effective_policy_id\":\"${policy_id}\",\"binding_id\":\"${binding_id}\",\"status\":\"ready\",\"effective_action\":\"enforce\",\"generation\":3}}")"
+status_id_peer="$(printf '%s' "${status_create_peer}" | json_field aria_acl_port_status.id)"
+if ! printf '%s' "${status_id_peer}" | grep -Eq '^aria-status-v1_[A-Za-z0-9_-]+$'; then
+    echo "Peer status create returned a legacy-route-unsafe id: ${status_id_peer}" >&2
+    exit 1
+fi
 
 require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-policies/${policy_id}")" "${policy_id}" 'policy show'
 require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-rules/${rule_id}")" "${rule_id}" 'rule show'
 require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-bindings/${binding_id}")" "${binding_id}" 'binding show'
-require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${REST_PORT_ID}")" 'ready' 'status show'
+require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id}")" 'ready' 'exact status show'
+require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id_peer}")" 'ready' 'exact peer status show'
+delete_status="$(curl_status DELETE "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id}")"
+if [ "${delete_status}" != "204" ]; then
+    echo "Exact status delete returned HTTP ${delete_status}" >&2
+    exit 1
+fi
+deleted_show_status="$(curl_status GET "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id}")"
+if [ "${deleted_show_status}" != "404" ]; then
+    echo "Deleted exact status remained visible with HTTP ${deleted_show_status}" >&2
+    exit 1
+fi
+status_id=""
+require_body_contains "$(curl_body GET "${LOCAL_NEUTRON_URL}/aria-acl-port-statuses/${status_id_peer}")" "$(hostname)-peer" 'exact delete isolation'
 
 cleanup_rest
 trap - EXIT
