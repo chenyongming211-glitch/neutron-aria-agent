@@ -1,5 +1,7 @@
 from __future__ import absolute_import
 
+from io import StringIO
+import logging
 import os
 import shutil
 import tempfile
@@ -326,6 +328,54 @@ rpc_events_enabled = true
             self.assertEqual("allow-ssh", port["acl"]["rules"][0]["id"])
         finally:
             shutil.rmtree(state_dir)
+
+
+class MainLoggingTestCase(unittest.TestCase):
+    def setUp(self):
+        self.root_logger = logging.getLogger()
+        self.original_root_level = self.root_logger.level
+        self.third_party_logger = logging.getLogger("neutronclient.client")
+        self.original_third_party_level = self.third_party_logger.level
+        self.original_third_party_propagate = self.third_party_logger.propagate
+
+        self.output = StringIO()
+        self.capture_handler = logging.StreamHandler(self.output)
+        self.root_logger.addHandler(self.capture_handler)
+        self.root_logger.setLevel(logging.DEBUG)
+        self.third_party_logger.setLevel(logging.DEBUG)
+        self.third_party_logger.propagate = True
+
+    def tearDown(self):
+        self.root_logger.removeHandler(self.capture_handler)
+        self.root_logger.setLevel(self.original_root_level)
+        self.third_party_logger.setLevel(self.original_third_party_level)
+        self.third_party_logger.propagate = self.original_third_party_propagate
+
+    def test_configure_logging_suppresses_neutronclient_debug(self):
+        agent_main.configure_logging()
+
+        self.third_party_logger.debug(
+            "request headers={'X-Auth-Token': 'debug-secret'}",
+        )
+
+        self.assertNotIn("debug-secret", self.output.getvalue())
+        self.assertGreaterEqual(
+            self.third_party_logger.getEffectiveLevel(),
+            logging.WARNING,
+        )
+
+    def test_configure_logging_redacts_authentication_headers(self):
+        agent_main.configure_logging()
+
+        logging.getLogger("external.warning").warning(
+            "request headers={'X-Auth-Token': 'token-secret', "
+            "'Authorization': 'Bearer bearer-secret'}",
+        )
+
+        rendered = self.output.getvalue()
+        self.assertNotIn("token-secret", rendered)
+        self.assertNotIn("bearer-secret", rendered)
+        self.assertIn("[REDACTED]", rendered)
 
 
 if __name__ == "__main__":

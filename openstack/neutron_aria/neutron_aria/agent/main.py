@@ -2,6 +2,7 @@ from __future__ import absolute_import
 
 import logging
 import optparse
+import re
 import socket
 import sys
 
@@ -27,6 +28,64 @@ from neutron_aria.agent.uds_client import LocalClient
 LOG = logging.getLogger(__name__)
 
 
+_THIRD_PARTY_LOGGERS = (
+    "keystoneauth",
+    "keystoneauth.session",
+    "neutronclient",
+    "neutronclient.client",
+    "requests",
+    "urllib3",
+)
+_SENSITIVE_HEADER_NAMES = (
+    "authorization",
+    "x-auth-token",
+    "x-subject-token",
+)
+_SENSITIVE_HEADER_PATTERN = "|".join(_SENSITIVE_HEADER_NAMES)
+_QUOTED_SENSITIVE_HEADER_RE = re.compile(
+    r"((?:u)?['\"](?:%s)['\"]\s*:\s*)(?:u)?(['\"])(.*?)\2"
+    % _SENSITIVE_HEADER_PATTERN,
+    re.IGNORECASE,
+)
+_BARE_SENSITIVE_HEADER_RE = re.compile(
+    r"((?:%s)\s*[:=]\s*)(?:Bearer\s+)?([^\s,;'\"}\])]+)"
+    % _SENSITIVE_HEADER_PATTERN,
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive_headers(message):
+    message = _QUOTED_SENSITIVE_HEADER_RE.sub(
+        lambda match: "%s%s[REDACTED]%s" % (
+            match.group(1),
+            match.group(2),
+            match.group(2),
+        ),
+        message,
+    )
+    return _BARE_SENSITIVE_HEADER_RE.sub(
+        lambda match: "%s[REDACTED]" % match.group(1),
+        message,
+    )
+
+
+class _SensitiveHeaderFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        redacted = _redact_sensitive_headers(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def _install_sensitive_header_filter(handler):
+    for log_filter in handler.filters:
+        if isinstance(log_filter, _SensitiveHeaderFilter):
+            return
+    handler.addFilter(_SensitiveHeaderFilter())
+
+
 def _default_host(config):
     return config.host or socket.getfqdn() or socket.gethostname()
 
@@ -47,6 +106,14 @@ def configure_logging():
         agent_logger.addHandler(handler)
     agent_logger.setLevel(logging.INFO)
     agent_logger.propagate = False
+
+    for logger_name in _THIRD_PARTY_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    protected_handlers = list(logging.getLogger().handlers)
+    protected_handlers.extend(agent_logger.handlers)
+    for handler in protected_handlers:
+        _install_sensitive_header_filter(handler)
 
 
 def build_synchronizer(
