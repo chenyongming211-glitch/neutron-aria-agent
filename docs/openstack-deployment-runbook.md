@@ -228,6 +228,29 @@ Enable in this order:
    container until the target environment has validated startup/recovery
    timing and combined it with the separate Neutron agent RPC heartbeat.
 
+   Use the maintained composite smoke for that combined decision:
+
+   ```bash
+   sudo AGENT_HOST="$(hostname -f)" \
+     deploy/kolla/smoke/neutron_aria_composite_readiness_smoke.sh
+   ```
+
+   The composite result is ready only when both conditions hold:
+
+   - UDS Status V1 reports exact `overall_readiness=ready`, `/readyz` returns
+     HTTP 200, and `/readyz` has the same body as
+     `/api/v1/neutron/status`;
+   - the matching `Aria ACL agent` row is alive according to Neutron's
+     heartbeat and `agent_down_time` policy.
+
+   During a controlled Python-agent outage, set
+   `ARIA_PROBE_CONTAINER=aria_datapath` and `ARIA_PROBE_USER` to the permitted
+   numeric UDS peer UID so the probe remains independent of the stopped
+   container. This is a diagnostic/test mode, not a reason to expose UDS over
+   TCP. A false composite result is alert/admission evidence only. Aria must
+   not automatically restart OVS, `neutron-openvswitch-agent`, or
+   `aria-datapath` solely because this probe fails.
+
 4. **Domain authority smoke**
 
    Apply a snapshot with:

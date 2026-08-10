@@ -48,7 +48,8 @@ lane inventory, Markdown.
 - Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
   tests, shell syntax, installer, UDS route-contract, and CI lane checks.
 - Deployment probe wiring, Neutron RPC heartbeat composition, recovery timing,
-  rollback behavior, and privileged field evidence remain deferred.
+  rollback behavior, and privileged field evidence were completed later in
+  Task 4. Negative non-ready state injection remains hosted-test evidence.
 
 ---
 
@@ -216,3 +217,43 @@ target-environment probe wiring, recovery timing, and rollback evidence.
 Require a clean worktree, local/remote divergence `0 0`, remote SHA equality,
 and a successful exact-head docs Build before reporting completion of the
 source/hosted phase.
+
+---
+
+### Task 4: Validate composite readiness in the target environment
+
+**Files:**
+- Add:
+  `deploy/kolla/smoke/neutron_aria_composite_readiness_smoke.sh`
+- Modify: `docs/openstack-deployment-runbook.md`
+- Modify:
+  `docs/superpowers/specs/2026-08-01-risk-ready-001-neutron-readiness-probe-design.md`
+- Modify:
+  `docs/openstack-neutron-aria-details/12-review-bug-backlog.md`
+- Add:
+  `docs/evidence/openstack-n05-lite/20260810-ready001-composite-readiness/summary.md`
+
+- [x] **Step 1: Verify the same-source endpoint contract on available nodes**
+
+Both available test computes returned HTTP 200 from status and readiness, with
+byte-equivalent decoded Status V1 bodies, matching generations, live Neutron
+heartbeat rows, and a ready composite result.
+
+- [x] **Step 2: Verify heartbeat/datapath independence**
+
+Stop only the Python agent on one compute. Probe the UDS socket from the still
+running datapath container. Confirm that UDS remains ready while Neutron later
+marks the heartbeat down and the composite result becomes not-ready.
+
+- [x] **Step 3: Verify recovery and forwarding isolation**
+
+Restart the Python agent and measure composite recovery. Separately restart
+only the datapath while the Python agent is stopped, then restore the Python
+agent. Keep continuous test-VM traffic active and require zero packet loss.
+Do not restart or modify OVS or `neutron-openvswitch-agent`.
+
+- [x] **Step 4: Preserve the remaining negative-state boundary**
+
+Do not mutate active ACL transaction state merely to manufacture field
+`pending/degraded/blocked` evidence. Retain exact-head Rust tests as the HTTP
+503 proof for those states and keep that narrow item visible in the backlog.

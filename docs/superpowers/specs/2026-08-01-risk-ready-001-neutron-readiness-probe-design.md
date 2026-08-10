@@ -232,4 +232,33 @@ The source/hosted phase is complete when:
 
 Full risk closure additionally requires target-environment probe wiring,
 Neutron heartbeat composition, recovery timing evidence, and rollback
-instructions. No such field result is claimed by this design.
+instructions. The later field-validation result is recorded below.
+
+## Target-Environment Validation
+
+On 2026-08-10 the maintained composite smoke was deployed read-only to the two
+available test computes. Both hosts proved that `/readyz` returned HTTP 200,
+its body exactly matched `/api/v1/neutron/status`, accepted and applied
+generations matched, the heartbeat row was alive, and the combined result was
+ready.
+
+A controlled test on one compute then stopped only `neutron_aria_agent` while
+probing the UDS socket independently from the running datapath container. The
+datapath remained exact-ready, Neutron marked the heartbeat down after its
+configured timeout window, and the composite smoke correctly changed from
+ready to not-ready. Restarting the Python agent restored the combined result
+in approximately five seconds. A continuous test-VM canary delivered all 267
+packets with zero loss.
+
+A second controlled test stopped the Python agent and restarted only
+`aria_datapath`. Persisted transaction state restored exact readiness by the
+first readable probe, approximately four seconds after restart. Restarting the
+Python agent restored the strict composite result in approximately four more
+seconds. The accompanying canary delivered all 43 packets with zero loss.
+Neither test restarted or modified OVS or `neutron-openvswitch-agent`.
+
+These results close target wiring, heartbeat composition, normal recovery,
+and rollback evidence. Deliberate target-environment injection of
+`pending/degraded/blocked` remains deferred because it would mutate the active
+ACL transaction state; the HTTP 503 mapping for those states remains covered
+by the exact-head Rust behavior tests.
