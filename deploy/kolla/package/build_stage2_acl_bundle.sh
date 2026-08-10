@@ -163,6 +163,24 @@ sudo REQUIRE_HARDENED=true \
   deploy/kolla/smoke/neutron_aria_uds_hardening_smoke.sh
 ```
 
+Persist the verified profile through the Kolla host configuration only after
+the peercred-capable datapath image is installed. The installer discovers the
+numeric Neutron identity from the running agent container, atomically updates
+the mounted host config, tightens `/run/aria`, restarts only `aria_datapath`,
+and verifies both an allowed and a denied peer:
+
+```bash
+sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh apply
+sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh check
+```
+
+Rollback restores the latest config and runtime-directory preimage and
+restarts only `aria_datapath`:
+
+```bash
+sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh rollback
+```
+
 For a reversible per-node rollout proof, use the hardened rollout smoke with a
 peercred-enabled datapath image on each target datapath host. By default it
 restores the original container and config after collecting evidence:
@@ -249,6 +267,7 @@ EOF
         echo "legacy_cli_package=openstack/neutronclient_aria"
         echo "agent_image_builder=deploy/kolla/package/build_neutron_aria_agent_image.sh"
         echo "datapath_image_builder=deploy/kolla/package/build_aria_datapath_image.sh"
+        echo "uds_peercred_profile_installer=deploy/kolla/package/install_aria_uds_peercred_profile.sh"
         echo "uds_hardened_rollout=deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh"
         echo "image_tar_policy=optional_requires_KOLLA_NEUTRON_AGENT_BASE_IMAGE"
         echo "datapath_image_tar_policy=optional_requires_KOLLA_ARIA_DATAPATH_BASE_IMAGE_or_onsite_BASE_IMAGE"

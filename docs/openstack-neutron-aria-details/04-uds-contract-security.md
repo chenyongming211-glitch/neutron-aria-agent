@@ -1,8 +1,9 @@
 # 04. UDS Contract And Security Detail Plan
 
 Status: stage-one implementation package; capabilities metadata, contract
-artifact, Python validation, body-size bounds, socket mode validation, and
-connection-level peer credential audit/enforcement hooks are implemented.
+artifact, Python validation, body-size bounds, socket mode validation,
+connection-level peer credential audit/enforcement hooks, and a persistent
+Kolla production-profile installer are implemented.
 
 ## Goal
 
@@ -72,6 +73,14 @@ the safe default package runs in audit-only mode, while production hardening
 sets `neutron_peercred_enforce=true` plus an explicit uid/gid allow-list after
 N0.5 records the final container identity.
 
+The safe default file is intentionally not a production profile. Production
+deployment uses
+`deploy/kolla/package/install_aria_uds_peercred_profile.sh`, which discovers
+the final numeric identity from the running Neutron agent container, renders
+one exact allow-list, atomically replaces the host-mounted Kolla config, and
+keeps a rollback preimage. Re-running `apply` on a valid profile performs a
+read-only verification and does not restart the datapath.
+
 ## Peer Authentication
 
 Target behavior:
@@ -126,6 +135,8 @@ function-call level until the UDS contract PR is opened.
 | `openstack/neutron_aria/neutron_aria/tests/unit/` | Python tests for capability mismatch, timeout, and body limit handling. |
 | `docs/neutron-uds-contract.json` | Stage-one UDS contract artifact checked by `ci/check_neutron_stage1.py`. |
 | `docs/neutron-managed-domains-contract.md` | Human-readable short contract that links the generated artifact. |
+| `deploy/kolla/package/install_aria_uds_peercred_profile.sh` | Persistent Kolla-host production profile apply/check/rollback boundary. |
+| `ci/test_aria_uds_peercred_profile.sh` | Deterministic render, exact-key, idempotency, and invalid-identity contract. |
 
 ### Contract Schema Levels
 
@@ -170,6 +181,11 @@ Implement in phases to avoid overengineering:
 4. Phase D: add connection audit fields for uid/gid/pid when available.
 5. Optional later phase: add route/generation/body-size fields to audit lines
    if operations need that detail.
+
+Persistent production rollout uses the implemented phase A-D settings in one
+serial per-host transaction. A failed apply restores the saved config and
+runtime-directory preimage. It may restart only `aria_datapath`; it must never
+restart OVS or `neutron-openvswitch-agent`.
 
 If peer credentials are unavailable on the target platform, the deployment must
 either fail closed for production mutating routes or explicitly run in a
@@ -221,6 +237,9 @@ security phase for the target environment.
 - Peercred enforcement/audit hooks are implemented and config-gated; the safe
   default package is audit-only, and production enablement must set the final
   uid/gid allow-list from N0.5 evidence.
+- The Kolla production-profile installer renders exactly one hardened key set,
+  rejects invalid identity input, preserves unrelated config, verifies allowed
+  and denied peers, and supports rollback.
 - Timeout recovery is covered by smoke or unit tests.
 
 ## Non-Goals

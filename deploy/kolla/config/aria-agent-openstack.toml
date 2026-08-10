@@ -19,8 +19,9 @@ neutron_socket_path = "/run/aria/aria-agent.sock"
 # Decimal 432 is octal 0660. The neutron-aria-agent container must share the
 # neutron-aria group instead of relying on a world-writable control socket.
 neutron_socket_mode = 432
-# Peer credential enforcement is a production hardening gate. Keep audit-only
-# in the safe default bundle until N0.5 records the final container uid/gid.
+# This bootstrap file is audit-only because numeric identities are site-local.
+# Production installation must run install_aria_uds_peercred_profile.sh after
+# N0.5 records the final neutron-aria-agent container uid/gid.
 neutron_peercred_enforce = false
 neutron_peercred_allowed_uids = []
 neutron_peercred_allowed_gids = []

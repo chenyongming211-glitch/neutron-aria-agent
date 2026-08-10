@@ -626,6 +626,9 @@ def run_agent_package_installer_test():
     print("==> checking agent package first-install rollback")
     run([bash, bash_path("ci", "test_neutron_agent_package_installer.sh")])
 
+    print("==> checking UDS peercred production profile")
+    run([bash, bash_path("ci", "test_aria_uds_peercred_profile.sh")])
+
 
 def run_plugin_policy_rollback_test():
     bash = shutil.which("bash")

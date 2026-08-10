@@ -165,6 +165,25 @@ Enable in this order:
    set `neutron_peercred_enforce=true` and a recorded uid/gid allow-list before
    declaring peer auth enforced on site.
 
+   After the peercred-capable datapath image is present, install the production
+   profile from the Kolla host instead of editing the container filesystem:
+
+   ```bash
+   sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh apply
+   sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh check
+   ```
+
+   `apply` discovers the numeric `neutron` UID/GID from the running
+   `neutron_aria_agent`, atomically updates the host-mounted datapath config,
+   sets `/run/aria` to that group with mode `0770`, restarts only
+   `aria_datapath`, and verifies authorized and unauthorized peers plus the
+   audit trail. It is idempotent: an already valid profile is checked without
+   restarting the datapath. Roll back the latest preimage with:
+
+   ```bash
+   sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh rollback
+   ```
+
    Current 2026-06-30 UDS hardening evidence is summarized in:
 
    ```text
@@ -183,8 +202,9 @@ Enable in this order:
    `compute-3.example.test`: the peercred-enabled datapath image tightened the
    socket to `root:42435 0660`, accepted a UDS probe from the `neutron` user,
    wrote an allow audit record, and restored the original container/config.
-   Persistent hardened rollout across all target hosts remains a separate
-   production change.
+   Persistent rollout is represented by the package installer above. Run it
+   serially on each active compute and preserve its rollback state until the
+   deployment is accepted.
 
 2. **Datapath inert/bypass smoke**
 
