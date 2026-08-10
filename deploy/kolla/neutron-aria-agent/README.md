@@ -56,6 +56,17 @@ The full-resync smoke checks `/run/aria`, UDS capabilities, legacy
 neutronclient credentials, one candidate snapshot submission, and UDS rollback.
 It refuses to continue if the local UDS already has managed ports.
 
+To check whether every currently requested ACL has exact runtime enforcement
+evidence, run the read-only enforcement-gap monitor:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh
+```
+
+Exit `0` is healthy, exit `2` reports one or more enabled ACL ports that are not
+exactly `ready/enforce`, and exit `1` means the check itself failed. This command
+does not mutate ACL state or restart any service.
+
 ## Stage-Two ACL Install Gate
 
 After the `aria_acl` Neutron plugin is ready for the old onsite Neutron server,

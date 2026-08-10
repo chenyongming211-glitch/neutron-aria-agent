@@ -91,6 +91,9 @@ smoke() {
         REQUIRE_HEARTBEAT_SUMMARY_FIELDS=true \
         bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh"
 
+    log "Checking enabled ACL ports for enforcement gaps"
+    bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh"
+
     log "Checking container health"
     docker ps --filter "name=${NEUTRON_SERVER}" --filter "name=${SERVICE_NAME}" \
         --format 'table {{.Names}}\t{{.Status}}'

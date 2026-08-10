@@ -66,6 +66,7 @@ Existing scripts are the stage-three starting point:
 | Reversible UDS rollout | `deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh` |
 | ACL fault injection | `deploy/kolla/smoke/neutron_aria_acl_fault_injection_smoke.sh` |
 | ACL active traffic | `deploy/kolla/smoke/neutron_aria_acl_active_traffic_smoke.sh` |
+| ACL enforcement-gap alert | `deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh` |
 | Crash recovery | `deploy/kolla/smoke/neutron_aria_crash_injection_smoke.sh` |
 | Delete recovery | `deploy/kolla/smoke/neutron_aria_delete_fault_injection_smoke.sh` |
 | OVS restart | `deploy/kolla/smoke/neutron_aria_ovs_restart_smoke.sh` |

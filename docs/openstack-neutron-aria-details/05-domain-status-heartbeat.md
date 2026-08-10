@@ -250,6 +250,21 @@ separate signals.
   heartbeat does not carry full per-port runtime evidence.
 - Product status writes never mutate desired ACL state.
 
+### Enforcement-Gap Monitoring Boundary
+
+Heartbeat is an aggregate and its per-port sample is bounded, so it is not the
+complete security alert source. The maintained read-only check
+`deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh` joins desired
+policy/binding state, current Neutron port host ownership, and complete runtime
+status rows.
+
+For a currently bound port selected by an enabled binding, only an exact,
+non-stale `ready/enforce` row with matching policy and binding identity is
+accepted. Missing, stale, degraded, bypass, or identity-mismatched evidence is
+an enforcement gap. A port with no enabled binding remains the normal
+`not_requested/bypass` case and is not alerted. The check is read-only and must
+never restart OVS, OVS-agent, datapath, or mutate desired ACL state.
+
 ## Non-Goals
 
 - Do not expose internal WAL records as public status fields.

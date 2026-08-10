@@ -630,6 +630,17 @@ def run_agent_package_installer_test():
     run([bash, bash_path("ci", "test_aria_uds_peercred_profile.sh")])
 
 
+def run_acl_enforcement_gap_smoke_test():
+    bash = shutil.which("bash")
+    if not bash:
+        print("SKIP: bash not found; cannot test ACL enforcement-gap smoke")
+        return
+    print("==> checking ACL enforcement-gap alert boundary")
+    run([bash, bash_path(
+        "ci", "test_neutron_aria_acl_enforcement_gap_smoke.sh"
+    )])
+
+
 def run_plugin_policy_rollback_test():
     bash = shutil.which("bash")
     if not bash:
@@ -673,6 +684,7 @@ def run_fast_contracts():
     run_smoke_syntax()
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
+    run_acl_enforcement_gap_smoke_test()
     run_plugin_policy_rollback_test()
     run_transaction_state_smoke_test()
     run_db_crud_adminrc_test()

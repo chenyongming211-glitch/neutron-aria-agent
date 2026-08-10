@@ -197,6 +197,18 @@ Repeat validation without reinstalling:
 sudo REPO_ROOT=$(pwd) deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh smoke
 ```
 
+Read-only enforcement-gap alert check:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh
+```
+
+Exit `0` means every currently expected ACL port has exact non-stale
+`ready/enforce` evidence. Exit `2` emits one `ALERT` line per enforcement gap;
+exit `1` means the check itself failed. The check never changes ACL or OVS
+state.
+
 Optional live downlink ACL validation on a known reachable VM tap:
 
 ```bash
@@ -269,6 +281,7 @@ EOF
         echo "datapath_image_builder=deploy/kolla/package/build_aria_datapath_image.sh"
         echo "uds_peercred_profile_installer=deploy/kolla/package/install_aria_uds_peercred_profile.sh"
         echo "uds_hardened_rollout=deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh"
+        echo "acl_enforcement_gap_check=deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh"
         echo "image_tar_policy=optional_requires_KOLLA_NEUTRON_AGENT_BASE_IMAGE"
         echo "datapath_image_tar_policy=optional_requires_KOLLA_ARIA_DATAPATH_BASE_IMAGE_or_onsite_BASE_IMAGE"
     } > MANIFEST.txt

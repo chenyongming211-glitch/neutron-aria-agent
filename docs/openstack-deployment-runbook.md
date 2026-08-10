@@ -413,6 +413,7 @@ Minimum production smoke:
 | ACL absent | ACL domain `not_requested`, `effective_action=bypass`. |
 | ACL policy valid | ACL domain `ready`, `effective_action=enforce`. |
 | ACL policy missing/invalid | ACL domain `degraded`, `effective_action=bypass`; OVS forwarding unaffected. |
+| Enabled ACL binding is not enforced | `neutron_aria_acl_enforcement_gap_smoke.sh` exits `2` and identifies the port, host, policy, binding, runtime state, action, and reason. |
 | Local `ariactl policy add` on ACL-managed instance | Rejected with `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`. |
 | Local `ariactl qos add` when only ACL is managed | Allowed. |
 | RPC P2 package smoke | `neutron_aria_rpc_event_smoke.sh` passes before any live RabbitMQ canary. |
@@ -422,6 +423,37 @@ Minimum production smoke:
 | Datapath restart | WAL/status recovers or full resync repairs; no unmanaged tap takeover. |
 | UDS hardening evidence-only smoke | `neutron_aria_uds_hardening_smoke.sh` records uid/gid allow-list candidates and current socket/audit disposition without mutating the host. |
 | UDS hardened enforcement smoke | With `REQUIRE_HARDENED=true`, socket has no other-user bits, audit log exists, and peercred enforcement uses the recorded uid/gid allow-list. |
+
+### ACL Enforcement-Gap Alert
+
+An alive agent, a reachable VM, or a successful OVS connectivity check does
+not prove that an enabled ACL is enforcing. For every currently bound port
+selected by an enabled port or network binding, require all of the following:
+
+- the selected policy exists and is enabled;
+- the runtime row belongs to the port's current `binding:host_id`;
+- `binding_id` and `effective_policy_id` match the selected desired state;
+- the row is not stale;
+- runtime status is `ready` and `effective_action=enforce`.
+
+Run the read-only monitor check from a Kolla host with local Neutron API access:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh
+```
+
+Exit `0` means all currently expected ACL ports have exact `ready/enforce`
+evidence. Exit `2` means one or more enforcement gaps exist and each `ALERT`
+line contains the affected identity and reason. Exit `1` means the check itself
+could not obtain or validate its inputs. Feed exit `2` into the site's security
+monitoring. Do not wire this alert to automatic OVS, OVS-agent, datapath, or
+policy restart.
+
+No enabled binding, a disabled binding, and an unbound port do not represent an
+active enforcement gap. They remain visible through ordinary desired/runtime
+inspection; only a currently bound port selected for ACL enforcement pages the
+security operator.
 
 ## RPC P2 Canary Enablement
 
