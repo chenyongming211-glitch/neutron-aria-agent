@@ -769,6 +769,37 @@ pub async fn system_start(
                 ));
             }
         }
+        for map_name in NETWORK_MAP_NAMES {
+            if let Err(error) = remove_pin_file_if_present(&Path::new(pin_path).join(map_name)) {
+                return Err(start_error_with_cleanup(
+                    format!(
+                        "failed to remove stale legacy {} map pin during recovery: {}",
+                        map_name, error
+                    ),
+                    iface,
+                    pin_path,
+                    state_path,
+                    &ownership,
+                ));
+            }
+        }
+        if let Err(error) = pin_runtime_maps(
+            &mut bpf,
+            pin_path,
+            trace_map_mode,
+            &mut ownership,
+        ) {
+            return Err(start_error_with_cleanup(
+                format!(
+                    "failed to publish rebuilt legacy runtime maps during recovery: {}",
+                    error
+                ),
+                iface,
+                pin_path,
+                state_path,
+                &ownership,
+            ));
+        }
         preexisting_health = preexisting_instance.tc_acl_link_health();
         preexisting_tc_runtime = preexisting_tc_ingress_link
             || preexisting_tc_egress_link
@@ -1336,6 +1367,26 @@ mod tests {
             TcAclLinkHealth::new(true, true, false),
         )
         .is_empty());
+    }
+
+    #[test]
+    fn standalone_review_legacy_recovery_republishes_maps_before_replay() {
+        let source = include_str!("system_manager.rs");
+        let start = source
+            .split("pub async fn system_start(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn system_stop(")
+            .next()
+            .unwrap();
+        let detach = start.find("detach_owned_legacy_tc_program").unwrap();
+        let repin = start.find("for map_name in NETWORK_MAP_NAMES").unwrap();
+        let replay = start
+            .find("let replay_result = if reuse_preexisting_tc")
+            .unwrap();
+
+        assert!(detach < repin);
+        assert!(repin < replay);
     }
 
     #[test]
