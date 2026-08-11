@@ -14,8 +14,8 @@ use tracing::{info, warn};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
     cleanup_root_qdisc, critical_network_map_names, ensure_fq_qdisc,
-    replay_state_from_snapshot, scrub_standalone_runtime_state, FqQdiscState, TraceMapMode,
-    NETWORK_MAP_NAMES,
+    replay_standalone_state_to_pinned_maps_from_snapshot, replay_state_from_snapshot,
+    scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
@@ -768,7 +768,16 @@ pub async fn system_start(
     let mut quiesced_desired = desired.clone();
     quiesced_desired.conntrack_enabled = false;
     quiesced_desired.acl_enabled = false;
-    if let Err(e) = replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired) {
+    let replay_result = if reuse_preexisting_tc {
+        replay_standalone_state_to_pinned_maps_from_snapshot(
+            pin_path,
+            state_path,
+            &quiesced_desired,
+        )
+    } else {
+        replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)
+    };
+    if let Err(e) = replay_result {
         return Err(start_error_with_cleanup(
             format!("failed to replay state: {}", e),
             iface,
@@ -1351,6 +1360,9 @@ mod tests {
             "replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)"
         ));
         assert!(start.contains(
+            "replay_standalone_state_to_pinned_maps_from_snapshot"
+        ));
+        assert!(start.contains(
             ".register_system_instance(pin_path, state_path, desired, iface)"
         ));
         assert!(!start.contains("replay_state(&mut bpf, state_path)"));
@@ -1366,7 +1378,9 @@ mod tests {
             .split("pub async fn system_stop(")
             .next()
             .unwrap();
-        let replay = start.find("replay_state_from_snapshot").unwrap();
+        let replay = start
+            .find("let replay_result = if reuse_preexisting_tc")
+            .unwrap();
         let register = start.find("register_system_instance").unwrap();
 
         assert!(replay < register);

@@ -164,6 +164,18 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         )
         self.assertIn("tap_id: args.tap_id", self.ebpf_ct_contract_source)
 
+    def test_system_restart_replays_into_maps_owned_by_preexisting_tc(self):
+        source = self.system_manager_source
+        self.assertIn("if reuse_preexisting_tc", source)
+        self.assertIn(
+            "replay_standalone_state_to_pinned_maps_from_snapshot",
+            source,
+        )
+        self.assertIn(
+            "replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

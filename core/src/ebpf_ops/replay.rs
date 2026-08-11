@@ -713,10 +713,18 @@ pub fn replay_standalone_state_to_pinned_maps(
     state_path: &str,
 ) -> Result<(), String> {
     let state = crate::wal::load_with_wal(state_path);
+    replay_standalone_state_to_pinned_maps_from_snapshot(pin_path, state_path, &state)
+}
+
+pub fn replay_standalone_state_to_pinned_maps_from_snapshot(
+    pin_path: &str,
+    state_path: &str,
+    state: &FirewallState,
+) -> Result<(), String> {
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
-        &state,
+        state,
         PinnedReplayRoute::Standalone(StandaloneReplayRoute::new()),
     )
 }
@@ -833,7 +841,11 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
         errors.push(format!("FIREWALL_CONFIG: {}", e));
     }
 
-    if tap_id != TAP_ID_UNASSIGNED {
+    if tap_id == TAP_ID_UNASSIGNED {
+        if let Err(e) = set_acl_active_bank(runtime, ACL_BANK_PRIMARY) {
+            errors.push(format!("FIREWALL_CONFIG active bank: {}", e));
+        }
+    } else {
         let tap_cfg = TapConfig {
             conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
             monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },

@@ -61,7 +61,8 @@ pub use projection::{
 };
 pub use replay::{
     build_runtime_group_map_entries, collect_standalone_runtime_group_map_entries,
-    replay_managed_state_to_pinned_maps, replay_standalone_state_to_pinned_maps, replay_state,
+    replay_managed_state_to_pinned_maps, replay_standalone_state_to_pinned_maps,
+    replay_standalone_state_to_pinned_maps_from_snapshot, replay_state,
     replay_state_from_snapshot, FragmentRuntimeIdentity, GroupProjectionMode, ManagedReplayRoute,
     RuntimeGroupMapEntries, RuntimeNetworkEntry, StandaloneReplayRoute,
 };
