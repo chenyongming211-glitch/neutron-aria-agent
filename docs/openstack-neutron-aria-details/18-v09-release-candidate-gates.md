@@ -37,7 +37,7 @@ ACL release path.
 | P2 exact-candidate CI artifacts | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Run `31373688900` produced `aria-agent`, `ariactl`, `libebpf_firewall.so`, `stack-budget.json`, and the Kolla bundle in one successful workflow run; hashes are recorded in the P2 evidence summary. |
 | P3 4.18 isolated canary | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Exact P2 artifacts passed legacy TC ingress/egress load, isolated ACL behavior, restart recovery, missing-TC safety, and zero-residue checks on `4.18.0-553.5.1.el8_10.x86_64`; OVS and running service identities were unchanged. |
 | P4 single-node release candidate | complete | One compute passed readiness, peercred, managed ACL, TC identity, WAL recovery, detach/purge, datapath restart recovery, real old-version rollback, Python one-shot log protection, and final traffic canary without restarting OVS or OVS-agent. |
-| P5 three-node final acceptance | blocked on unavailable compute | Current-hash evidence covers rolling deployment, traffic, lifecycle, RPC regression, cleanup, and rollback on all target computes. |
+| P5 three-node final acceptance | partial pass; blocked on one unavailable compute | Two available computes have current-component-hash rollout/readiness evidence. Production-agent RPC fanout, foreign-host filtering, migration-source cleanup, event-driven restore, rollback, traffic, and OVS non-interference passed. The same suite remains required on the unavailable compute before P5 can close. |
 | P6 release governance | pending | Version, license, manifest, checksums, support matrix, change log, upgrade, and rollback rules are frozen. |
 | P7 QoS then Mirror | deferred | Starts only after P6; no ACL release work is displaced by new feature scope. |
 
@@ -135,3 +135,5 @@ P0 is complete only when all of the following hold:
   `docs/evidence/openstack-n05-lite/20260810-p3-legacy-kernel-canary/summary.md`
 - P4 single-node release candidate:
   `docs/evidence/openstack-n05-lite/20260810-p4-single-node-release-candidate/summary.md`
+- P5 two-node current-candidate partial evidence:
+  `docs/evidence/openstack-n05-lite/20260811-p5-two-node-current-candidate/summary.md`
