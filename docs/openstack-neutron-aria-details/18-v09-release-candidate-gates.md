@@ -4,8 +4,9 @@ Status: normative release sequence; P0-P4 complete. The current persistent
 Rust/eBPF runtime candidate is
 `7ffc5d65d9b30d0a1f9e706ec779cc8213200458`; it is deployed as the same local
 Kolla RC image on both available computes. P5 remains partial because one
-compute is unavailable. P6-1 delivery governance is in progress; formal P6
-promotion and P7 remain pending or deferred as recorded below.
+compute is unavailable. P6-1 delivery governance and the two-available-compute
+read-only delivery check are complete; formal P6 promotion and P7 remain
+pending or deferred as recorded below.
 
 ## Purpose
 
@@ -40,7 +41,7 @@ ACL release path.
 | P3 4.18 isolated canary | complete for current runtime candidate | Exact `7ffc5d6` artifacts passed the target-kernel standalone system, standalone tap, and focused Neutron-managed TC authority suites. XDP remained ACL/CT-neutral, restart recovery admitted zero packets, and OVS identities were unchanged. |
 | P4 single-node release candidate | complete for persistent image | Compute A passed exact-image deployment, readiness, real ACL traffic, actual old-version rollback, fresh container recreation, and a 2,994-reply zero-failure OVS canary without restarting OVS or OVS-agent. |
 | P5 three-node final acceptance | partial pass; blocked on one unavailable compute | Both available computes now run the same persistent `7ffc5d6` image and passed rollback, recreation, readiness, ACL lifecycle, cleanup, and OVS non-interference. Earlier production-agent RPC fanout, foreign-host filtering, migration-source cleanup, and event-driven restore evidence remains valid. The same suite remains required on the unavailable compute before P5 can close. |
-| P6 release governance | P6-1 implemented; promotion blocked by P5 | Root product version, license, changelog, deterministic manifest/checksums, support matrix, and a manifest-pinned Kolla datapath install/check/rollback entrypoint are present. Final tag, registry promotion, and release declaration remain blocked until P5 closes. |
+| P6 release governance | P6-1 implemented and checked on both available computes; promotion blocked by P5 | Root product version, license, changelog, reproducible bundle, deterministic manifest/checksums, support matrix, and a manifest-pinned Kolla datapath install/check/rollback entrypoint are present. Commit `9848779` passed CI run `31492061846`; the entrypoint then verified the existing RC image and runtime hashes read-only on both available computes without restarting Aria, OVS, or OVS-agent. Final tag, registry promotion, and release declaration remain blocked until P5 closes. |
 | P7 QoS then Mirror | deferred | Starts only after P6; no ACL release work is displaced by new feature scope. |
 
 ## P0 Trusted Source Baseline
