@@ -2,9 +2,9 @@
 
 Date: 2026-08-10
 
-Status: target wiring, heartbeat composition, normal recovery, and rollback
-evidence complete on the two available test computes. Negative
-`pending/degraded/blocked` field injection remains deferred.
+Status: historical baseline for target wiring, heartbeat composition, normal
+recovery, and rollback on the two available test computes. Negative-state
+closure is recorded in the 2026-08-11 follow-up evidence.
 
 ## Scope And Safety
 
@@ -43,10 +43,12 @@ must not be used to restart OVS, `neutron-openvswitch-agent`, or the datapath.
 | Forwarding canary, datapath test | 43 packets transmitted, 43 received, zero packet loss. |
 | Local contracts | `python ci/check_neutron_stage1.py --fast-contracts` passed 584 Python tests with 8 environment-dependent skips, 10 CLI tests, package/install contracts, and syntax checks for every public smoke entrypoint including the new composite probe. |
 
-## Remaining Boundary
+## Closure Follow-Up
 
 The exact-head Rust behavior suite proves that cold-start/pending `unknown`,
 terminal `degraded`, and recovery/operator `blocked` return HTTP 503 while the
-inspection endpoint remains HTTP 200 with the same Status V1 body. Deliberate
-field injection of those states was not performed because it would mutate the
-active ACL transaction state without adding a new source-contract result.
+inspection endpoint remains HTTP 200 with the same Status V1 body. This
+checkpoint deliberately did not inject those states into active ACL
+transaction state. The follow-up used an isolated target-kernel datapath with
+private socket, state, and pin identities and closed all three field states;
+see `docs/evidence/openstack-n05-lite/20260811-ready001-negative-states/summary.md`.

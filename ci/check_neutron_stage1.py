@@ -618,6 +618,12 @@ def run_fragment_tracking_field_driver_self_test():
     run([sys.executable, FRAGMENT_TRACKING_FIELD_DRIVER_PATH, "--self-test"])
 
 
+def run_readiness_endpoint_smoke_contract_test():
+    print("==> checking readiness endpoint smoke contract")
+    run([sys.executable, "-m", "unittest",
+         "ci.test_neutron_aria_readiness_endpoint_smoke"])
+
+
 def run_agent_package_installer_test():
     bash = shutil.which("bash")
     if not bash:
@@ -682,6 +688,7 @@ def run_fast_contracts():
     check_uds_contract_artifact()
     check_public_smoke_entrypoints()
     run_smoke_syntax()
+    run_readiness_endpoint_smoke_contract_test()
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
     run_acl_enforcement_gap_smoke_test()
