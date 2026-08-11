@@ -1,9 +1,10 @@
 # v0.9 Release Candidate Gates
 
-Status: normative release sequence; P0-P4 complete. P3 and the P4 datapath use
-candidate `1051b677063ebe337e977c52a253b907027e6fad`; the P4 Python adapter uses
-security-fix candidate `bb973a202e560cce9158e8c6fd0da904fbdf81e7`. P5-P7
-remain pending, blocked, or deferred as recorded below.
+Status: normative release sequence; P0-P4 complete. The current persistent
+Rust/eBPF runtime candidate is
+`7ffc5d65d9b30d0a1f9e706ec779cc8213200458`; it is deployed as the same local
+Kolla RC image on both available computes. P5 remains partial because one
+compute is unavailable. P6-P7 remain pending or deferred as recorded below.
 
 ## Purpose
 
@@ -33,11 +34,11 @@ ACL release path.
 | Gate | Status | Exit evidence |
 | --- | --- | --- |
 | P0 trusted source baseline | complete | Shared ACL error contract locked; Windows and Linux fast contracts and public-term scan green; generated outputs excluded; source/history boundary recorded. |
-| P1 legacy-kernel stack architecture | implemented, verify-only | Two-slot CT key scratch and 448-byte budget gate exist. No tail-call expansion is planned. |
-| P2 exact-candidate CI artifacts | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Run `31373688900` produced `aria-agent`, `ariactl`, `libebpf_firewall.so`, `stack-budget.json`, and the Kolla bundle in one successful workflow run; hashes are recorded in the P2 evidence summary. |
-| P3 4.18 isolated canary | complete for candidate `1051b677063ebe337e977c52a253b907027e6fad` | Exact P2 artifacts passed legacy TC ingress/egress load, isolated ACL behavior, restart recovery, missing-TC safety, and zero-residue checks on `4.18.0-553.5.1.el8_10.x86_64`; OVS and running service identities were unchanged. |
-| P4 single-node release candidate | complete | One compute passed readiness, peercred, managed ACL, TC identity, WAL recovery, detach/purge, datapath restart recovery, real old-version rollback, Python one-shot log protection, and final traffic canary without restarting OVS or OVS-agent. |
-| P5 three-node final acceptance | partial pass; blocked on one unavailable compute | Two available computes have current-component-hash rollout/readiness evidence. Production-agent RPC fanout, foreign-host filtering, migration-source cleanup, event-driven restore, rollback, traffic, and OVS non-interference passed. The same suite remains required on the unavailable compute before P5 can close. |
+| P1 legacy-kernel stack architecture | complete for current runtime candidate | Two-slot CT key scratch and the 448-byte budget gate are present. The `7ffc5d6` artifact reports 448 bytes for both TC ingress and egress; no tail-call expansion is planned. |
+| P2 exact-candidate CI artifacts | complete for candidate `7ffc5d65d9b30d0a1f9e706ec779cc8213200458` | Exact-artifact workflow `31477810061` produced the Rust/eBPF files used by the persistent RC image. Runtime hashes and the stack budget are recorded in the persistent two-compute evidence. |
+| P3 4.18 isolated canary | complete for current runtime candidate | Exact `7ffc5d6` artifacts passed the target-kernel standalone system, standalone tap, and focused Neutron-managed TC authority suites. XDP remained ACL/CT-neutral, restart recovery admitted zero packets, and OVS identities were unchanged. |
+| P4 single-node release candidate | complete for persistent image | Compute A passed exact-image deployment, readiness, real ACL traffic, actual old-version rollback, fresh container recreation, and a 2,994-reply zero-failure OVS canary without restarting OVS or OVS-agent. |
+| P5 three-node final acceptance | partial pass; blocked on one unavailable compute | Both available computes now run the same persistent `7ffc5d6` image and passed rollback, recreation, readiness, ACL lifecycle, cleanup, and OVS non-interference. Earlier production-agent RPC fanout, foreign-host filtering, migration-source cleanup, and event-driven restore evidence remains valid. The same suite remains required on the unavailable compute before P5 can close. |
 | P6 release governance | pending | Version, license, manifest, checksums, support matrix, change log, upgrade, and rollback rules are frozen. |
 | P7 QoS then Mirror | deferred | Starts only after P6; no ACL release work is displaced by new feature scope. |
 
@@ -137,3 +138,5 @@ P0 is complete only when all of the following hold:
   `docs/evidence/openstack-n05-lite/20260810-p4-single-node-release-candidate/summary.md`
 - P5 two-node current-candidate partial evidence:
   `docs/evidence/openstack-n05-lite/20260811-p5-two-node-current-candidate/summary.md`
+- Persistent `7ffc5d6` two-compute Kolla RC:
+  `docs/evidence/openstack-n05-lite/20260811-persistent-7ffc5d6-two-compute-rc/summary.md`

@@ -7,7 +7,23 @@ rollout, rollback, readiness, ACL traffic, UDS hardening, and production-agent
 RPC lifecycle checks. The third target compute was unavailable at the host
 and agent layers, so this evidence does not close the three-node P5 gate.
 
-## Candidate Identity
+## Persistent Runtime RC Update
+
+The later `7ffc5d6` Rust/eBPF candidate supersedes the runtime component hashes
+below. Both available computes now run the same local Kolla image
+`aria-datapath:rc-7ffc5d6` with image ID
+`sha256:91377e742a2b455729bab83f50c3c21292e4b72f060210461781f00336e5f319`.
+Both passed actual old-version rollback, fresh container recreation, real ACL
+enforcement and restore, exact runtime hash checks, and independent OVS
+canaries with zero failure markers. Full evidence is recorded in:
+
+`docs/evidence/openstack-n05-lite/20260811-persistent-7ffc5d6-two-compute-rc/summary.md`
+
+The image is persistent on the target computes but is not yet published to a
+production registry. The earlier identity and RPC results below remain useful
+control-plane evidence; they are not the current Rust/eBPF runtime identity.
+
+## Earlier Control-Plane Candidate Identity
 
 The source record is branch `v0.9-neutron-agent` at
 `baa37f4c11bc4bdc4c8cb554d25bf754f01c0779`. The deployed components were
