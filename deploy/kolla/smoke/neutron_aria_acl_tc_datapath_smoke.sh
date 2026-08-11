@@ -1896,6 +1896,7 @@ write_summary() {
     LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="${LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS}" \
     LEGACY_RESTART_REPAIR_GATE="${LEGACY_RESTART_REPAIR_GATE}" \
     LEGACY_REPAIR_MODE="${LEGACY_REPAIR_MODE}" \
+    SELECTOR_FIXTURE_SCOPE="${SELECTOR_FIXTURE_SCOPE}" \
     TC_ATTACHMENT_MODE="${TC_ATTACHMENT_MODE}" \
     FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE}" \
     FRAGMENT_BODY_SUCCEEDED="${FRAGMENT_BODY_SUCCEEDED}" \
@@ -1911,6 +1912,7 @@ selector_fixtures={
     "legacy_repair":os.environ["LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS"],
 }
 selector_isolation={
+    "requested_scope":os.environ["SELECTOR_FIXTURE_SCOPE"],
     "fixtures":selector_fixtures,
     "tc_attachment_mode":os.environ["TC_ATTACHMENT_MODE"],
     "legacy_restart_repair_gate":os.environ["LEGACY_RESTART_REPAIR_GATE"],
@@ -2093,17 +2095,25 @@ update_policy_stateful true
 create_rule ingress drop
 create_rule egress drop
 run_deny_evidence
-prepare_owned_selector_fixture
 case "${SELECTOR_FIXTURE_SCOPE}" in
     all)
+        prepare_owned_selector_fixture
         run_exact_selector_isolation_fixture
         run_more_specific_selector_isolation_fixture
         run_legacy_selector_repair_fixture
         ;;
     legacy_repair)
+        prepare_owned_selector_fixture
         EXACT_SELECTOR_FIXTURE_STATUS="covered_by_prior_evidence"
         MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="covered_by_prior_evidence"
         run_legacy_selector_repair_fixture
+        ;;
+    none)
+        EXACT_SELECTOR_FIXTURE_STATUS="not_requested"
+        MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="not_requested"
+        LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_requested"
+        LEGACY_RESTART_REPAIR_GATE="not_requested"
+        LEGACY_REPAIR_MODE="not_requested"
         ;;
     *) die "unsupported SELECTOR_FIXTURE_SCOPE: ${SELECTOR_FIXTURE_SCOPE}" ;;
 esac

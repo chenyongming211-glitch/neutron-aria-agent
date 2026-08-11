@@ -102,6 +102,10 @@ def main():
         '"legacy_restart_repair_gate":"not_applicable"',
         "assert_exact_selector_state() {",
         "assert_more_specific_selector_state() {",
+        'SELECTOR_FIXTURE_SCOPE="${SELECTOR_FIXTURE_SCOPE:-all}"',
+        '"requested_scope":os.environ["SELECTOR_FIXTURE_SCOPE"]',
+        'EXACT_SELECTOR_FIXTURE_STATUS="not_requested"',
+        'LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_requested"',
         'LEGACY_POLLUTION_GROUP_CIDR="${LEGACY_POLLUTION_GROUP_CIDR:-192.0.2.1/32}"',
         "assert exact_acl_entries[selector_cidr]==selector_group_id",
         "assert new_acl_entries[selector_cidr]==selector_group_id",
@@ -124,6 +128,11 @@ def main():
     )
     if any(term in source for term in restart_bank_invariants):
         print("ERROR: managed TC ACL smoke treats the bank slot as restart-persistent")
+        return 1
+    selector_prepare = source.index("prepare_owned_selector_fixture", source.index('case "${SELECTOR_FIXTURE_SCOPE}" in'))
+    selector_none = source.index("none)", selector_prepare)
+    if not selector_prepare < selector_none:
+        print("ERROR: selector fixture preparation is not scoped away from ACL-only smoke")
         return 1
     legacy_delete = source.index('delete_selector_fixture_group "${LEGACY_LOCAL_GROUP_NAME}"')
     legacy_repaired = source.index("LEGACY_POLLUTION_INJECTED=false", legacy_delete)
