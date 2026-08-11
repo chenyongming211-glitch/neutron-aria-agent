@@ -52,7 +52,9 @@ pub fn acl_active_bank(tap_id: u32) -> u8 {
             return normalize_acl_bank(cfg.acl_active_bank);
         }
     }
-    ACL_BANK_PRIMARY
+    read_global_config()
+        .map(|cfg| normalize_acl_bank(cfg.acl_active_bank))
+        .unwrap_or(ACL_BANK_PRIMARY)
 }
 
 #[inline(always)]

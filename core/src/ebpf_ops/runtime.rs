@@ -56,6 +56,13 @@ fn tap_config_with_acl_bank(current: TapConfig, bank: u8) -> TapConfig {
     }
 }
 
+fn firewall_config_with_acl_bank(current: FirewallConfig, bank: u8) -> FirewallConfig {
+    FirewallConfig {
+        acl_active_bank: normalize_acl_bank(bank),
+        ..current
+    }
+}
+
 fn tap_config_with_runtime_updates(
     current: TapConfig,
     conntrack_enabled: Option<bool>,
@@ -127,7 +134,23 @@ fn required_tap_config(
 
 pub fn set_acl_active_bank(runtime: TapMapRuntime<'_>, bank: u8) -> Result<(), String> {
     if runtime.tap_id == TAP_ID_UNASSIGNED {
-        return Err("ACL active bank is only supported for per-tap runtime config".to_string());
+        let map_path = format!("{}/FIREWALL_CONFIG", runtime.pin_path);
+        let map_data = MapData::from_pin(&map_path)
+            .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
+        let mut map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(
+            aya::maps::Map::HashMap(map_data),
+        )
+        .map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
+        let current = required_firewall_config(
+            map.get(&0u32, 0),
+            false,
+            "standalone active bank update",
+        )?
+        .expect("partial FIREWALL_CONFIG update requires an existing value");
+        let cfg = firewall_config_with_acl_bank(current, bank);
+        return map
+            .insert(&0u32, &cfg, 0)
+            .map_err(|e| format!("FIREWALL_CONFIG active bank insert: {:?}", e));
     }
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
@@ -147,7 +170,8 @@ pub fn set_acl_active_bank(runtime: TapMapRuntime<'_>, bank: u8) -> Result<(), S
 
 pub fn read_acl_active_bank(runtime: TapMapRuntime<'_>) -> Result<u8, String> {
     if runtime.tap_id == TAP_ID_UNASSIGNED {
-        return Ok(ACL_BANK_PRIMARY);
+        let cfg = read_firewall_config(runtime)?;
+        return Ok(normalize_acl_bank(cfg.acl_active_bank));
     }
 
     let map = open_pinned_tap_config(runtime.pin_path)?;
@@ -318,6 +342,10 @@ pub fn update_firewall_config(
     let ssl = ssl_enabled
         .map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.ssl_enabled).unwrap_or(0));
+    let acl_active_bank = current
+        .as_ref()
+        .map(|c| normalize_acl_bank(c.acl_active_bank))
+        .unwrap_or(ACL_BANK_PRIMARY);
 
     let cfg = FirewallConfig {
         conntrack_enabled: ct,
@@ -328,7 +356,7 @@ pub fn update_firewall_config(
         mirror_enabled: mir,
         tcprt_enabled: tcprt,
         ssl_enabled: ssl,
-        _pad: [0; 1],
+        acl_active_bank,
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
@@ -339,8 +367,8 @@ pub fn update_firewall_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        required_firewall_config, required_tap_config, tap_config_with_acl_bank,
-        tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
+        firewall_config_with_acl_bank, required_firewall_config, required_tap_config,
+        tap_config_with_acl_bank, tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
     };
     use crate::common::{
         FirewallConfig, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
@@ -497,7 +525,7 @@ mod tests {
             mirror_enabled: 0,
             tcprt_enabled: 0,
             ssl_enabled: 0,
-            _pad: [0; 1],
+            acl_active_bank: 1,
         };
         assert_eq!(
             required_firewall_config(Ok(existing), true, "full initialization")
@@ -506,6 +534,33 @@ mod tests {
                 .num_cpus,
             8
         );
+    }
+
+    #[test]
+    fn standalone_active_bank_update_preserves_global_feature_flags() {
+        let current = FirewallConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 0,
+            num_cpus: 8,
+            qos_enabled: 1,
+            acl_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 0,
+            ssl_enabled: 1,
+            acl_active_bank: 0,
+        };
+
+        let next = firewall_config_with_acl_bank(current, 1);
+
+        assert_eq!(next.conntrack_enabled, 1);
+        assert_eq!(next.monitoring_enabled, 0);
+        assert_eq!(next.num_cpus, 8);
+        assert_eq!(next.qos_enabled, 1);
+        assert_eq!(next.acl_enabled, 1);
+        assert_eq!(next.mirror_enabled, 1);
+        assert_eq!(next.tcprt_enabled, 0);
+        assert_eq!(next.ssl_enabled, 1);
+        assert_eq!(next.acl_active_bank, 1);
     }
 
     #[test]
@@ -575,6 +630,6 @@ pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig,
         mirror_enabled: tap_cfg.mirror_enabled,
         tcprt_enabled: tap_cfg.tcprt_enabled,
         ssl_enabled: global.ssl_enabled,
-        _pad: [0; 1],
+        acl_active_bank: tap_cfg.acl_active_bank,
     })
 }

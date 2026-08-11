@@ -248,10 +248,6 @@ fn record_optional_scrub(
 }
 
 pub fn scrub_acl_bank(runtime: TapMapRuntime<'_>, bank: u8) -> Result<u64, String> {
-    if runtime.tap_id == TAP_ID_UNASSIGNED {
-        return Ok(0);
-    }
-
     let pin_path = runtime.pin_path;
     let tap_id = runtime.tap_id;
     let bank = normalize_acl_bank(bank);

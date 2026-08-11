@@ -132,7 +132,7 @@ def main() -> None:
         "_pad_prev_payload_len: [u8; 2]",
         "_pad_last_resp_payload_len: [u8; 2]",
         "_pad3: [u8; 4]",
-        "_pad: [u8; 1]",
+        "pub acl_active_bank: u8",
     ):
         require(abi_source, field, "abi/src/lib.rs")
     require(
@@ -158,11 +158,9 @@ def main() -> None:
         "(*val)._pad3 = [0; 4];",
     ):
         require(ebpf_tcprt, assignment, "ebpf/src/tcprt.rs")
-    if core_runtime.count("_pad: [0; 1]") != 3:
-        raise AssertionError(
-            "core/src/ebpf_ops/runtime.rs must initialize all FirewallConfig padding"
-        )
-    require(core_replay, "_pad: [0; 1]", "core/src/ebpf_ops/replay.rs")
+    forbid(core_runtime, "_pad: [0; 1]", "core/src/ebpf_ops/runtime.rs")
+    require(core_runtime, "acl_active_bank", "core/src/ebpf_ops/runtime.rs")
+    require(core_replay, "acl_active_bank", "core/src/ebpf_ops/replay.rs")
 
     forbid(instance, "fn tc_acl_links_complete(", "agent/src/instance.rs")
     forbid(

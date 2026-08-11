@@ -22,6 +22,10 @@ STANDALONE = os.path.join(
 )
 INSTANCE = os.path.join(ROOT, "agent", "src", "instance.rs")
 SYSTEM_MANAGER = os.path.join(ROOT, "agent", "src", "system_manager.rs")
+ABI = os.path.join(ROOT, "abi", "src", "lib.rs")
+CORE_RUNTIME = os.path.join(ROOT, "core", "src", "ebpf_ops", "runtime.rs")
+EBPF_RUNTIME = os.path.join(ROOT, "ebpf", "src", "runtime.rs")
+CORE_SCRUB = os.path.join(ROOT, "core", "src", "ebpf_ops", "scrub.rs")
 
 
 class LegacyKernelCanaryContractTest(unittest.TestCase):
@@ -34,6 +38,14 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
             self.instance_source = handle.read()
         with open(SYSTEM_MANAGER, "r", encoding="utf-8") as handle:
             self.system_manager_source = handle.read()
+        with open(ABI, "r", encoding="utf-8") as handle:
+            self.abi_source = handle.read()
+        with open(CORE_RUNTIME, "r", encoding="utf-8") as handle:
+            self.core_runtime_source = handle.read()
+        with open(EBPF_RUNTIME, "r", encoding="utf-8") as handle:
+            self.ebpf_runtime_source = handle.read()
+        with open(CORE_SCRUB, "r", encoding="utf-8") as handle:
+            self.core_scrub_source = handle.read()
 
     def test_requires_exact_kernel_and_artifact_hashes(self):
         self.assertIn("4.18.0-553.5.1.el8_10.x86_64", self.source)
@@ -113,6 +125,35 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         self.assertIn("detach_owned_legacy_tc_program", stop)
         self.assertIn('"tc_ingress"', stop)
         self.assertIn('"tc_egress"', stop)
+
+    def test_system_mode_uses_abi_stable_global_acl_bank(self):
+        firewall_config = self.abi_source.split("pub struct FirewallConfig", 1)[1]
+        firewall_config = firewall_config.split("pub const TAP_ID_UNASSIGNED", 1)[0]
+        self.assertIn("pub acl_active_bank: u8", firewall_config)
+        self.assertNotIn("pub _pad: [u8; 1]", firewall_config)
+        self.assertIn(
+            "core::mem::offset_of!(FirewallConfig, acl_active_bank), 9",
+            self.abi_source,
+        )
+
+        set_bank = self.core_runtime_source.split("pub fn set_acl_active_bank", 1)[1]
+        set_bank = set_bank.split("pub fn read_acl_active_bank", 1)[0]
+        self.assertIn("firewall_config_with_acl_bank", set_bank)
+        self.assertNotIn("only supported for per-tap runtime config", set_bank)
+
+        read_bank = self.core_runtime_source.split("pub fn read_acl_active_bank", 1)[1]
+        read_bank = read_bank.split("pub fn update_acl_runtime_gate", 1)[0]
+        self.assertIn("read_firewall_config", read_bank)
+        self.assertIn("cfg.acl_active_bank", read_bank)
+
+        ebpf_bank = self.ebpf_runtime_source.split("pub fn acl_active_bank", 1)[1]
+        ebpf_bank = ebpf_bank.split("pub fn qos_enabled", 1)[0]
+        self.assertIn("cfg.acl_active_bank", ebpf_bank)
+
+        scrub_bank = self.core_scrub_source.split("pub fn scrub_acl_bank", 1)[1]
+        scrub_bank = scrub_bank.split("fn scrub_runtime_state", 1)[0]
+        self.assertNotIn("tap_id == TAP_ID_UNASSIGNED", scrub_bank)
+        self.assertIn("acl_banked_tap_id(tap_id, bank)", scrub_bank)
 
 
 if __name__ == "__main__":

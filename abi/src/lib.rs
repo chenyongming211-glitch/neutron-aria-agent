@@ -622,7 +622,9 @@ pub struct FirewallConfig {
     pub mirror_enabled: u8,
     pub tcprt_enabled: u8,
     pub ssl_enabled: u8,
-    pub _pad: [u8; 1],
+    /// Standalone/global ACL bank. This reuses the former padding byte, so the
+    /// pinned-map ABI remains 10 bytes and existing zeroed values select bank 0.
+    pub acl_active_bank: u8,
 }
 
 pub const TAP_ID_UNASSIGNED: u32 = 0;
@@ -875,7 +877,7 @@ mod tests {
         assert_eq!(core::mem::size_of::<SslErrorEvent>(), 32);
         assert_eq!(core::mem::size_of::<FirewallConfig>(), 10);
         assert_eq!(core::mem::size_of::<TcpRtValue>(), 168);
-        assert_eq!(core::mem::offset_of!(FirewallConfig, _pad), 9);
+        assert_eq!(core::mem::offset_of!(FirewallConfig, acl_active_bank), 9);
         assert_eq!(core::mem::offset_of!(TcpRtValue, prev_seq), 112);
         assert_eq!(core::mem::offset_of!(TcpRtValue, last_resp_seq), 120);
         assert_eq!(core::mem::offset_of!(TcpRtValue, prev_resp_seq), 128);
