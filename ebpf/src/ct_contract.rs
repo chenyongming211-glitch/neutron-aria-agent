@@ -1,4 +1,4 @@
-use crate::common::{CtContractKey, TAP_ID_UNASSIGNED};
+use crate::common::CtContractKey;
 use crate::maps::{CT_CONTRACT_STATS, CT_CONTRACT_VALUE_BUF};
 
 #[repr(C)]
@@ -15,10 +15,6 @@ pub struct CtContractArgs {
 
 #[inline(always)]
 pub unsafe fn record_event(args: &CtContractArgs) {
-    if args.tap_id == TAP_ID_UNASSIGNED {
-        return;
-    }
-
     let key = CtContractKey {
         tap_id: args.tap_id,
         hook: args.hook,

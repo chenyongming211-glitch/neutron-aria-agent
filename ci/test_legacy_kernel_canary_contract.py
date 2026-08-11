@@ -25,6 +25,7 @@ SYSTEM_MANAGER = os.path.join(ROOT, "agent", "src", "system_manager.rs")
 ABI = os.path.join(ROOT, "abi", "src", "lib.rs")
 CORE_RUNTIME = os.path.join(ROOT, "core", "src", "ebpf_ops", "runtime.rs")
 EBPF_RUNTIME = os.path.join(ROOT, "ebpf", "src", "runtime.rs")
+EBPF_CT_CONTRACT = os.path.join(ROOT, "ebpf", "src", "ct_contract.rs")
 CORE_SCRUB = os.path.join(ROOT, "core", "src", "ebpf_ops", "scrub.rs")
 
 
@@ -44,6 +45,8 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
             self.core_runtime_source = handle.read()
         with open(EBPF_RUNTIME, "r", encoding="utf-8") as handle:
             self.ebpf_runtime_source = handle.read()
+        with open(EBPF_CT_CONTRACT, "r", encoding="utf-8") as handle:
+            self.ebpf_ct_contract_source = handle.read()
         with open(CORE_SCRUB, "r", encoding="utf-8") as handle:
             self.core_scrub_source = handle.read()
 
@@ -154,6 +157,12 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         scrub_bank = scrub_bank.split("fn scrub_runtime_state", 1)[0]
         self.assertNotIn("tap_id == TAP_ID_UNASSIGNED", scrub_bank)
         self.assertIn("acl_banked_tap_id(tap_id, bank)", scrub_bank)
+
+        self.assertNotIn(
+            "args.tap_id == TAP_ID_UNASSIGNED",
+            self.ebpf_ct_contract_source,
+        )
+        self.assertIn("tap_id: args.tap_id", self.ebpf_ct_contract_source)
 
 
 if __name__ == "__main__":
