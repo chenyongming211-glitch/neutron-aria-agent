@@ -1,7 +1,7 @@
 use crate::control_plane::ControlPlane;
 use crate::instance::{
-    configure_fragment_context_capacity, finalize_fragment_recovery_with_tc_fallback,
-    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, TcAclLinkHealth,
+    classify_legacy_tc_cleanup, configure_fragment_context_capacity,
+    finalize_fragment_recovery_with_tc_fallback, FirewallInstance, TcAclLinkHealth,
 };
 use crate::xdp_link_health::{
     existing_xdp_pin_disposition, ExistingXdpPinDisposition,
@@ -33,6 +33,34 @@ enum ClsactOwnership {
     Created,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SystemTcDirection {
+    Ingress,
+    Egress,
+}
+
+impl SystemTcDirection {
+    fn program_name(self) -> &'static str {
+        match self {
+            Self::Ingress => "tc_ingress",
+            Self::Egress => "tc_egress",
+        }
+    }
+
+    fn attach_type(self) -> aya::programs::tc::TcAttachType {
+        match self {
+            Self::Ingress => aya::programs::tc::TcAttachType::Ingress,
+            Self::Egress => aya::programs::tc::TcAttachType::Egress,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SystemTcAttachOutcome {
+    Pinned,
+    Legacy { priority: u16, handle: u32 },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SystemStartOwnership {
     xdp_link: bool,
@@ -42,6 +70,7 @@ struct SystemStartOwnership {
     owned_map_pins: Vec<PathBuf>,
     owned_program_pins: Vec<PathBuf>,
     owned_link_pins: Vec<PathBuf>,
+    owned_legacy_tc: Vec<SystemTcDirection>,
     owned_runtime_dirs: Vec<PathBuf>,
     fq_root_qdisc: bool,
 }
@@ -56,6 +85,7 @@ impl SystemStartOwnership {
             owned_map_pins: Vec::new(),
             owned_program_pins: Vec::new(),
             owned_link_pins: Vec::new(),
+            owned_legacy_tc: Vec::new(),
             owned_runtime_dirs: Vec::new(),
             fq_root_qdisc: false,
         }
@@ -64,6 +94,7 @@ impl SystemStartOwnership {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SystemCleanupAction {
+    DetachOwnedLegacyTc(SystemTcDirection),
     RemoveOwnedPin(PathBuf),
     RemoveOwnedClsact,
     RemoveOwnedRuntimeDirectory(PathBuf),
@@ -71,6 +102,9 @@ enum SystemCleanupAction {
 
 fn failed_start_cleanup_plan(ownership: &SystemStartOwnership) -> Vec<SystemCleanupAction> {
     let mut plan = Vec::new();
+    for direction in ownership.owned_legacy_tc.iter().rev() {
+        plan.push(SystemCleanupAction::DetachOwnedLegacyTc(*direction));
+    }
     for path in ownership
         .owned_link_pins
         .iter()
@@ -86,6 +120,23 @@ fn failed_start_cleanup_plan(ownership: &SystemStartOwnership) -> Vec<SystemClea
         plan.push(SystemCleanupAction::RemoveOwnedRuntimeDirectory(path.clone()));
     }
     plan
+}
+
+fn preexisting_system_tc_runtime_is_healthy(
+    enforcement_required: bool,
+    preexisting_live_runtime: bool,
+    live_health: TcAclLinkHealth,
+) -> Result<bool, String> {
+    if !preexisting_live_runtime {
+        return Ok(false);
+    }
+    if enforcement_required && !live_health.acl_ready() {
+        return Err(format!(
+            "preexisting standalone ACL/CT runtime is incomplete: {}",
+            live_health.missing_tc().join(", ")
+        ));
+    }
+    Ok(true)
 }
 
 fn owned_program_pin(
@@ -232,7 +283,7 @@ fn system_acl_activation(
     }
     if !health.acl_ready() {
         return Err(format!(
-            "standalone ACL/CT requires pinned TC links: {}",
+            "standalone ACL/CT requires healthy dual TC attachments: {}",
             health.missing_tc().join(", ")
         ));
     }
@@ -334,6 +385,17 @@ fn execute_system_cleanup_action(
     _pin_path: &str,
 ) -> Result<(), String> {
     match action {
+        SystemCleanupAction::DetachOwnedLegacyTc(direction) => {
+            classify_legacy_tc_cleanup(
+                aya::programs::tc::qdisc_detach_program(
+                    iface,
+                    direction.attach_type(),
+                    direction.program_name(),
+                ),
+                direction.program_name(),
+            )
+            .map(|_| ())
+        }
         SystemCleanupAction::RemoveOwnedPin(path) => remove_pin_file_if_present(&path),
         SystemCleanupAction::RemoveOwnedClsact => remove_owned_clsact(iface),
         SystemCleanupAction::RemoveOwnedRuntimeDirectory(path) => {
@@ -596,9 +658,6 @@ pub async fn system_start(
     let preexisting_xdp_link = Path::new(pin_path).join("xdp_link").exists();
     let preexisting_tc_ingress_link = Path::new(pin_path).join("tc_ingress_link").exists();
     let preexisting_tc_egress_link = Path::new(pin_path).join("tc_egress_link").exists();
-    let preexisting_live_links = preexisting_xdp_link
-        || preexisting_tc_ingress_link
-        || preexisting_tc_egress_link;
     let preexisting_instance = FirewallInstance::new(
         iface,
         pin_path.to_string().into(),
@@ -607,8 +666,13 @@ pub async fn system_start(
         trace_map_mode,
     );
     let preexisting_health = preexisting_instance.tc_acl_link_health();
+    let preexisting_live_runtime = preexisting_xdp_link
+        || preexisting_tc_ingress_link
+        || preexisting_tc_egress_link
+        || preexisting_health.ingress
+        || preexisting_health.egress;
 
-    if preexisting_live_links {
+    if preexisting_live_runtime {
         if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
             TapMapRuntime::new(pin_path, aria_core::common::TAP_ID_UNASSIGNED),
             Some(false),
@@ -629,11 +693,9 @@ pub async fn system_start(
         }
     }
 
-    if let Err(e) = preexisting_tc_acl_runtime_is_healthy(
+    if let Err(e) = preexisting_system_tc_runtime_is_healthy(
         desired_conntrack || desired_acl,
-        preexisting_live_links,
-        preexisting_tc_ingress_link,
-        preexisting_tc_egress_link,
+        preexisting_live_runtime,
         preexisting_health,
     ) {
         return Err(start_error_with_cleanup(
@@ -664,9 +726,7 @@ pub async fn system_start(
             &ownership,
         ));
     }
-    let reuse_preexisting_tc = preexisting_tc_ingress_link
-        && preexisting_tc_egress_link
-        && preexisting_health.acl_ready();
+    let reuse_preexisting_tc = preexisting_live_runtime && preexisting_health.acl_ready();
 
     let sm = aria_core::state::StateManager::new(state_path);
     match sm.get_tap_id() {
@@ -780,22 +840,26 @@ pub async fn system_start(
         if reuse_preexisting_tc {
             ownership.tc_ingress_link = true;
             ownership.tc_egress_link = true;
-            info!(iface = %iface, "claimed exact preexisting dual-TCX ACL runtime");
+            info!(iface = %iface, "claimed exact preexisting dual-TC ACL runtime");
         } else {
             let tc_egress_link_pin = Path::new(pin_path).join("tc_egress_link");
             let tc_egress_link_preexisting = tc_egress_link_pin.exists();
             match attach_tc_program(
                 &mut bpf,
-                "tc_egress",
+                SystemTcDirection::Egress,
                 iface,
-                aya::programs::tc::TcAttachType::Egress,
                 pin_path,
             ) {
-                Ok(()) => {
+                Ok(SystemTcAttachOutcome::Pinned) => {
                     ownership.tc_egress_link = true;
                     if !tc_egress_link_preexisting {
                         ownership.owned_link_pins.push(tc_egress_link_pin);
                     }
+                }
+                Ok(SystemTcAttachOutcome::Legacy { priority, handle }) => {
+                    ownership.tc_egress_link = true;
+                    ownership.owned_legacy_tc.push(SystemTcDirection::Egress);
+                    info!(iface = %iface, direction = "egress", priority, handle, "TC program attached with legacy netlink filter");
                 }
                 Err(error) => {
                     warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
@@ -806,16 +870,20 @@ pub async fn system_start(
             let tc_ingress_link_preexisting = tc_ingress_link_pin.exists();
             match attach_tc_program(
                 &mut bpf,
-                "tc_ingress",
+                SystemTcDirection::Ingress,
                 iface,
-                aya::programs::tc::TcAttachType::Ingress,
                 pin_path,
             ) {
-                Ok(()) => {
+                Ok(SystemTcAttachOutcome::Pinned) => {
                     ownership.tc_ingress_link = true;
                     if !tc_ingress_link_preexisting {
                         ownership.owned_link_pins.push(tc_ingress_link_pin);
                     }
+                }
+                Ok(SystemTcAttachOutcome::Legacy { priority, handle }) => {
+                    ownership.tc_ingress_link = true;
+                    ownership.owned_legacy_tc.push(SystemTcDirection::Ingress);
+                    info!(iface = %iface, direction = "ingress", priority, handle, "TC program attached with legacy netlink filter");
                 }
                 Err(error) => {
                     warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
@@ -857,11 +925,17 @@ pub async fn system_start(
     if !program_health.ingress {
         ownership.tc_ingress_link = false;
     }
-    let health = TcAclLinkHealth::new(
-        ownership.tc_ingress_link,
-        ownership.tc_egress_link,
-        ownership.xdp_link,
-    );
+    let health = FirewallInstance::new(
+        iface,
+        pin_path.to_string().into(),
+        state_path.to_string().into(),
+        false,
+        trace_map_mode,
+    )
+    .tc_acl_link_health();
+    ownership.tc_ingress_link = health.ingress;
+    ownership.tc_egress_link = health.egress;
+    ownership.xdp_link = health.xdp;
     if let Err(error) = system_acl_activation(desired_conntrack, desired_acl, health) {
         return Err(start_error_with_cleanup(
             error,
@@ -927,6 +1001,26 @@ pub async fn system_stop(
     let mut errors = Vec::new();
     match sm.get_attached_iface() {
         Ok(Some(iface)) => {
+            let instance = FirewallInstance::new(
+                &iface,
+                pin_path.to_string().into(),
+                state_path.to_string().into(),
+                false,
+                control_plane.trace_map_mode(),
+            );
+            for direction in [SystemTcDirection::Egress, SystemTcDirection::Ingress] {
+                let link_pin = Path::new(pin_path)
+                    .join(format!("{}_link", direction.program_name()));
+                let program_pin = Path::new(pin_path).join(direction.program_name());
+                if !link_pin.exists() && program_pin.exists() {
+                    if let Err(error) = instance.detach_owned_legacy_tc_program(
+                        direction.program_name(),
+                        direction.attach_type(),
+                    ) {
+                        errors.push(error);
+                    }
+                }
+            }
             let plan = ["xdp_link", "tc_egress_link", "tc_ingress_link"]
                 .into_iter()
                 .map(|name| SystemCleanupAction::RemoveOwnedPin(Path::new(pin_path).join(name)))
@@ -1000,11 +1094,12 @@ pub async fn system_stop(
 /// Attach a TC program with optional link pinning (graceful fallback for older kernels).
 fn attach_tc_program(
     bpf: &mut aya::Ebpf,
-    prog_name: &str,
+    direction: SystemTcDirection,
     iface: &str,
-    attach_type: aya::programs::tc::TcAttachType,
     pin_path: &str,
-) -> Result<(), String> {
+) -> Result<SystemTcAttachOutcome, String> {
+    let prog_name = direction.program_name();
+    let attach_type = direction.attach_type();
     let tc_program = bpf
         .program_mut(prog_name)
         .ok_or_else(|| format!("{} program not found", prog_name))?;
@@ -1026,10 +1121,16 @@ fn attach_tc_program(
         .attach(iface, attach_type)
         .map_err(|e| format!("{} attach: {:?}", prog_name, e))?;
 
-    (|| -> Result<(), String> {
-        let tc_link = tc
-            .take_link(link_id)
-            .map_err(|e| format!("take_link: {:?}", e))?;
+    let tc_link = tc
+        .take_link(link_id)
+        .map_err(|e| format!("take_link: {:?}", e))?;
+    let fd_backed = match <&aya::programs::links::FdLink>::try_from(&tc_link) {
+        Ok(_) => true,
+        Err(aya::programs::links::LinkError::InvalidLink) => false,
+        Err(error) => return Err(format!("{} inspect TC link type: {:?}", prog_name, error)),
+    };
+
+    if fd_backed {
         let fd_link: aya::programs::links::FdLink = tc_link
             .try_into()
             .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
@@ -1037,11 +1138,18 @@ fn attach_tc_program(
         fd_link
             .pin(&link_pin)
             .map_err(|e| format!("pin: {:?}", e))?;
-        Ok(())
-    })()?;
-    info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link");
-
-    Ok(())
+        info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link");
+        Ok(SystemTcAttachOutcome::Pinned)
+    } else {
+        let priority = tc_link
+            .priority()
+            .map_err(|e| format!("{} legacy priority: {:?}", prog_name, e))?;
+        let handle = tc_link
+            .handle()
+            .map_err(|e| format!("{} legacy handle: {:?}", prog_name, e))?;
+        std::mem::forget(tc_link);
+        Ok(SystemTcAttachOutcome::Legacy { priority, handle })
+    }
 }
 
 #[cfg(test)]
@@ -1066,6 +1174,44 @@ mod tests {
         assert_eq!(
             system_acl_activation(false, false, TcAclLinkHealth::new(false, false, false)).unwrap(),
             SystemAclActivation::StayDisabled
+        );
+    }
+
+    #[test]
+    fn standalone_review_preexisting_legacy_tc_requires_both_directions() {
+        assert!(preexisting_system_tc_runtime_is_healthy(
+            true,
+            true,
+            TcAclLinkHealth::new(true, true, false),
+        )
+        .unwrap());
+        assert!(preexisting_system_tc_runtime_is_healthy(
+            true,
+            true,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .is_err());
+        assert!(!preexisting_system_tc_runtime_is_healthy(
+            true,
+            false,
+            TcAclLinkHealth::new(false, false, false),
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn standalone_review_failed_start_detaches_owned_legacy_tc_before_pins() {
+        let program_pin = PathBuf::from("/review/tc_ingress");
+        let mut ownership = SystemStartOwnership::new();
+        ownership.owned_legacy_tc.push(SystemTcDirection::Ingress);
+        ownership.owned_program_pins.push(program_pin.clone());
+
+        assert_eq!(
+            failed_start_cleanup_plan(&ownership),
+            vec![
+                SystemCleanupAction::DetachOwnedLegacyTc(SystemTcDirection::Ingress),
+                SystemCleanupAction::RemoveOwnedPin(program_pin),
+            ]
         );
     }
 

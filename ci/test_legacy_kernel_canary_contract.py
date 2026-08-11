@@ -21,6 +21,7 @@ STANDALONE = os.path.join(
     "aria_standalone_acl_tc_datapath_smoke.sh",
 )
 INSTANCE = os.path.join(ROOT, "agent", "src", "instance.rs")
+SYSTEM_MANAGER = os.path.join(ROOT, "agent", "src", "system_manager.rs")
 
 
 class LegacyKernelCanaryContractTest(unittest.TestCase):
@@ -31,6 +32,8 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
             self.standalone_source = handle.read()
         with open(INSTANCE, "r", encoding="utf-8") as handle:
             self.instance_source = handle.read()
+        with open(SYSTEM_MANAGER, "r", encoding="utf-8") as handle:
+            self.system_manager_source = handle.read()
 
     def test_requires_exact_kernel_and_artifact_hashes(self):
         self.assertIn("4.18.0-553.5.1.el8_10.x86_64", self.source)
@@ -87,6 +90,29 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         self.assertIn("bpftool_map_lookup_json()", self.standalone_source)
         self.assertIn('bpftool -j map dump pinned "${map}"', self.standalone_source)
         self.assertIn('decode(row.get("key",[]))==expected', self.standalone_source)
+
+    def test_system_mode_accepts_and_owns_legacy_tc_links(self):
+        source = self.system_manager_source
+        attach = source.split("fn attach_tc_program(", 1)[1]
+        attach = attach.split("#[cfg(test)]", 1)[0]
+        self.assertIn("SystemTcAttachOutcome", source)
+        self.assertIn("LinkError::InvalidLink", attach)
+        self.assertIn("std::mem::forget(tc_link)", attach)
+        self.assertIn("DetachOwnedLegacyTc", source)
+
+    def test_system_mode_reuses_dual_exact_legacy_runtime(self):
+        source = self.system_manager_source
+        self.assertIn("preexisting_system_tc_runtime_is_healthy", source)
+        self.assertIn("preexisting_health.ingress", source)
+        self.assertIn("preexisting_health.egress", source)
+        self.assertIn("preexisting_health.acl_ready()", source)
+
+    def test_system_stop_uses_identity_verified_legacy_detach(self):
+        stop = self.system_manager_source.split("pub async fn system_stop(", 1)[1]
+        stop = stop.split("fn attach_tc_program(", 1)[0]
+        self.assertIn("detach_owned_legacy_tc_program", stop)
+        self.assertIn('"tc_ingress"', stop)
+        self.assertIn('"tc_egress"', stop)
 
 
 if __name__ == "__main__":

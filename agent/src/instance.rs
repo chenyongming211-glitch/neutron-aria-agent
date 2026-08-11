@@ -226,7 +226,7 @@ fn classify_legacy_tc_filter_text(
     }
 }
 
-fn classify_legacy_tc_cleanup(
+pub(crate) fn classify_legacy_tc_cleanup(
     result: std::io::Result<()>,
     prog_name: &str,
 ) -> Result<bool, String> {
@@ -722,7 +722,7 @@ impl FirewallInstance {
         )
     }
 
-    fn detach_owned_legacy_tc_program(
+    pub(crate) fn detach_owned_legacy_tc_program(
         &self,
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
