@@ -139,6 +139,25 @@ fn preexisting_system_tc_runtime_is_healthy(
     Ok(true)
 }
 
+fn incomplete_legacy_tc_recovery_plan(
+    tc_ingress_link_pinned: bool,
+    tc_egress_link_pinned: bool,
+    live_health: TcAclLinkHealth,
+) -> Vec<SystemTcDirection> {
+    if tc_ingress_link_pinned || tc_egress_link_pinned || live_health.acl_ready() {
+        return Vec::new();
+    }
+
+    let mut plan = Vec::new();
+    if live_health.egress {
+        plan.push(SystemTcDirection::Egress);
+    }
+    if live_health.ingress {
+        plan.push(SystemTcDirection::Ingress);
+    }
+    plan
+}
+
 fn owned_program_pin(
     ownership: &SystemStartOwnership,
     program: &str,
@@ -665,7 +684,11 @@ pub async fn system_start(
         false,
         trace_map_mode,
     );
-    let preexisting_health = preexisting_instance.tc_acl_link_health();
+    let mut preexisting_health = preexisting_instance.tc_acl_link_health();
+    let mut preexisting_tc_runtime = preexisting_tc_ingress_link
+        || preexisting_tc_egress_link
+        || preexisting_health.ingress
+        || preexisting_health.egress;
     let preexisting_live_runtime = preexisting_xdp_link
         || preexisting_tc_ingress_link
         || preexisting_tc_egress_link
@@ -693,9 +716,74 @@ pub async fn system_start(
         }
     }
 
+    let legacy_recovery_plan = incomplete_legacy_tc_recovery_plan(
+        preexisting_tc_ingress_link,
+        preexisting_tc_egress_link,
+        preexisting_health,
+    );
+    if !legacy_recovery_plan.is_empty() {
+        for direction in &legacy_recovery_plan {
+            match preexisting_instance.detach_owned_legacy_tc_program(
+                direction.program_name(),
+                direction.attach_type(),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(start_error_with_cleanup(
+                        format!(
+                            "verified legacy {} TC filter disappeared during recovery",
+                            direction.program_name()
+                        ),
+                        iface,
+                        pin_path,
+                        state_path,
+                        &ownership,
+                    ));
+                }
+                Err(error) => {
+                    return Err(start_error_with_cleanup(
+                        format!(
+                            "failed to detach verified legacy {} TC filter during recovery: {}",
+                            direction.program_name(),
+                            error
+                        ),
+                        iface,
+                        pin_path,
+                        state_path,
+                        &ownership,
+                    ));
+                }
+            }
+        }
+        for program in ["tc_ingress", "tc_egress"] {
+            if let Err(error) = remove_pin_file_if_present(&Path::new(pin_path).join(program)) {
+                return Err(start_error_with_cleanup(
+                    format!(
+                        "failed to remove stale legacy {} program pin during recovery: {}",
+                        program, error
+                    ),
+                    iface,
+                    pin_path,
+                    state_path,
+                    &ownership,
+                ));
+            }
+        }
+        preexisting_health = preexisting_instance.tc_acl_link_health();
+        preexisting_tc_runtime = preexisting_tc_ingress_link
+            || preexisting_tc_egress_link
+            || preexisting_health.ingress
+            || preexisting_health.egress;
+        info!(
+            iface = %iface,
+            recovered_directions = legacy_recovery_plan.len(),
+            "removed verified incomplete legacy TC runtime before dual-TC rebuild"
+        );
+    }
+
     if let Err(e) = preexisting_system_tc_runtime_is_healthy(
         desired_conntrack || desired_acl,
-        preexisting_live_runtime,
+        preexisting_tc_runtime,
         preexisting_health,
     ) {
         return Err(start_error_with_cleanup(
@@ -726,7 +814,7 @@ pub async fn system_start(
             &ownership,
         ));
     }
-    let reuse_preexisting_tc = preexisting_live_runtime && preexisting_health.acl_ready();
+    let reuse_preexisting_tc = preexisting_tc_runtime && preexisting_health.acl_ready();
 
     let sm = aria_core::state::StateManager::new(state_path);
     match sm.get_tap_id() {
@@ -1206,6 +1294,48 @@ mod tests {
             TcAclLinkHealth::new(false, false, false),
         )
         .unwrap());
+    }
+
+    #[test]
+    fn standalone_review_incomplete_legacy_tc_recovers_only_verified_directions() {
+        assert_eq!(
+            incomplete_legacy_tc_recovery_plan(
+                false,
+                false,
+                TcAclLinkHealth::new(true, false, false),
+            ),
+            vec![SystemTcDirection::Ingress]
+        );
+        assert_eq!(
+            incomplete_legacy_tc_recovery_plan(
+                false,
+                false,
+                TcAclLinkHealth::new(false, true, false),
+            ),
+            vec![SystemTcDirection::Egress]
+        );
+    }
+
+    #[test]
+    fn standalone_review_incomplete_tcx_or_healthy_legacy_is_not_rebuilt() {
+        assert!(incomplete_legacy_tc_recovery_plan(
+            true,
+            false,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .is_empty());
+        assert!(incomplete_legacy_tc_recovery_plan(
+            false,
+            true,
+            TcAclLinkHealth::new(false, true, false),
+        )
+        .is_empty());
+        assert!(incomplete_legacy_tc_recovery_plan(
+            false,
+            false,
+            TcAclLinkHealth::new(true, true, false),
+        )
+        .is_empty());
     }
 
     #[test]
