@@ -85,6 +85,14 @@ def main():
         '--neutron-config-file "${OVS_AGENT_CONFIG_FILE}"',
         '"mode":"legacy"',
         "run_live_legacy_selector_repair() {",
+        "LEGACY_REPAIR_MODE=\"background\"",
+        "LEGACY_REPAIR_MODE=\"observed_bank_repair\"",
+        "run_captured_selector_flow legacy-background-repaired-deny 2 deny",
+        'if repair_mode=="background":',
+        'elif repair_mode=="observed_bank_repair":',
+        "uds_get() {",
+        "wait_resync_quiesced() {",
+        "wait_resync_quiesced || return 1",
         "wait_baseline_inventory_reattached() {",
         'datapath_get "/api/v1/${EXPECTED_IFNAME}/config"',
         'assert runtime.get("acl") is True,runtime',
@@ -103,6 +111,19 @@ def main():
     missing = [term for term in required if term not in source]
     if missing:
         print("ERROR: TC ACL smoke evidence schema missing %s" % ", ".join(missing))
+        return 1
+    if "--fail-with-body" in source:
+        print("ERROR: managed TC ACL smoke requires curl newer than the legacy target")
+        return 1
+    if '--unix-socket "${NEUTRON_UDS}"' in source:
+        print("ERROR: managed TC ACL smoke bypasses the enforced UDS peer identity")
+        return 1
+    restart_bank_invariants = (
+        "assert equal_bank==restart_bank",
+        "assert second_repair_switch is False",
+    )
+    if any(term in source for term in restart_bank_invariants):
+        print("ERROR: managed TC ACL smoke treats the bank slot as restart-persistent")
         return 1
     legacy_delete = source.index('delete_selector_fixture_group "${LEGACY_LOCAL_GROUP_NAME}"')
     legacy_repaired = source.index("LEGACY_POLLUTION_INJECTED=false", legacy_delete)

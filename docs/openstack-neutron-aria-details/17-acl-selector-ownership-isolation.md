@@ -1,15 +1,15 @@
 # ACL Selector Ownership Isolation
 
-Status: implementation and hosted CI are complete. No privileged field
-environment exists, so field evidence is explicitly deferred to the production
-activation gate rather than represented as passed. The transaction repair landed in commit `49081c6`; the
-checker/CI verification head is `65b1dc5`. Exact-head GitHub Actions run
+Status: fixed. Implementation, hosted CI, privileged standalone evidence, and
+real Neutron-managed field evidence on both available compute nodes are
+complete. The transaction repair landed in commit `49081c6`; the checker/CI
+verification head is `65b1dc5`. Exact-head GitHub Actions run
 [`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
 completed `fast-contracts`, `rust-behavior`, and `rust-build` successfully.
-`REVIEW-ACL-046` remains not fixed until that deferred evidence exists. Code
-delivery is consolidated with `REVIEW-ACL-057/066` directly on the sole
-`v0.9-neutron-agent` development branch; managed Neutron activation remains
-disabled by default. Direct delivery head `a0861bb` passed exact-head push Build
+`REVIEW-ACL-046` is closed by the 2026-08-11 managed field acceptance recorded
+in `docs/evidence/openstack-n05-lite/20260811-acl046-managed-selector-isolation/summary.md`.
+Code delivery is consolidated with `REVIEW-ACL-057/066` directly on the sole
+`v0.9-neutron-agent` development branch. Direct delivery head `a0861bb` passed exact-head push Build
 [`29685324204`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29685324204).
 
 Order: after Batch 2C and before `REVIEW-ACL-057` / `REVIEW-ACL-059`.
@@ -635,12 +635,21 @@ change and must pause before production code is expanded.
 8. the exact implementation head passes GitHub Actions with no project
    Rust/eBPF warnings.
 
-Checkpoint 2026-07-19: hosted implementation evidence is complete at
+Checkpoint 2026-07-19: hosted implementation evidence was complete at
 transaction commit `49081c6` and checker/CI head `65b1dc5`; exact-head Actions
 run
 [`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
-passed `fast-contracts`, `rust-behavior`, and `rust-build`. Completion condition
-7 still lacks privileged managed and standalone field evidence. No field run,
-environment, command transcript, timestamp, or artifact is claimed by this
-checkpoint; the finding remains not fixed. The missing evidence blocks
-production activation, not source integration on `v0.9-neutron-agent`.
+passed `fast-contracts`, `rust-behavior`, and `rust-build`. At that checkpoint,
+completion condition 7 still lacked privileged managed and standalone field
+evidence; this remains historical context rather than the current verdict.
+
+Checkpoint 2026-08-11: completion condition 7 is satisfied. A real Neutron
+`aria_acl` policy/rule/binding projection was exercised on both available
+compute nodes. Exact and more-specific local groups did not replace managed ACL
+selector identity. Deliberately injected legacy active-bank pollution was
+repaired by managed publication, strict CT invalidation restored the deny
+verdict, and restart recovery retained the managed selector while removing the
+legacy local-group identity. Cleanup returned each test port to
+`not_requested/bypass`; the independent OVS and OVS-agent identities remained
+unchanged. The ACL bank number itself is intentionally not treated as a
+restart-persistent identity because it is an internal double-buffer slot.

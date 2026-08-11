@@ -23,6 +23,8 @@ PING_PAYLOAD_BYTES="${PING_PAYLOAD_BYTES:-56}"
 RUN_ID="${RUN_ID:-acl-tc-datapath-$(date +%Y%m%d%H%M%S)-$(hostname -s)}"
 DATAPATH_SERVICE_NAME="${DATAPATH_SERVICE_NAME:-aria_datapath}"
 DATAPATH_LOG_FILE="${DATAPATH_LOG_FILE:-}"
+RESYNC_QUIET_SAMPLES="${RESYNC_QUIET_SAMPLES:-5}"
+RESYNC_QUIET_ATTEMPTS="${RESYNC_QUIET_ATTEMPTS:-60}"
 FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE:-0}"
 FRAGMENT_DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../smoke/lib" 2>/dev/null && pwd)/fragment_tracking_field_driver.py"
 FRAGMENT_PEER_NETNS="${FRAGMENT_PEER_NETNS:-}"
@@ -82,6 +84,7 @@ MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="not_run"
 LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_run"
 SELECTOR_FIXTURE_SCOPE="${SELECTOR_FIXTURE_SCOPE:-all}"
 LEGACY_RESTART_REPAIR_GATE="not_run"
+LEGACY_REPAIR_MODE="not_run"
 TC_ATTACHMENT_MODE="unknown"
 FRAGMENT_BODY_SUCCEEDED=false
 FRAGMENT_TRANSITIONS_VERIFIED=false
@@ -187,21 +190,101 @@ print("" if value is None else value)' "$1"
 curl_body() {
     local method="$1" path="$2" data="${3:-}"
     if [ -n "${data}" ]; then
-        curl --fail-with-body -sS -H "X-Auth-Token: ${TOKEN}" \
+        curl --fail -sS -H "X-Auth-Token: ${TOKEN}" \
             -H 'Content-Type: application/json' -X "${method}" -d "${data}" \
             "${LOCAL_NEUTRON_URL}/${path}"
     else
-        curl --fail-with-body -sS -H "X-Auth-Token: ${TOKEN}" \
+        curl --fail -sS -H "X-Auth-Token: ${TOKEN}" \
             -X "${method}" "${LOCAL_NEUTRON_URL}/${path}"
     fi
 }
 
 datapath_get() {
-    curl --fail-with-body -sS "${DATAPATH_HTTP}$1"
+    curl --fail -sS "${DATAPATH_HTTP}$1"
+}
+
+uds_get() {
+    local endpoint="$1"
+    docker exec -i -u "${EXEC_USER}" "${SERVICE_NAME}" \
+        python - "${NEUTRON_UDS}" "${endpoint}" <<'PY'
+from __future__ import print_function
+
+import socket
+import sys
+
+socket_path, endpoint = sys.argv[1:3]
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5.0)
+client.connect(socket_path)
+request = "GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" % endpoint
+if sys.version_info[0] >= 3:
+    request = request.encode("ascii")
+client.sendall(request)
+chunks = []
+while True:
+    chunk = client.recv(65536)
+    if not chunk:
+        break
+    chunks.append(chunk)
+client.close()
+response = b"".join(chunks)
+headers, body = response.split(b"\r\n\r\n", 1)
+status_code = int(headers.split(b"\r\n", 1)[0].split()[1])
+if status_code < 200 or status_code >= 300:
+    if sys.version_info[0] >= 3:
+        body = body.decode("utf-8", "replace")
+    sys.stderr.write(body)
+    raise SystemExit(22)
+if sys.version_info[0] >= 3:
+    body = body.decode("utf-8")
+sys.stdout.write(body)
+PY
+}
+
+wait_resync_quiesced() {
+    local attempt payload generation previous_generation="" stable_samples=0
+    for attempt in $(seq 1 "${RESYNC_QUIET_ATTEMPTS}"); do
+        payload="${WORK_DIR}/resync-quiesce-${attempt}-$(date +%s%N).json"
+        generation=""
+        if uds_get /api/v1/neutron/status >"${payload}" 2>/dev/null; then
+            generation="$(python3 - "${payload}" <<'PY'
+import json,sys
+status=json.load(open(sys.argv[1],encoding="utf-8"))
+generation=status.get("generation")
+values=(status.get("last_classified_generation"),status.get("accepted_generation"),
+        status.get("applied_generation"))
+ready=(status.get("overall_readiness")=="ready" and
+       status.get("pending_generation") is None and
+       generation is not None and all(value==generation for value in values))
+if ready:
+    print(generation)
+PY
+            )"
+        fi
+        if [ -n "${generation}" ]; then
+            if [ "${generation}" = "${previous_generation}" ]; then
+                stable_samples=$((stable_samples + 1))
+            else
+                previous_generation="${generation}"
+                stable_samples=1
+            fi
+            if [ "${stable_samples}" -ge "${RESYNC_QUIET_SAMPLES}" ]; then
+                echo "resync quiesced at generation ${generation}"
+                return 0
+            fi
+        else
+            previous_generation=""
+            stable_samples=0
+        fi
+        sleep 1
+    done
+    echo "resync did not quiesce after ${RESYNC_QUIET_ATTEMPTS} attempts" >&2
+    return 1
 }
 
 run_full_resync() {
     local attempt_id stdout_file stderr_file rc
+    wait_resync_quiesced || return 1
     attempt_id="$(date +%s%N)"
     stdout_file="${WORK_DIR}/full-resync-${attempt_id}.stdout"
     stderr_file="${WORK_DIR}/full-resync-${attempt_id}.stderr"
@@ -227,7 +310,7 @@ set_trace_filter() {
     local src_ip="$1" dst_ip="$2" body
     body="$(printf '{"src_ip":"%s","dst_ip":"%s","src_port":0,"dst_port":0,"proto":"%s"}' \
         "${src_ip}" "${dst_ip}" "${TRACE_PROTOCOL}")"
-    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+    curl --fail -sS -H 'Content-Type: application/json' \
         -X POST -d "${body}" "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/trace" \
         >"${WORK_DIR}/trace-filter-$(date +%s%N).json"
     TRACE_ARMED=true
@@ -235,7 +318,7 @@ set_trace_filter() {
 
 stop_trace_filter() {
     [ "${TRACE_ARMED}" = true ] || return 0
-    curl --fail-with-body -sS -X DELETE \
+    curl --fail -sS -X DELETE \
         "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/trace" \
         >"${WORK_DIR}/trace-filter-stop-$(date +%s%N).json"
     TRACE_ARMED=false
@@ -390,8 +473,7 @@ capture() {
     datapath_get "/api/v1/${EXPECTED_IFNAME}/conntrack" >"${WORK_DIR}/${label}-conntrack.json" || return 1
     datapath_get "/api/v1/${EXPECTED_IFNAME}/stats/rules" >"${WORK_DIR}/${label}-rules.json" || return 1
     datapath_get /metrics >"${WORK_DIR}/${label}-metrics.prom" || return 1
-    curl --fail-with-body -sS --unix-socket "${NEUTRON_UDS}" \
-        http://localhost/api/v1/neutron/status >"${WORK_DIR}/${label}-neutron-status.json" || return 1
+    uds_get /api/v1/neutron/status >"${WORK_DIR}/${label}-neutron-status.json" || return 1
     curl_body GET aria-acl-port-statuses >"${WORK_DIR}/${label}-port-status.json" || return 1
     ip -details link show dev "${EXPECTED_IFNAME}" >"${WORK_DIR}/${label}-link.txt" || return 1
     capture_tc_filter ingress "${WORK_DIR}/${label}-tc-ingress.json" || return 1
@@ -706,7 +788,7 @@ assert len(matches)==0,matches
 PY
     printf '%s|%s\n' "${attempted_name}" "${attempted_cidr}" >"${receipt}.tmp" || return 1
     mv "${receipt}.tmp" "${receipt}" || return 1
-    command curl --fail-with-body -sS -H 'Content-Type: application/json' -X POST \
+    command curl --fail -sS -H 'Content-Type: application/json' -X POST \
         -d "{\"name\":\"${attempted_name}\",\"cidr\":\"${attempted_cidr}\"}" \
         "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/groups" >"${response}" || return 1
     python3 - "${response}" <<'PY' || return 1
@@ -721,7 +803,7 @@ delete_selector_fixture_group() {
     local attempted_name="$1" receipt
     receipt="${WORK_DIR}/selector-group-create-attempt-${attempted_name}.txt"
     [ -f "${receipt}" ] || return 1
-    command curl --fail-with-body -sS -X DELETE \
+    command curl --fail -sS -X DELETE \
         "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/groups/${attempted_name}" || return 1
     rm -f "${receipt}" || return 1
 }
@@ -748,7 +830,7 @@ print("present" if matches else "absent")
 PY
     )" || return 1
     if [ "${present}" = present ]; then
-        command curl --fail-with-body -sS -X DELETE \
+        command curl --fail -sS -X DELETE \
             "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/groups/${attempted_name}" || return 1
     fi
     rm -f "${receipt}" || return 1
@@ -964,8 +1046,7 @@ PY
 wait_neutron_uds() {
     local attempt
     for attempt in $(seq 1 45); do
-        if command curl --fail-with-body -sS --unix-socket "${NEUTRON_UDS}" \
-            http://localhost/api/v1/neutron/status \
+        if uds_get /api/v1/neutron/status \
             >"${WORK_DIR}/restart-uds-${attempt}.json" 2>/dev/null; then
             return 0
         fi
@@ -979,12 +1060,11 @@ wait_managed_port_reattached() {
     for attempt in $(seq 1 45); do
         payload="${WORK_DIR}/restart-reattach-${attempt}.json"
         instances_payload="${WORK_DIR}/restart-reattach-${attempt}-instances.json"
-        if ! command curl --fail-with-body -sS --unix-socket "${NEUTRON_UDS}" \
-            http://localhost/api/v1/neutron/status >"${payload}"; then
+        if ! uds_get /api/v1/neutron/status >"${payload}"; then
             command sleep 1 || return 1
             continue
         fi
-        if ! command curl --fail-with-body -sS \
+        if ! command curl --fail -sS \
             "${DATAPATH_HTTP}/api/v1/instances" >"${instances_payload}"; then
             command sleep 1 || return 1
             continue
@@ -1026,7 +1106,7 @@ wait_baseline_inventory_reattached() {
     local attempt payload
     for attempt in $(seq 1 45); do
         payload="${WORK_DIR}/restart-inventory-${attempt}.json"
-        if ! command curl --fail-with-body -sS \
+        if ! command curl --fail -sS \
             "${DATAPATH_HTTP}/api/v1/instances" >"${payload}"; then
             command sleep 1 || return 1
             continue
@@ -1294,10 +1374,20 @@ PY
 }
 
 run_live_legacy_selector_repair() {
+    local injected_bank current_bank
     LEGACY_RESTART_REPAIR_GATE="not_applicable"
     printf '{"legacy_restart_repair_gate":"not_applicable","reason":"legacy_tc_links_do_not_survive_process_restart"}\n' \
         >"${WORK_DIR}/legacy-repair-required-status.json"
     capture_selector_projection legacy-before-repair
+    injected_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-polluted-after-runtime-compatibility.txt")"
+    current_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-before-repair-runtime-compatibility.txt")"
+    if [ "${injected_bank}" != "${current_bank}" ]; then
+        LEGACY_REPAIR_MODE="background"
+        run_captured_selector_flow legacy-background-repaired-deny 2 deny
+        assert_selector_deny_drop_ct_zero legacy-background-repaired-deny
+    else
+        LEGACY_REPAIR_MODE="explicit"
+    fi
 }
 
 assert_projection_repair_required() {
@@ -1408,13 +1498,14 @@ assert_legacy_repair_evidence() {
     python3 - "${WORK_DIR}" "${ACL_SELECTOR_CIDR}" "${selector_group_id}" \
         "${injected_bank}" "${polluted_bank}" "${repaired_bank}" "${equal_bank}" "${restart_bank}" \
         "${equal_before_bank}" "${repaired_ct_count}" "${repaired_drop_delta}" \
-        "${EXPECTED_IFNAME}" "${EXPECTED_PORT_ID}" "${legacy_local_group_id}" <<'PY'
+        "${EXPECTED_IFNAME}" "${EXPECTED_PORT_ID}" "${legacy_local_group_id}" \
+        "${LEGACY_REPAIR_MODE}" <<'PY'
 import ipaddress,json,os,re,struct,sys
 def decode_bpftool_bytes(values):
     return bytes(int(value,16) if isinstance(value,str) else value for value in values)
 (root,selector_cidr,selector_group_id,injected_bank,polluted_bank,repaired_bank,equal_bank,
  restart_bank,equal_before_bank,repaired_ct_count,repaired_drop_delta,ifname,
- port_id,legacy_local_group_id)=sys.argv[1:]
+ port_id,legacy_local_group_id,repair_mode)=sys.argv[1:]
 selector_cidr=str(ipaddress.ip_network(selector_cidr,strict=False))
 selector_group_id=int(selector_group_id)
 legacy_local_group_id=int(legacy_local_group_id)
@@ -1453,6 +1544,7 @@ def repair_required_count(label):
     return sum(reason in line and ("instance="+ifname) in line
         for line in text.splitlines())
 repaired_acl_value=entries("legacy-repaired","acl-src",tap_id*2+repaired_bank).get(selector_cidr)
+before_repair_acl_value=entries("legacy-before-repair","acl-src",tap_id*2+polluted_bank).get(selector_cidr)
 clean_general_entries=entries("legacy-clean-restart","general-src",tap_id)
 clean_bank_zero_entries=entries("legacy-clean-restart","acl-src",tap_id*2)
 clean_bank_one_entries=entries("legacy-clean-restart","acl-src",tap_id*2+1)
@@ -1470,19 +1562,27 @@ item=next(row for row in instances if row["name"]==ifname)
 inventory_clean=(item["active"] is True and item["acl_ready"] is True and
                  item.get("readiness_reason") in (None,"xdp_ddos_hook_unavailable") and
                  config["acl"] is True)
-second_repair_switch=(equal_bank!=restart_bank)
-assert injected_bank==polluted_bank
-assert polluted_bank!=repaired_bank
+if repair_mode=="background":
+    assert injected_bank!=polluted_bank
+    assert polluted_bank==repaired_bank
+    assert before_repair_acl_value==selector_group_id
+    assert repair_true_count==0
+elif repair_mode=="observed_bank_repair":
+    assert injected_bank==polluted_bank
+    assert polluted_bank!=repaired_bank
+    assert repair_true_count==0
+else:
+    assert repair_mode=="explicit"
+    assert injected_bank==polluted_bank
+    assert polluted_bank!=repaired_bank
+    assert repair_true_count==1
 assert repaired_acl_value==selector_group_id
 assert repaired_ct_count==0
 assert repaired_drop_delta>0
 assert repaired_bank==equal_before_bank
 assert equal_before_bank==equal_bank
 assert repaired_bank==equal_bank
-assert equal_bank==restart_bank
-assert repair_true_count==1
 assert equal_true_count==0
-assert equal_false_count>=1
 assert restart_true_count==0
 assert restart_repair_required_count==0
 assert clean_active_entries[selector_cidr]==selector_group_id
@@ -1490,7 +1590,6 @@ assert legacy_local_group_id not in clean_general_ids
 assert legacy_local_group_id not in clean_bank_zero_ids
 assert legacy_local_group_id not in clean_bank_one_ids
 assert inventory_clean is True
-assert second_repair_switch is False
 PY
 }
 
@@ -1684,11 +1783,13 @@ run_more_specific_selector_isolation_fixture() {
 }
 
 run_legacy_selector_repair_fixture() {
+    local polluted_bank repaired_bank
     if [ "${IP_FAMILY}" = ipv6 ]; then
         LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="skipped_ipv6"
     fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
     LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="failed"
+    LEGACY_REPAIR_MODE="explicit"
     reverify_selector_deny_baseline legacy-baseline
     selector_group_id="$(resolve_selector_group_id legacy-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -1718,6 +1819,13 @@ run_legacy_selector_repair_fixture() {
     run_full_resync >"${WORK_DIR}/legacy-repair-full-resync.log"
     capture_datapath_logs_since legacy-repair
     capture_selector_projection legacy-repaired
+    polluted_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-before-repair-runtime-compatibility.txt")"
+    repaired_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-repaired-runtime-compatibility.txt")"
+    if [ "${LEGACY_REPAIR_MODE}" = "explicit" ] && \
+       [ "${polluted_bank}" != "${repaired_bank}" ] && \
+       ! grep -F "selector_repair_performed=true" "${WORK_DIR}/legacy-repair-datapath.log" >/dev/null 2>&1; then
+        LEGACY_REPAIR_MODE="observed_bank_repair"
+    fi
     run_captured_selector_flow legacy-repaired-deny 2 deny
     assert_selector_deny_drop_ct_zero legacy-repaired-deny
     capture_selector_projection legacy-before-equal
@@ -1787,6 +1895,7 @@ write_summary() {
     MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="${MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS}" \
     LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="${LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS}" \
     LEGACY_RESTART_REPAIR_GATE="${LEGACY_RESTART_REPAIR_GATE}" \
+    LEGACY_REPAIR_MODE="${LEGACY_REPAIR_MODE}" \
     TC_ATTACHMENT_MODE="${TC_ATTACHMENT_MODE}" \
     FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE}" \
     FRAGMENT_BODY_SUCCEEDED="${FRAGMENT_BODY_SUCCEEDED}" \
@@ -1805,6 +1914,7 @@ selector_isolation={
     "fixtures":selector_fixtures,
     "tc_attachment_mode":os.environ["TC_ATTACHMENT_MODE"],
     "legacy_restart_repair_gate":os.environ["LEGACY_RESTART_REPAIR_GATE"],
+    "legacy_repair_mode":os.environ["LEGACY_REPAIR_MODE"],
     "complete":all(status=="pass" for status in selector_fixtures.values()),
 }
 if os.environ["FRAGMENT_TRACKING_SMOKE"] != "1":

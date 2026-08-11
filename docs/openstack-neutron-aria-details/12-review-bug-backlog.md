@@ -108,9 +108,9 @@ that the item is an open implementation bug by itself.
 | --- | ---: | --- |
 | Confirmed active defect or contract gap | 35 | Remaining open/in-progress register rows, including the fragment and XDP hook-health defects |
 | Likely fixed; operational evidence pending | 1 | `REVIEW-ACL-055`: all-mode TC/XDP-neutral code and full GitHub Build are green; three privileged runtime summaries remain pending |
-| Fixed | 23 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, 3 transaction Batch 2 IDs, 2 Batch 3 IDs, 2 Batch 4 IDs, and `REVIEW-ACL-047` in Batch 5 |
+| Fixed | 24 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, 3 transaction Batch 2 IDs, 2 Batch 3 IDs, 2 Batch 4 IDs, `REVIEW-ACL-047` in Batch 5, and field-verified `REVIEW-ACL-046` |
 | Verification needed | 1 | `REVIEW-ACL-012`: implementation path is present; clean-container evidence is still required |
-| Reclassified as risk/design boundary | 2 | `REVIEW-ACL-032`, `REVIEW-ACL-046` |
+| Reclassified as risk/design boundary | 1 | `REVIEW-ACL-032` |
 | Closed: finding not supported as written | 1 | `REVIEW-ACL-052` |
 | **Total `REVIEW-*` IDs** | **63** | Stable IDs retained for audit history |
 
@@ -132,8 +132,8 @@ Also spot-checked: `ACL-004` (host=None returns `status[0]`), `ACL-014`
 exists), `ACL-017` (CLI installer hard-codes `/etc/kolla/.adminrc`) — all still
 present.
 
-Risk tracking now contains seven classified items: five existing `RISK-*` IDs
-plus reclassified `REVIEW-ACL-032` and `REVIEW-ACL-046`. Engineering debt now
+Risk tracking now contains six classified items: five existing `RISK-*` IDs
+plus reclassified `REVIEW-ACL-032`. Engineering debt now
 contains five `DEBT-*` IDs, including the separately recorded legacy local-ACL
 persistence debt. The unique tracking-item total is now 73.
 
@@ -141,10 +141,10 @@ persistence debt. The unique tracking-item total is now 73.
 | --- | ---: | --- |
 | Active defect or contract gap | 35 | Open or in-progress `REVIEW-*` register rows pending closure evidence |
 | Likely fixed; operational evidence pending | 1 | `REVIEW-ACL-055` |
-| Risk / design boundary | 7 | Five `RISK-*` IDs plus two reclassified `REVIEW-*` IDs |
+| Risk / design boundary | 6 | Five `RISK-*` IDs plus reclassified `REVIEW-ACL-032` |
 | Engineering debt | 5 | `DEBT-*` IDs |
 | Verification needed | 1 | `REVIEW-ACL-012` |
-| Fixed | 23 | Two earlier fixes plus 13 ACL Batch 1, three transaction Batch 2, two Batch 3, two Batch 4, and one Batch 5 fix |
+| Fixed | 24 | Two earlier fixes plus 13 ACL Batch 1, three transaction Batch 2, two Batch 3, two Batch 4, one Batch 5 fix, and field-verified `REVIEW-ACL-046` |
 | Closed / unsupported finding | 1 | `REVIEW-ACL-052` |
 | **Total unique tracking items** | **73** | Includes the Batch 6 fast-path, fragment finding, XDP hook-health finding, and local-ACL persistence debt |
 
@@ -487,7 +487,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-043 | P3 | priority=0 rejected as missing | fixed | `_require()` uses falsy `not obj.get(field)`, so rule `priority=0` fails validation while effective compile accepts 0. | Use explicit missing checks for numeric fields; add create/update unit tests for priority 0. |
 | REVIEW-ACL-044 | P2 | Metadata-only ACL flips bank without WAL | fixed | Historical finding: metadata-only ACL changes could enter publication even when the compiled group/policy projection was unchanged. Commit `4160f73` computes `semantic_changed` from concrete policy, group-CIDR, group-delete, and released-bitmap deltas; a clean projection with no semantic delta returns `ManagedAclPublicationDecision::Noop` before shadow staging, persistence, fragment epoch advance, or bank switch. Metadata revision still invalidates the outer translation/reconcile cache but cannot publish an unchanged bank. | Fixed by RED contract `d4ce7e8` and production `4160f73`. Rust behaviors `managed_projection_repair_clean_equal_reconcile_is_noop` and `neutron_acl_validation_cache_is_content_safe_and_port_specific` cover the inner no-publication and outer metadata-reconcile boundaries. Manually dispatched exact-head Build [30610771022](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30610771022) at `98034c1` passed `fast-contracts`, `rust-behavior`, and warning-denied `rust-build`. No privileged field evidence applies. |
 | REVIEW-ACL-045 | P2 | Orphan reconcile skips map scrub | fixed | Commit `8242c1b` derives orphan identity from link pins and persisted live-iface markers, subtracts committed siblings, serializes cleanup, scrubs both ACL banks and every tap-scoped runtime family, and releases the retry marker last. Target-kernel RED then found that legacy TC filters are kernel-owned and have no link pin. Commit `b18dd3c` runs the full ownership-verified detach path before map scrub, covering legacy TC without deleting shared map state. Any required failure remains blocked and retains stable identity plus the retry marker for startup retry. | Hosted Build `31154605848` passed the maintained Rust, eBPF, package, and static gates. An isolated target-kernel fixture audited 29 available map families: orphan entries changed 13 to 0, all 13 sibling entries remained, an injected map failure retained the retry marker, and retry completed after repair. Orphan ingress/egress legacy TC filters were absent while sibling filters remained. Private taps and a private bridge were used; production OVS and `br-int` were not mutated. Distinct from `REVIEW-ACL-035`. |
-| REVIEW-ACL-046 | P1 | Cross-domain ACL selector isolation | privileged standalone tap evidence complete; managed rollout remains gated | Reopened 2026-07-15 with a complete enforcement path. The repair derives ACL maps from final direction-specific rule references, uses a conflict-aware general projection, gates ownership/skip on projection health, and repairs legacy pollution through bank publication plus strict CT invalidation while preserving standalone direct publication for `REVIEW-ACL-057`. The transaction implementation is `49081c6`. Pre-field wiring/hardening commits `d1aa523..ad30cad` cover managed detach ordering, purge-failure atomicity, strict-flush rollback, and successful retry detach; independent final review approved the wiring. Exact-head GitHub Actions run [29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181) at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`. | A privileged legacy-kernel standalone tap fixture passed selector-versus-general-group isolation on 2026-08-06. The sanitized evidence is in `docs/evidence/openstack-n05-lite/20260806-acl-high-risk-field-acceptance/summary.md`. This closes the missing enforcement-path evidence for the fixture, but production managed rollout remains controlled by the wider ACL lifecycle and activation gates. |
+| REVIEW-ACL-046 | P1 | Cross-domain ACL selector isolation | fixed; managed Neutron field-verified on two available computes | Reopened 2026-07-15 with a complete enforcement path. The repair derives ACL maps from final direction-specific rule references, uses a conflict-aware general projection, gates ownership/skip on projection health, and repairs legacy pollution through bank publication plus strict CT invalidation while preserving standalone direct publication for `REVIEW-ACL-057`. The transaction implementation is `49081c6`. Pre-field wiring/hardening commits `d1aa523..ad30cad` cover managed detach ordering, purge-failure atomicity, strict-flush rollback, and successful retry detach; independent final review approved the wiring. Exact-head GitHub Actions run [29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181) at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`. | A privileged legacy-kernel standalone tap fixture passed on 2026-08-06. On 2026-08-11, real Neutron `aria_acl` policy/rule/binding projection passed exact-CIDR isolation, more-specific-CIDR isolation, injected legacy pollution repair, strict CT invalidation, restart recovery, cleanup, and independent OVS safety checks on both available compute nodes. See `docs/evidence/openstack-n05-lite/20260811-acl046-managed-selector-isolation/summary.md`. The unavailable third compute remains a wider P5 environment constraint, not an ACL-046 semantic gap. |
 | REVIEW-ACL-047 | P2 | Translator ignores rule priority | fixed | Numeric priority remains northbound metadata and is not added to eBPF `PolicyKey`. Python preflight and Rust direct-UDS validation now reject priority-dependent CIDR/specificity overlaps with stable reasons; canonical-equivalent CIDR groups are reused. A classified direct-UDS rejection reports real `degraded/bypass` only after the empty owned-ACL transaction succeeds. | Fixed with Python and Rust overlap/canonicalization/outcome regression tests, persistent Stage 1/2 static guards, and the documented priority-independent acceptance boundary. QoS/Mirror are unchanged. Distinct from `REVIEW-ACL-009`. |
 | REVIEW-TXN-027 | P2 | Delete detach succeeds / WAL commit fails | fixed | Commit `efb113c` makes post-detach publication delete-specific and forward-only. An after-detach fault or `DeleteCommit` failure now reports `detached:false`, retains the last committed port in live authority, exposes a hashless operator-blocked delete identity, and leaves the exact unmatched `DeleteIntent` durable. Startup recovery performs idempotent attach/scrub/detach and removes the port only after a durable `DeleteCommit`; failed runtime recovery or recovery commit preserves the intent for retry instead of clearing it with snapshot rollback. | RED `7bfb88f` / Build [30612312902](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612312902) proved the missing boundaries. Exact-head `f8b72b8` / Build [30612826096](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612826096) passed the five delete-forward behaviors, `fast-contracts`, and warning-denied Rust/eBPF build. No WAL schema, UDS API, or snapshot rollback contract changed. Distinct from `REVIEW-ACL-023`. |
 | REVIEW-ACL-048 | P1 | Status projection overwrites bypass→enforce | fixed | `_port_statuses_from_status` replaces UDS `effective_action` values of `bypass` (and empty) with snapshot metadata defaulting to `enforce` when `acl_enabled` is true. Northbound `aria_acl_port_statuses` can report enforce while datapath bypassed. | Never overwrite a concrete UDS runtime `effective_action`/`status`; treat UDS as runtime truth. Add unit tests for UDS bypass + snapshot enforce. |
@@ -601,8 +601,8 @@ Round 2 (RPC/DB/CLI + eBPF authority):
   (`REVIEW-ACL-041`), delete_address_set split txn (`REVIEW-ACL-042`),
   priority=0 falsy require (`REVIEW-ACL-043`), metadata bank flip
   (`REVIEW-ACL-044`), orphan no scrub (`REVIEW-ACL-045`), selected-domain group
-  behavior (`REVIEW-ACL-046`, reclassified as a design-boundary risk on
-  2026-07-11), ignored priority (`REVIEW-ACL-047`), delete detach/commit split
+  behavior (`REVIEW-ACL-046`, field-verified and fixed on 2026-08-11), ignored
+  priority (`REVIEW-ACL-047`), delete detach/commit split
   (`REVIEW-TXN-027`).
 
 Round 3 (contract / status / CT / CI):
@@ -785,7 +785,7 @@ verification before the next batch started.
    passed Rust authority tests, eBPF compilation, userspace/agent static builds,
    binary verification, and warning gates at exact implementation head
    `3c61187db25f557fcf2bff3fcd765f3d9ea0a5ce`.
-4. **Direct v0.9 delivery; field evidence deferred to activation — Isolate ACL selector ownership:**
+4. **Completed - Isolate ACL selector ownership:**
    `REVIEW-ACL-046` implementation and hosted CI are complete. Transaction
    implementation commit `49081c6` is followed by pre-field wiring/hardening
    commits `d1aa523..ad30cad`, covering managed detach ordering, purge-failure
@@ -793,10 +793,13 @@ verification before the next batch started.
    final review approved the wiring. Exact-head GitHub Actions run
    [`29672271181`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181)
    at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`.
-   No privileged environment exists. The finding remains not fixed and no field
-   execution is claimed, but source delivery is consolidated with ACL-057/066
-   directly on `v0.9-neutron-agent`. The deferred evidence gates production
-   activation while managed resync remains disabled by default.
+   Privileged standalone evidence passed on 2026-08-06. Real Neutron-managed
+   exact, more-specific, and injected-legacy-pollution scenarios passed on both
+   available compute nodes on 2026-08-11, including CT invalidation, restart,
+   cleanup, and independent OVS safety checks. The sanitized record is
+   `docs/evidence/openstack-n05-lite/20260811-acl046-managed-selector-isolation/summary.md`.
+   `REVIEW-ACL-046` is fixed; the unavailable third compute remains a separate
+   P5 environment constraint.
 5. **Implementation and hosted CI complete — Unify direct ACL publication:**
    `REVIEW-ACL-057` and its referenced-group subfinding `REVIEW-ACL-066` now
    use one strict final-state shadow-bank transaction. RED Build
