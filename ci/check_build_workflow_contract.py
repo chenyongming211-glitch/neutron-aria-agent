@@ -76,7 +76,13 @@ def verify_workflow_contract(source: str) -> None:
 
     release = "\n".join(_mapping_block(source, "release", 2))
     required_release_contracts = (
-        "needs: rust-build",
+        "needs:",
+        "- fast-contracts",
+        "- neutron-agent-clean-install",
+        "- neutron-db-contracts",
+        "- rust-behavior",
+        "- rust-build",
+        "- deep-audit",
         "github.event_name == 'push'",
         "startsWith(github.ref, 'refs/tags/v')",
         "contents: write",

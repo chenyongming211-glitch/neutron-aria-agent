@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["Your Name <email@example.com>"]
+authors = ["Aria Firewall contributors"]
 
 [workspace.dependencies]
 aya = "0.13.1"

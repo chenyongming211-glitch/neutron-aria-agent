@@ -30,11 +30,22 @@ from __future__ import print_function
 
 import os
 import sys
+import time
 import zipfile
 
 package_root = os.path.abspath(sys.argv[1])
 out_egg = os.path.abspath(sys.argv[2])
 source_root = os.path.join(package_root, "neutron_aria")
+source_date_epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "315532800"))
+zip_time = time.gmtime(max(source_date_epoch, 315532800))[:6]
+
+
+def write_member(archive, arcname, content, mode=0o644):
+    info = zipfile.ZipInfo(arcname, zip_time)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = (mode & 0xFFFF) << 16
+    archive.writestr(info, content)
 
 metadata = {
     "EGG-INFO/PKG-INFO": (
@@ -64,17 +75,18 @@ if os.path.exists(out_egg):
 sources = []
 with zipfile.ZipFile(out_egg, "w", zipfile.ZIP_DEFLATED) as archive:
     for current, dirs, files in os.walk(source_root):
-        dirs[:] = [name for name in dirs if name != "__pycache__"]
-        for name in files:
+        dirs[:] = sorted(name for name in dirs if name != "__pycache__")
+        for name in sorted(files):
             if name.endswith((".pyc", ".pyo")):
                 continue
             path = os.path.join(current, name)
             arcname = os.path.relpath(path, package_root).replace(os.sep, "/")
-            archive.write(path, arcname)
+            with open(path, "rb") as source:
+                write_member(archive, arcname, source.read())
             sources.append(arcname)
     metadata["EGG-INFO/SOURCES.txt"] = "\n".join(sorted(sources)) + "\n"
-    for arcname, content in metadata.items():
-        archive.writestr(arcname, content)
+    for arcname in sorted(metadata):
+        write_member(archive, arcname, metadata[arcname].encode("utf-8"))
 
 print(out_egg)
 PY

@@ -8,7 +8,11 @@ BUNDLE_PATH="${BUNDLE_PATH:-${OUT_DIR}/${BUNDLE_NAME}}"
 STAGING_DIR="${STAGING_DIR:-${OUT_DIR}/stage2-acl-bundle}"
 EGG_NAME="${EGG_NAME:-neutron_aria-0.1.0-py2.7.egg}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.0}"
-RELEASE_VERSION="${RELEASE_VERSION:-${GITHUB_REF_NAME:-stage2-acl-dev}}"
+SOURCE_TREEISH="${SOURCE_TREEISH:-HEAD}"
+SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse "${SOURCE_TREEISH}^{commit}")"
+SOURCE_DATE_EPOCH="$(git -C "${REPO_ROOT}" show -s --format=%ct "${SOURCE_COMMIT}")"
+PRODUCT_VERSION="$(git -C "${REPO_ROOT}" show "${SOURCE_COMMIT}:VERSION" | tr -d '[:space:]')"
+RELEASE_VERSION="v${PRODUCT_VERSION}"
 RECOMMENDED_IMAGE_TAG="${RECOMMENDED_IMAGE_TAG:-neutron-aria-agent:${RELEASE_VERSION}-stage2-acl}"
 
 log() {
@@ -25,6 +29,13 @@ require_path() {
 for path in \
     "${REPO_ROOT}/openstack/neutron_aria" \
     "${REPO_ROOT}/openstack/neutronclient_aria" \
+    "${REPO_ROOT}/VERSION" \
+    "${REPO_ROOT}/LICENSE" \
+    "${REPO_ROOT}/CHANGELOG.md" \
+    "${REPO_ROOT}/Cargo.toml" \
+    "${REPO_ROOT}/release/support-matrix.json" \
+    "${REPO_ROOT}/ci/create_release_manifest.py" \
+    "${REPO_ROOT}/docs/neutron-uds-contract.json" \
     "${REPO_ROOT}/deploy/kolla/package" \
     "${REPO_ROOT}/deploy/kolla/smoke" \
     "${REPO_ROOT}/deploy/kolla/config/neutron-aria-agent.ini" \
@@ -34,24 +45,45 @@ do
     require_path "${path}"
 done
 
-mkdir -p "${OUT_DIR}"
+rm -rf "${STAGING_DIR}"
+mkdir -p "${OUT_DIR}" "${STAGING_DIR}"
+
+# Release input is one exact Git commit, never arbitrary untracked, staged, or
+# modified working-tree files. This prevents field evidence and local tools
+# from leaking into a public bundle.
+(
+    cd "${REPO_ROOT}"
+    git archive --format=tar "${SOURCE_TREEISH}" -- \
+        Cargo.toml VERSION LICENSE CHANGELOG.md \
+        release/support-matrix.json \
+        ci/create_release_manifest.py \
+        docs/neutron-uds-contract.json \
+        openstack/neutron_aria \
+        openstack/neutronclient_aria \
+        deploy/kolla/package \
+        deploy/kolla/smoke \
+        deploy/kolla/config \
+        deploy/kolla/neutron-aria-agent \
+        deploy/kolla/aria-datapath
+) | tar -xf - -C "${STAGING_DIR}"
+
+for path in \
+    "${STAGING_DIR}/VERSION" \
+    "${STAGING_DIR}/LICENSE" \
+    "${STAGING_DIR}/CHANGELOG.md" \
+    "${STAGING_DIR}/release/support-matrix.json" \
+    "${STAGING_DIR}/ci/create_release_manifest.py" \
+    "${STAGING_DIR}/deploy/kolla/package/install_aria_datapath_rc_image.sh"
+do
+    require_path "${path}"
+done
+
+mkdir -p "${STAGING_DIR}/dist/kolla"
 EGG_PATH="${OUT_DIR}/${EGG_NAME}" \
     OUT_DIR="${OUT_DIR}" \
-    bash "${REPO_ROOT}/deploy/kolla/package/build_neutron_aria_egg.sh"
-
-rm -rf "${STAGING_DIR}"
-mkdir -p \
-    "${STAGING_DIR}/openstack" \
-    "${STAGING_DIR}/deploy/kolla" \
-    "${STAGING_DIR}/dist/kolla"
-
-cp -a "${REPO_ROOT}/openstack/neutron_aria" "${STAGING_DIR}/openstack/neutron_aria"
-cp -a "${REPO_ROOT}/openstack/neutronclient_aria" "${STAGING_DIR}/openstack/neutronclient_aria"
-cp -a "${REPO_ROOT}/deploy/kolla/package" "${STAGING_DIR}/deploy/kolla/package"
-cp -a "${REPO_ROOT}/deploy/kolla/smoke" "${STAGING_DIR}/deploy/kolla/smoke"
-cp -a "${REPO_ROOT}/deploy/kolla/config" "${STAGING_DIR}/deploy/kolla/config"
-cp -a "${REPO_ROOT}/deploy/kolla/neutron-aria-agent" "${STAGING_DIR}/deploy/kolla/neutron-aria-agent"
-cp -a "${REPO_ROOT}/deploy/kolla/aria-datapath" "${STAGING_DIR}/deploy/kolla/aria-datapath"
+    REPO_ROOT="${STAGING_DIR}" \
+    SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+    bash "${STAGING_DIR}/deploy/kolla/package/build_neutron_aria_egg.sh"
 cp -a "${OUT_DIR}/${EGG_NAME}" "${STAGING_DIR}/dist/kolla/${EGG_NAME}"
 
 find "${STAGING_DIR}" -type f -name '*.pyc' -delete
@@ -142,6 +174,27 @@ sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
   SAVE_IMAGE=true \
   REPO_ROOT=$(pwd) \
   deploy/kolla/package/build_aria_datapath_image.sh
+```
+
+Install a manifest-pinned datapath image while retaining the previous
+container as a rollback point:
+
+```bash
+sudo IMAGE_REF=<registry-or-local-image>:<immutable-tag> \
+  IMAGE_TAR=<optional-image-tar> \
+  EXPECTED_IMAGE_ID=sha256:<image-id> \
+  EXPECTED_ARIA_SHA256=<aria-agent-sha256> \
+  EXPECTED_EBPF_SHA256=<ebpf-sha256> \
+  EXPECTED_EBPF_PERF_SHA256=<ebpf-perf-sha256> \
+  deploy/kolla/package/install_aria_datapath_rc_image.sh install
+sudo deploy/kolla/package/install_aria_datapath_rc_image.sh check
+```
+
+Rollback changes only `aria_datapath`; it never restarts OVS or the Neutron
+OVS agent:
+
+```bash
+sudo deploy/kolla/package/install_aria_datapath_rc_image.sh rollback
 ```
 
 For UDS hardening evidence, first record the current peer identity and socket
@@ -267,9 +320,11 @@ EOF
     cd "${STAGING_DIR}"
     {
         echo "bundle=${BUNDLE_NAME}"
-        echo "created_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo "created_utc=$(date -u -d "@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
         echo "package_version=${PACKAGE_VERSION}"
+        echo "product_version=${PRODUCT_VERSION}"
         echo "release_version=${RELEASE_VERSION}"
+        echo "source_commit=${SOURCE_COMMIT}"
         echo "recommended_image_tag=${RECOMMENDED_IMAGE_TAG}"
         echo "egg=dist/kolla/${EGG_NAME}"
         echo "gate=deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh"
@@ -279,6 +334,7 @@ EOF
         echo "legacy_cli_package=openstack/neutronclient_aria"
         echo "agent_image_builder=deploy/kolla/package/build_neutron_aria_agent_image.sh"
         echo "datapath_image_builder=deploy/kolla/package/build_aria_datapath_image.sh"
+        echo "datapath_rc_installer=deploy/kolla/package/install_aria_datapath_rc_image.sh"
         echo "uds_peercred_profile_installer=deploy/kolla/package/install_aria_uds_peercred_profile.sh"
         echo "uds_hardened_rollout=deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh"
         echo "acl_enforcement_gap_check=deploy/kolla/smoke/neutron_aria_acl_enforcement_gap_smoke.sh"
@@ -287,10 +343,23 @@ EOF
     } > MANIFEST.txt
 )
 
+python3 "${STAGING_DIR}/ci/create_release_manifest.py" \
+    --repo-root "${STAGING_DIR}" \
+    --source-commit "${SOURCE_COMMIT}" \
+    --artifact "${EGG_NAME}=${STAGING_DIR}/dist/kolla/${EGG_NAME}" \
+    --output "${STAGING_DIR}/release-manifest.json" \
+    --checksums-output "${STAGING_DIR}/SHA256SUMS"
+
 rm -f "${BUNDLE_PATH}"
+find "${STAGING_DIR}" -type d -exec chmod 0755 {} +
+find "${STAGING_DIR}" -type f -exec chmod 0644 {} +
+find "${STAGING_DIR}" -type f -name '*.sh' -exec chmod 0755 {} +
+find "${STAGING_DIR}" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 (
     cd "${STAGING_DIR}"
-    tar -czf "${BUNDLE_PATH}" .
+    tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
+        --owner=0 --group=0 --numeric-owner --format=gnu -cf - . |
+        gzip -n >"${BUNDLE_PATH}"
 )
 
 log "Built ${BUNDLE_PATH}"

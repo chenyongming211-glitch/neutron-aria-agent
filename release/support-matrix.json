@@ -1,0 +1,37 @@
+{
+  "architecture": "x86_64",
+  "datapath": {
+    "acl_authority": [
+      "tc-ingress",
+      "tc-egress"
+    ],
+    "xdp_acl_ct_neutral": true
+  },
+  "features": {
+    "acl": "release-candidate",
+    "incremental_rpc": "experimental-default-off",
+    "mirror": "deferred",
+    "qos": "deferred"
+  },
+  "field_validated_kernels": [
+    "4.18.0-553.5.1.el8_10.x86_64"
+  ],
+  "neutron_managed_domains": [
+    "acl"
+  ],
+  "openstack_profile": "legacy-kolla-python2",
+  "production_defaults": {
+    "fragment_tracking_enabled": false,
+    "incremental_rpc_enabled": false,
+    "rpc_events_enabled": false
+  },
+  "product_line": "v0.9",
+  "runtime_requirements": {
+    "bpffs": true,
+    "kolla_container_runtime": true,
+    "ovs_bridge": "br-int",
+    "python": "2.7",
+    "uds_peercred": true
+  },
+  "schema_version": 1
+}

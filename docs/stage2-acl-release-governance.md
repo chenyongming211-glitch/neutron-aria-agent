@@ -3,7 +3,23 @@
 This document freezes the release rules for the v0.9 stage-two ACL production
 input path.
 
-## Version
+## Version Authority
+
+The repository-root `VERSION` file is the only product release-version source.
+For the current candidate it contains:
+
+```text
+0.9.0-rc.1
+```
+
+Release tags and Kolla image tags add a leading `v`. CI rejects a release tag
+that does not exactly match `v` plus the manifest product version.
+
+Rust workspace and Python package versions remain component compatibility
+versions and are recorded separately in `release-manifest.json`. Changing the
+product release label alone must not create an unvalidated datapath binary.
+
+## Component Packages
 
 The Python adapter package version is currently:
 
@@ -20,7 +36,7 @@ neutron-aria-stage2-acl-kolla-bundle.tgz
 Release tags should use the repository version tag, for example:
 
 ```text
-v0.9.0
+v0.9.0-rc.1
 ```
 
 ## Default Release Attachments
@@ -30,7 +46,14 @@ Every GitHub tag release must include:
 ```text
 firewall-binaries-x86_64.zip
 neutron-aria-stage2-acl-kolla-bundle.tgz
+release-manifest.json
+SHA256SUMS
 ```
+
+The binary archive and Kolla bundle include `VERSION`, the MIT `LICENSE`, the
+changelog, and `release/support-matrix.json`. The deterministic manifest binds
+the source commit, component versions, contract hashes, artifact hashes and,
+when built in CI, immutable image identities.
 
 The stage-two ACL Kolla bundle contains the old-Neutron plugin, agent package
 builder, DB migration/check scripts, install gate, smoke gates, and operator
@@ -48,8 +71,8 @@ The recommended image tag format is:
 Example:
 
 ```text
-registry.example.com/neutron-aria-agent:v0.9.0-stage2-acl
-registry.example.com/aria-datapath:v0.9.0-stage2-acl
+registry.example.com/neutron-aria-agent:v0.9.0-rc.1-stage2-acl
+registry.example.com/aria-datapath:v0.9.0-rc.1-stage2-acl
 ```
 
 The `neutron-aria-agent` image must be built from the onsite Kolla Neutron
@@ -94,7 +117,7 @@ Operators can build the images from the bundle onsite:
 
 ```bash
 sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
-  IMAGE_TAG=<registry>/neutron-aria-agent:v0.9.0-stage2-acl \
+  IMAGE_TAG=<registry>/neutron-aria-agent:v0.9.0-rc.1-stage2-acl \
   SAVE_IMAGE=true \
   REPO_ROOT=$(pwd) \
   deploy/kolla/package/build_neutron_aria_agent_image.sh
@@ -102,12 +125,47 @@ sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
 
 ```bash
 sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
-  IMAGE_TAG=<registry>/aria-datapath:v0.9.0-stage2-acl \
+  IMAGE_TAG=<registry>/aria-datapath:v0.9.0-rc.1-stage2-acl \
   ARTIFACT_DIR=release \
   SAVE_IMAGE=true \
   REPO_ROOT=$(pwd) \
   deploy/kolla/package/build_aria_datapath_image.sh
 ```
+
+## Datapath Image Lifecycle
+
+Use the manifest-pinned installer instead of copying files into a running
+container:
+
+```bash
+sudo IMAGE_REF=<registry-or-local-image>:<immutable-tag> \
+  IMAGE_TAR=<optional-image-tar> \
+  EXPECTED_IMAGE_ID=sha256:<image-id> \
+  EXPECTED_ARIA_SHA256=<aria-agent-sha256> \
+  EXPECTED_EBPF_SHA256=<ebpf-sha256> \
+  EXPECTED_EBPF_PERF_SHA256=<ebpf-perf-sha256> \
+  deploy/kolla/package/install_aria_datapath_rc_image.sh install
+```
+
+The installer validates all identities before mutation, discovers the current
+datapath state mount, keeps the old container stopped, waits for authenticated
+UDS readiness, and verifies that `ovs-vswitchd` and the Neutron OVS agent did
+not change. It never restarts either OVS service.
+
+```bash
+sudo deploy/kolla/package/install_aria_datapath_rc_image.sh check
+sudo deploy/kolla/package/install_aria_datapath_rc_image.sh rollback
+```
+
+When no registry is available, the image tar plus manifest and `SHA256SUMS` is
+the accepted RC transport. This is not equivalent to production registry
+promotion and does not close P6.
+
+## Promotion Boundary
+
+P6-1 may prepare and test RC assets while P5 is partial. Do not create the
+formal release tag or declare P6 complete until the unavailable compute passes
+P5, UDS peercred, clustered API/DB and rollback gates with the same candidate.
 
 ## Release Validation
 

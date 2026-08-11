@@ -80,6 +80,7 @@ jobs:
         run: |
           python3 ci/check_blocked_terms.py
           python3 -m unittest ci.test_public_release_hygiene
+          python3 -m unittest ci.test_release_governance
           python3 ci/check_build_workflow_contract.py
           python3 -m unittest ci.test_ci_lane_contract
           python3 -m unittest ci.test_ci001_trusted_gates
@@ -89,6 +90,7 @@ jobs:
           python3 -m unittest ci.test_ebpf_stack_budget
           python3 -m unittest ci.test_legacy_kernel_canary_contract
           python3 ci/check_rust_warning_hygiene.py
+          bash ci/check_release_reproducibility.sh
 
       - name: Check public Neutron contracts
         run: python3 ci/check_neutron_stage1.py --fast-contracts
@@ -269,11 +271,12 @@ jobs:
           cp ebpf-artifacts/libebpf_firewall.so release/libebpf_firewall.so
           cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
           cp ebpf-artifacts/stack-budget.json release/stack-budget.json
+          cp VERSION LICENSE CHANGELOG.md release/
           echo "=== release contents ==="
           ls -la release/
 
       - name: Build Neutron stage-two ACL Kolla bundle
-        run: RELEASE_VERSION="${GITHUB_REF_NAME:-stage2-acl-dev}" bash deploy/kolla/package/build_stage2_acl_bundle.sh
+        run: bash deploy/kolla/package/build_stage2_acl_bundle.sh
 
       - name: Check Neutron stage-two ACL Kolla bundle payload policy
         if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
@@ -290,8 +293,9 @@ jobs:
       - name: Build optional Neutron Aria agent image tar
         if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' }}
         run: |
-          image_tag="neutron-aria-agent:${GITHUB_REF_NAME:-stage2-acl-dev}-stage2-acl"
-          image_tar="dist/kolla/neutron-aria-agent-${GITHUB_REF_NAME:-stage2-acl-dev}-stage2-acl-image.tar"
+          release_version="v$(tr -d '[:space:]' < VERSION)"
+          image_tag="neutron-aria-agent:${release_version}-stage2-acl"
+          image_tar="dist/kolla/neutron-aria-agent-${release_version}-stage2-acl-image.tar"
           BASE_IMAGE="${{ vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE }}" \
             IMAGE_TAG="${image_tag}" \
             SAVE_IMAGE=true \
@@ -313,14 +317,64 @@ jobs:
       - name: Build optional Aria datapath image tar
         if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
         run: |
-          image_tag="aria-datapath:${GITHUB_REF_NAME:-stage2-acl-dev}-stage2-acl"
-          image_tar="dist/kolla/aria-datapath-${GITHUB_REF_NAME:-stage2-acl-dev}-stage2-acl-image.tar"
+          release_version="v$(tr -d '[:space:]' < VERSION)"
+          image_tag="aria-datapath:${release_version}-stage2-acl"
+          image_tar="dist/kolla/aria-datapath-${release_version}-stage2-acl-image.tar"
           BASE_IMAGE="${{ vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE }}" \
             IMAGE_TAG="${image_tag}" \
             ARTIFACT_DIR=release \
             SAVE_IMAGE=true \
             IMAGE_TAR="${image_tar}" \
             bash deploy/kolla/package/build_aria_datapath_image.sh
+
+      - name: Create release archive
+        run: |
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          touch -d "@${source_date_epoch}" \
+            release/aria-agent release/ariactl \
+            release/libebpf_firewall.so release/libebpf_firewall_perf.so \
+            release/stack-budget.json release/VERSION release/LICENSE \
+            release/CHANGELOG.md release/support-matrix.json
+          cd release
+          zip -X ../firewall-binaries-x86_64.zip \
+            aria-agent ariactl libebpf_firewall.so libebpf_firewall_perf.so \
+            stack-budget.json VERSION LICENSE CHANGELOG.md support-matrix.json
+          cd ..
+          ls -lh firewall-binaries-x86_64.zip
+
+      - name: Create release manifest and checksums
+        run: |
+          set -euo pipefail
+          args=(
+            --repo-root .
+            --source-commit "${GITHUB_SHA}"
+            --artifact "aria-agent=release/aria-agent"
+            --artifact "ariactl=release/ariactl"
+            --artifact "libebpf_firewall.so=release/libebpf_firewall.so"
+            --artifact "libebpf_firewall_perf.so=release/libebpf_firewall_perf.so"
+            --artifact "stack-budget.json=release/stack-budget.json"
+            --artifact "neutron-aria-stage2-acl-kolla-bundle.tgz=dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz"
+            --artifact "firewall-binaries-x86_64.zip=firewall-binaries-x86_64.zip"
+            --output release/release-manifest.json
+            --checksums-output release/SHA256SUMS
+          )
+          for image_tar in dist/kolla/*-stage2-acl-image.tar; do
+            if [ -f "${image_tar}" ]; then
+              args+=(--artifact "$(basename "${image_tar}")=${image_tar}")
+            fi
+          done
+          release_version="v$(tr -d '[:space:]' < VERSION)"
+          datapath_tag="aria-datapath:${release_version}-stage2-acl"
+          if docker image inspect "${datapath_tag}" >/dev/null 2>&1; then
+            datapath_id="$(docker image inspect -f '{{.Id}}' "${datapath_tag}")"
+            args+=(--image "aria-datapath=${datapath_tag}@${datapath_id}")
+          fi
+          agent_tag="neutron-aria-agent:${release_version}-stage2-acl"
+          if docker image inspect "${agent_tag}" >/dev/null 2>&1; then
+            agent_id="$(docker image inspect -f '{{.Id}}' "${agent_tag}")"
+            args+=(--image "neutron-aria-agent=${agent_tag}@${agent_id}")
+          fi
+          python3 ci/create_release_manifest.py "${args[@]}"
 
       - name: Check optional Aria datapath image payload policy
         if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
@@ -333,14 +387,6 @@ jobs:
           name: aria-datapath-stage2-acl-image-${{ github.sha }}
           path: dist/kolla/aria-datapath-*-stage2-acl-image.tar
           retention-days: 14
-
-      - name: Create release archive
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
-        run: |
-          cd release
-          zip -r ../firewall-binaries-x86_64.zip .
-          cd ..
-          ls -lh firewall-binaries-x86_64.zip
 
       - name: Check Rust binary release payload policy
         if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
@@ -356,7 +402,13 @@ jobs:
             firewall-binaries-x86_64.zip
 
   release:
-    needs: rust-build
+    needs:
+      - fast-contracts
+      - neutron-agent-clean-install
+      - neutron-db-contracts
+      - rust-behavior
+      - rust-build
+      - deep-audit
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
@@ -368,19 +420,31 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Validate release tag against manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          expected="v$(python3 -c 'import json; print(json.load(open("release-assets/release/release-manifest.json"))["product_version"])')"
+          test "${RELEASE_TAG}" = "${expected}" || {
+            echo "release tag ${RELEASE_TAG} does not match manifest ${expected}" >&2
+            exit 1
+          }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             release-assets/firewall-binaries-x86_64.zip
             release-assets/neutron-aria-stage2-acl-kolla-bundle.tgz
+            release-assets/release/release-manifest.json
+            release-assets/release/SHA256SUMS
             release-assets/neutron-aria-agent-*-stage2-acl-image.tar
             release-assets/aria-datapath-*-stage2-acl-image.tar
           fail_on_unmatched_files: false
           generate_release_notes: true
 
   deep-audit:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_deep_audit == true)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_deep_audit == true)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

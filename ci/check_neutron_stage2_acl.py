@@ -234,7 +234,8 @@ def check_production_acl_smoke():
         "build_neutron_aria_agent_image.sh",
         "build_aria_datapath_image.sh",
         "deploy/kolla/aria-datapath",
-        "tar -czf",
+        "tar --sort=name",
+        "gzip -n",
     ):
         if term not in bundle_builder:
             raise SystemExit("ERROR: stage-two ACL bundle builder missing %s" % term)
