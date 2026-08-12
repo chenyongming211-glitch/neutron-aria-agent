@@ -6181,12 +6181,13 @@ fn build_snapshot_plan_for_scope(
     inventory: &LocalInterfaceInventory,
     scope: ApplyScope,
 ) -> SnapshotPlan {
-    let inventory_error = inventory
+    let mut inventory_error = inventory
         .ovs_error
         .as_ref()
         .map(|details| format!("ovsdb_unavailable:{}", details));
     let mut desired = BTreeMap::new();
     let mut ignored = Vec::new();
+    let mut deferred_committed_ports = BTreeSet::new();
     let mut scoped_target_seen = false;
 
     for port in &snapshot.ports {
@@ -6211,17 +6212,29 @@ fn build_snapshot_plan_for_scope(
         let resolved_port = resolve_local_neutron_port(port, inventory);
 
         if !resolved_port.eligible {
+            let disposition = resolved_port
+                .disposition
+                .clone()
+                .unwrap_or_else(|| "not eligible".to_string());
+            if disposition == "ifindex_not_ready"
+                && current
+                    .get(&resolved_port.port_id)
+                    .is_some_and(|managed| managed.ifname == resolved_port.ifname)
+            {
+                deferred_committed_ports.insert(resolved_port.port_id.clone());
+                if inventory_error.is_none() {
+                    inventory_error = Some(format!(
+                        "local_port_not_ready:{}:{}",
+                        resolved_port.port_id, disposition
+                    ));
+                }
+            }
             ignored.push(NeutronPortApplyResult {
                 port_id: resolved_port.port_id.clone(),
                 ifname: resolved_port.ifname.clone(),
                 action: "ignore".to_string(),
                 status: "ignored".to_string(),
-                reason: Some(
-                    resolved_port
-                        .disposition
-                        .clone()
-                        .unwrap_or_else(|| "not eligible".to_string()),
-                ),
+                reason: Some(disposition),
             });
             continue;
         }
@@ -6246,6 +6259,9 @@ fn build_snapshot_plan_for_scope(
         match &scope {
             ApplyScope::FullHost => {
                 for (port_id, managed) in current {
+                    if deferred_committed_ports.contains(port_id) {
+                        continue;
+                    }
                     match desired.get(port_id) {
                         Some(port) if managed_binding_matches(managed, port) => {}
                         _ => detach.push(managed.clone()),
@@ -6254,9 +6270,11 @@ fn build_snapshot_plan_for_scope(
             }
             ApplyScope::SinglePort(target_port_id) if scoped_target_seen => {
                 if let Some(managed) = current.get(target_port_id) {
-                    match desired.get(target_port_id) {
-                        Some(port) if managed_binding_matches(managed, port) => {}
-                        _ => detach.push(managed.clone()),
+                    if !deferred_committed_ports.contains(target_port_id) {
+                        match desired.get(target_port_id) {
+                            Some(port) if managed_binding_matches(managed, port) => {}
+                            _ => detach.push(managed.clone()),
+                        }
                     }
                 }
             }
