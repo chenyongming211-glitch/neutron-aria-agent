@@ -755,6 +755,24 @@ impl NeutronApiState {
         *runtime = next_runtime;
     }
 
+    async fn retry_committed_runtime_after_tap_return(&self) {
+        let should_retry = {
+            let runtime = self.runtime.read().await;
+            let live_ifnames: BTreeSet<String> = runtime
+                .ports
+                .values()
+                .filter(|port| read_ifindex(&port.ifname).is_some())
+                .map(|port| port.ifname.clone())
+                .collect();
+            should_retry_committed_runtime_reconcile(&runtime, &live_ifnames)
+        };
+        if !should_retry {
+            return;
+        }
+        info!("retrying committed Neutron runtime after tap return");
+        self.reconcile_committed_runtime().await;
+    }
+
     async fn recover_incomplete_wal_intent(&self) {
         let Some(intent) = self.pending_recovery.clone() else {
             return;
@@ -1221,6 +1239,9 @@ pub(crate) fn build_router(
         interval.tick().await;
         loop {
             interval.tick().await;
+            health_state
+                .retry_committed_runtime_after_tap_return()
+                .await;
             health_state.project_tc_acl_health().await;
         }
     });
@@ -4060,6 +4081,31 @@ fn runtime_rebuild_port_status(
         Some(RUNTIME_REBUILD_REQUIRED_REASON.to_string()),
         domains,
     )
+}
+
+fn should_retry_committed_runtime_reconcile(
+    runtime: &NeutronRuntimeState,
+    live_ifnames: &BTreeSet<String>,
+) -> bool {
+    if runtime.pending_generation.is_some()
+        || !matches!(
+            runtime.authority_state.as_str(),
+            "recovered_pending_full_resync_required"
+                | "runtime_reconcile_requires_full_resync"
+        )
+    {
+        return false;
+    }
+
+    runtime.ports.values().any(|port| {
+        if !live_ifnames.contains(&port.ifname) {
+            return false;
+        }
+        match runtime.port_statuses.get(&port.port_id) {
+            None => true,
+            Some(status) => status.reason.as_deref() == Some(RUNTIME_REBUILD_REQUIRED_REASON),
+        }
+    })
 }
 
 fn invalidate_restarted_acl_runtime(
@@ -13519,6 +13565,70 @@ mod tests {
             projection.required_action,
             NeutronStatusRequiredAction::FullResync
         );
+    }
+
+    #[test]
+    fn recovered_inventory_retries_runtime_reconcile_once_tap_returns() {
+        let mut port = managed("vm-port", "tap-vm");
+        port.ifindex = None;
+        port.managed_domains = vec!["acl".to_string()];
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("hash-42".to_string()),
+            applied_desired_hash: Some("hash-42".to_string()),
+            authority_state: "recovered_pending_full_resync_required".to_string(),
+            ports: BTreeMap::from([(port.port_id.clone(), port.clone())]),
+            ..Default::default()
+        };
+
+        assert!(!should_retry_committed_runtime_reconcile(
+            &runtime,
+            &BTreeSet::new(),
+        ));
+
+        let live_ifnames = BTreeSet::from(["tap-vm".to_string()]);
+        assert!(should_retry_committed_runtime_reconcile(
+            &runtime,
+            &live_ifnames,
+        ));
+
+        runtime.port_statuses.insert(
+            "vm-port".to_string(),
+            runtime_rebuild_port_status(
+                &port,
+                runtime.applied_generation,
+                runtime.applied_desired_hash.clone(),
+            ),
+        );
+        runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+        assert!(should_retry_committed_runtime_reconcile(
+            &runtime,
+            &live_ifnames,
+        ));
+
+        runtime.port_statuses.insert(
+            "vm-port".to_string(),
+            port_runtime_status(
+                "vm-port",
+                "tap-vm",
+                42,
+                Some("hash-42".to_string()),
+                vec!["acl".to_string()],
+                "degraded",
+                Some("acl_restart_replay_requires_resync".to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "degraded",
+                    Some("acl_restart_replay_requires_resync".to_string()),
+                    Some("unchanged".to_string()),
+                )],
+            ),
+        );
+        assert!(!should_retry_committed_runtime_reconcile(
+            &runtime,
+            &live_ifnames,
+        ));
     }
 
     #[test]
