@@ -13744,6 +13744,123 @@ mod tests {
     }
 
     #[test]
+    fn neutron_snapshot_plan_defers_committed_port_until_ifindex_is_ready() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "vm-port".to_string(),
+            ManagedNeutronPort {
+                ifindex: None,
+                managed_domains: vec!["acl".to_string()],
+                ..managed("vm-port", "tap-vm")
+            },
+        );
+        let local = inventory(vec![iface(
+            "tap-vm",
+            "vm-port",
+            None,
+            Some("br-int"),
+        )]);
+        let snapshot = inventory_snapshot(
+            8,
+            vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("vm-port", "tap-vm", true)
+            }],
+        );
+
+        let plan = build_snapshot_plan(&current, &snapshot, &local);
+
+        assert!(plan.attach.is_empty());
+        assert!(plan.update.is_empty());
+        assert!(plan.detach.is_empty());
+        assert_eq!(
+            plan.inventory_error.as_deref(),
+            Some("local_port_not_ready:vm-port:ifindex_not_ready")
+        );
+        assert_eq!(plan.ignored.len(), 1);
+        assert_eq!(plan.ignored[0].port_id, "vm-port");
+        assert_eq!(
+            plan.ignored[0].reason.as_deref(),
+            Some("ifindex_not_ready")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_ifindex_not_ready_preserves_committed_runtime_for_retry() {
+        let root = temp_root("ifindex-not-ready-transaction");
+        let state = test_neutron_state(&root);
+        let mut previous = committed_runtime(85);
+        let committed = ManagedNeutronPort {
+            port_id: "vm-port".to_string(),
+            ifname: "tap-vm".to_string(),
+            ifindex: None,
+            managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
+        };
+        previous.ports = BTreeMap::from([("vm-port".to_string(), committed.clone())]);
+        previous.port_statuses = BTreeMap::from([(
+            "vm-port".to_string(),
+            runtime_rebuild_port_status(
+                &committed,
+                previous.applied_generation,
+                previous.applied_desired_hash.clone(),
+            ),
+        )]);
+        previous.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+        let snapshot = inventory_snapshot(
+            86,
+            vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("vm-port", "tap-vm", true)
+            }],
+        );
+        let local = inventory(vec![iface(
+            "tap-vm",
+            "vm-port",
+            None,
+            Some("br-int"),
+        )]);
+        let transaction = build_snapshot_apply_transaction(
+            &previous.ports,
+            &snapshot,
+            &local,
+            ApplyScope::FullHost,
+        )
+        .expect("transient local inventory remains a retriable transaction");
+
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            previous.ports.clone(),
+            previous.clone(),
+            transaction,
+        )
+        .await;
+
+        assert!(outcome.has_error);
+        assert_eq!(outcome.next_runtime.applied_generation, 85);
+        assert_eq!(outcome.next_runtime.ports, previous.ports);
+        assert_eq!(outcome.next_runtime.port_statuses, previous.port_statuses);
+        assert_eq!(
+            outcome.next_runtime.recovery_cause.as_deref(),
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        );
+        assert_eq!(
+            outcome.next_runtime.authority_state,
+            "blocked_recovery_required"
+        );
+        assert!(outcome.results.iter().any(|result| {
+            result.port_id == "snapshot"
+                && result.status == "error"
+                && result.reason.as_deref()
+                    == Some("local_port_not_ready:vm-port:ifindex_not_ready")
+        }));
+        assert!(!outcome.results.iter().any(|result| result.action == "detach"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn neutron_acl_translator_merges_same_tuple_l4_port_rules() {
         let mut drop_8080 = tcp_rule("drop-8080", "drop", 8080);
         drop_8080.priority = 101;
