@@ -163,9 +163,17 @@ promotion and does not close P6.
 
 ## Promotion Boundary
 
-P6-1 may prepare and test RC assets while P5 is partial. Do not create the
-formal release tag or declare P6 complete until the unavailable compute passes
-P5, UDS peercred, clustered API/DB and rollback gates with the same candidate.
+P6-1 may prepare and test RC assets while P5 is incomplete. P5 is evaluated
+against the explicitly declared deployment topology, not a permanently fixed
+node count. Every admitted compute must pass the same-candidate ACL lifecycle,
+UDS peercred, API/DB consistency, rollback, and OVS non-interference gates.
+
+An unavailable node may be removed from the declared topology instead of
+blocking indefinitely. It must also be removed from API/DB rotation and must
+not be counted in availability claims. If that node later returns, or a
+replacement node is added, treat it as a new admission: discover host-local
+UID/GID and runtime identities, run `apply` plus `check`, then repeat P5 before
+allowing workloads or control-plane traffic on it.
 
 ## Release Validation
 

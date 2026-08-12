@@ -1,12 +1,15 @@
 # v0.9 Release Candidate Gates
 
-Status: normative release sequence; P0-P4 complete. The current persistent
+Status: normative release sequence; P0-P5 complete for the currently declared
+two-compute topology. The current persistent
 Rust/eBPF runtime candidate is
 `7ffc5d65d9b30d0a1f9e706ec779cc8213200458`; it is deployed as the same local
-Kolla RC image on both available computes. P5 remains partial because one
-compute is unavailable. P6-1 delivery governance and the two-available-compute
+Kolla RC image on both admitted computes. A former third compute is unavailable
+and has been removed from the declared acceptance topology rather than kept as
+an indefinite release blocker. P6-1 delivery governance and the two-compute
 read-only delivery check are complete; formal P6 promotion and P7 remain
-pending or deferred as recorded below.
+pending or deferred as recorded below. This status does not claim three-node
+availability.
 
 ## Purpose
 
@@ -22,7 +25,7 @@ P0 trusted source baseline
   -> P2 exact-candidate CI artifacts
   -> P3 exact-artifact 4.18 isolated canary
   -> P4 single-node release candidate
-  -> P5 three-node final acceptance
+  -> P5 declared-topology final acceptance
   -> P6 release governance
   -> P7 QoS, then Mirror
 ```
@@ -40,8 +43,8 @@ ACL release path.
 | P2 exact-candidate CI artifacts | complete for candidate `7ffc5d65d9b30d0a1f9e706ec779cc8213200458` | Exact-artifact workflow `31477810061` produced the Rust/eBPF files used by the persistent RC image. Runtime hashes and the stack budget are recorded in the persistent two-compute evidence. |
 | P3 4.18 isolated canary | complete for current runtime candidate | Exact `7ffc5d6` artifacts passed the target-kernel standalone system, standalone tap, and focused Neutron-managed TC authority suites. XDP remained ACL/CT-neutral, restart recovery admitted zero packets, and OVS identities were unchanged. |
 | P4 single-node release candidate | complete for persistent image | Compute A passed exact-image deployment, readiness, real ACL traffic, actual old-version rollback, fresh container recreation, and a 2,994-reply zero-failure OVS canary without restarting OVS or OVS-agent. |
-| P5 three-node final acceptance | partial pass; blocked on one unavailable compute | Both available computes now run the same persistent `7ffc5d6` image and passed rollback, recreation, readiness, ACL lifecycle, cleanup, and OVS non-interference. Earlier production-agent RPC fanout, foreign-host filtering, migration-source cleanup, and event-driven restore evidence remains valid. The same suite remains required on the unavailable compute before P5 can close. |
-| P6 release governance | P6-1 implemented and checked on both available computes; promotion blocked by P5 | Root product version, license, changelog, reproducible bundle, deterministic manifest/checksums, support matrix, and a manifest-pinned Kolla datapath install/check/rollback entrypoint are present. Commit `9848779` passed CI run `31492061846`; the entrypoint then verified the existing RC image and runtime hashes read-only on both available computes without restarting Aria, OVS, or OVS-agent. Final tag, registry promotion, and release declaration remain blocked until P5 closes. |
+| P5 declared-topology final acceptance | complete for the current two-compute topology | Both admitted computes run the same persistent `7ffc5d6` image and passed rollback, recreation, readiness, ACL lifecycle, port projection, cleanup, and OVS non-interference. Production-agent RPC fanout, foreign-host filtering, migration-source cleanup, event-driven restore, UDS peercred, and current-topology API/DB consistency evidence are retained. No three-compute availability claim is made. |
+| P6 release governance | P6-1 and exact-head preflight complete; formal promotion pending authorization | Root product version, license, changelog, reproducible bundle, deterministic manifest/checksums, support matrix, and a manifest-pinned Kolla datapath install/check/rollback entrypoint are present. Commit `9848779` passed CI run `31492061846`; the entrypoint then verified the existing RC image and runtime hashes read-only on both admitted computes without restarting Aria, OVS, or OVS-agent. Workflow-dispatch run `31557065448` passed deep audit, DB, Python 2.7 clean install, fast contracts, Rust behavior, and Rust/eBPF build for exact SHA `89aba7a`; its release job was intentionally skipped. Formal tag, registry promotion, and release declaration require explicit release authorization, not recovery of a retired compute. |
 | P7 QoS then Mirror | deferred | Starts only after P6; no ACL release work is displaced by new feature scope. |
 
 ## P0 Trusted Source Baseline
@@ -138,7 +141,13 @@ P0 is complete only when all of the following hold:
   `docs/evidence/openstack-n05-lite/20260810-p3-legacy-kernel-canary/summary.md`
 - P4 single-node release candidate:
   `docs/evidence/openstack-n05-lite/20260810-p4-single-node-release-candidate/summary.md`
-- P5 two-node current-candidate partial evidence:
+- P5 two-node current-candidate evidence:
   `docs/evidence/openstack-n05-lite/20260811-p5-two-node-current-candidate/summary.md`
 - Persistent `7ffc5d6` two-compute Kolla RC:
   `docs/evidence/openstack-n05-lite/20260811-persistent-7ffc5d6-two-compute-rc/summary.md`
+- ACL-013 two-compute port projection:
+  `docs/evidence/openstack-n05-lite/20260812-acl013-two-compute-port-projection/summary.md`
+- Current-topology Neutron API/DB consistency:
+  `docs/evidence/openstack-n05-lite/20260812-current-topology-api-db-consistency/summary.md`
+- P6 exact-head deep-audit preflight:
+  GitHub Actions run `31557065448` at `89aba7a92da6e57ed3d014a2767ceabc9abfa3e2`
