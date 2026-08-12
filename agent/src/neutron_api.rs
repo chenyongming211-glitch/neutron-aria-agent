@@ -37,10 +37,11 @@ use crate::control_plane::{
 };
 use crate::fault_injection;
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
-use crate::tap_registry::TapRegistry;
+use crate::tap_registry::{RuntimeReconcileResult, TapRegistry};
 
 const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
+const RUNTIME_REBUILD_REQUIRED_REASON: &str = "runtime_rebuild_required";
 const OVS_INVENTORY_TIMEOUT: Duration = Duration::from_secs(3);
 const SNAPSHOT_ADMISSION_REVALIDATION_ATTEMPTS: usize = 3;
 
@@ -642,10 +643,17 @@ impl NeutronApiState {
                 )
             })
             .collect();
-        let results = self
+        let missing_ifnames: BTreeSet<String> = ports
+            .iter()
+            .filter(|port| read_ifindex(&port.ifname).is_none())
+            .map(|port| port.ifname.clone())
+            .collect();
+        let mut results = self
             .registry
             .reconcile_neutron_runtime(&committed_ifaces)
             .await;
+        let missing_runtime_requires_full_resync =
+            defer_missing_committed_interfaces(&mut results, &missing_ifnames);
         if results.is_empty() {
             return;
         }
@@ -663,6 +671,17 @@ impl NeutronApiState {
             else {
                 continue;
             };
+            if result.status == "deferred" {
+                if let Some(managed) = next_runtime.ports.get_mut(&port.port_id) {
+                    managed.ifindex = None;
+                    managed.domain_desired_hashes.remove("acl");
+                }
+                next_runtime.port_statuses.insert(
+                    port.port_id.clone(),
+                    runtime_rebuild_port_status(port, generation, desired_hash.clone()),
+                );
+                continue;
+            }
             next_runtime.port_statuses.insert(
                 port.port_id.clone(),
                 port_runtime_status(
@@ -709,7 +728,9 @@ impl NeutronApiState {
         if degraded {
             next_runtime.authority_state = "runtime_degraded".to_string();
             next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
-        } else if acl_requires_full_resync && next_runtime.pending_generation.is_none() {
+        } else if (acl_requires_full_resync || missing_runtime_requires_full_resync)
+            && next_runtime.pending_generation.is_none()
+        {
             next_runtime.authority_state =
                 "runtime_reconcile_requires_full_resync".to_string();
             next_runtime.wal_status =
@@ -3985,6 +4006,60 @@ fn runtime_domain_statuses_for(
         .into_iter()
         .map(|domain| domain_status(&domain, status, reason.clone()))
         .collect()
+}
+
+fn defer_missing_committed_interfaces(
+    results: &mut [RuntimeReconcileResult],
+    missing_ifnames: &BTreeSet<String>,
+) -> bool {
+    let mut deferred = false;
+    for result in results {
+        if result.action == "claim_committed"
+            && result.status == "blocked"
+            && missing_ifnames.contains(&result.ifname)
+        {
+            result.status = "deferred".to_string();
+            result.reason = Some(RUNTIME_REBUILD_REQUIRED_REASON.to_string());
+            deferred = true;
+        }
+    }
+    deferred
+}
+
+fn runtime_rebuild_port_status(
+    port: &ManagedNeutronPort,
+    generation: u64,
+    desired_hash: Option<String>,
+) -> NeutronPortStatus {
+    let domains = normalize_managed_domains(&port.managed_domains)
+        .into_iter()
+        .map(|domain| {
+            if domain == "acl" {
+                domain_status_with_action(
+                    &domain,
+                    "degraded",
+                    Some(RUNTIME_REBUILD_REQUIRED_REASON.to_string()),
+                    Some("bypass".to_string()),
+                )
+            } else {
+                domain_status(
+                    &domain,
+                    "blocked",
+                    Some(RUNTIME_REBUILD_REQUIRED_REASON.to_string()),
+                )
+            }
+        })
+        .collect();
+    port_runtime_status(
+        &port.port_id,
+        &port.ifname,
+        generation,
+        desired_hash,
+        port.managed_domains.clone(),
+        "degraded",
+        Some(RUNTIME_REBUILD_REQUIRED_REASON.to_string()),
+        domains,
+    )
 }
 
 fn invalidate_restarted_acl_runtime(
