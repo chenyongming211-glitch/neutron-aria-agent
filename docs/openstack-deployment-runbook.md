@@ -175,10 +175,12 @@ Enable in this order:
 
    `apply` discovers the numeric `neutron` UID/GID from the running
    `neutron_aria_agent`, atomically updates the host-mounted datapath config,
-   sets `/run/aria` to that group with mode `0770`, restarts only
+   maps that numeric GID to a host system group, installs a
+   `systemd-tmpfiles` rule for `/run/aria` with mode `0770`, restarts only
    `aria_datapath`, and verifies authorized and unauthorized peers plus the
-   audit trail. It is idempotent: an already valid profile is checked without
-   restarting the datapath. Roll back the latest preimage with:
+   audit trail. The tmpfiles rule is required because `/run` is recreated on
+   every host boot. It is idempotent: an already valid profile is checked
+   without restarting the datapath. Roll back the latest preimage with:
 
    ```bash
    sudo deploy/kolla/package/install_aria_uds_peercred_profile.sh rollback

@@ -12,6 +12,8 @@ AUDIT_LOG_VALUE="${AUDIT_LOG_VALUE:-/var/log/kolla/aria-datapath/neutron-uds-aud
 WAIT_SECONDS="${WAIT_SECONDS:-45}"
 NEUTRON_UID="${NEUTRON_UID:-}"
 NEUTRON_GID="${NEUTRON_GID:-}"
+TMPFILES_PATH="${TMPFILES_PATH:-/etc/tmpfiles.d/aria.conf}"
+HOST_GROUP_NAME="${HOST_GROUP_NAME:-aria-neutron}"
 
 PROFILE_BEGIN="# BEGIN aria UDS peercred production profile"
 PROFILE_END="# END aria UDS peercred production profile"
@@ -28,7 +30,8 @@ render       Render a hardened config to OUTPUT_PATH using explicit
              NEUTRON_UID and NEUTRON_GID.
 check-config Verify CONFIG_PATH contains exactly the expected hardened keys.
 apply        Discover the Neutron container identity, atomically install the
-             hardened profile, restart only aria-datapath, and verify it.
+             hardened profile and persistent runtime-directory ownership,
+             restart only aria-datapath, and verify it.
 check        Verify config, socket permissions, authorized access, denied
              unauthorized access, and audit records without restarting.
 rollback     Restore the latest config/directory preimage and restart only
@@ -68,6 +71,68 @@ discover_identity() {
     NEUTRON_UID="$(docker exec -u root "${AGENT_SERVICE}" id -u neutron)"
     NEUTRON_GID="$(docker exec -u root "${AGENT_SERVICE}" id -g neutron)"
     require_numeric_identity
+}
+
+find_host_group() {
+    local existing_name
+    existing_name="$(getent group "${NEUTRON_GID}" | cut -d: -f1 || true)"
+    if [ -n "${existing_name}" ]; then
+        HOST_GROUP_NAME="${existing_name}"
+        return 0
+    fi
+
+    return 1
+}
+
+ensure_host_group() {
+    local existing_gid
+    if find_host_group; then
+        return 0
+    fi
+
+    existing_gid="$(getent group "${HOST_GROUP_NAME}" | cut -d: -f3 || true)"
+    if [ -n "${existing_gid}" ] && [ "${existing_gid}" != "${NEUTRON_GID}" ]; then
+        echo "host group ${HOST_GROUP_NAME} already uses GID ${existing_gid}" >&2
+        return 1
+    fi
+    groupadd --system --gid "${NEUTRON_GID}" "${HOST_GROUP_NAME}"
+    find_host_group
+}
+
+expected_tmpfiles_line() {
+    printf 'd %s 0770 root %s -\n' "${RUN_ARIA_DIR}" "${HOST_GROUP_NAME}"
+}
+
+install_runtime_directory_profile() {
+    ensure_host_group || return 1
+    command -v systemd-tmpfiles >/dev/null 2>&1 || {
+        echo "missing command: systemd-tmpfiles" >&2
+        return 1
+    }
+
+    local temp_path
+    mkdir -p "$(dirname "${TMPFILES_PATH}")"
+    temp_path="$(mktemp "${TMPFILES_PATH}.XXXXXX")"
+    expected_tmpfiles_line >"${temp_path}"
+    chown root:root "${temp_path}"
+    chmod 0644 "${temp_path}"
+    mv -f "${temp_path}" "${TMPFILES_PATH}"
+    systemd-tmpfiles --create "${TMPFILES_PATH}"
+}
+
+check_runtime_directory_profile() {
+    find_host_group || {
+        echo "no host group maps Neutron GID ${NEUTRON_GID}" >&2
+        return 1
+    }
+    [ -f "${TMPFILES_PATH}" ] || {
+        echo "missing tmpfiles profile: ${TMPFILES_PATH}" >&2
+        return 1
+    }
+    [ "$(cat "${TMPFILES_PATH}")" = "$(expected_tmpfiles_line)" ] || {
+        echo "unexpected tmpfiles profile in ${TMPFILES_PATH}" >&2
+        return 1
+    }
 }
 
 render_config() {
@@ -236,6 +301,7 @@ check_runtime() {
     require_root_host
     discover_identity || return 1
     check_config || return 1
+    check_runtime_directory_profile || return 1
     container_running "${DATAPATH_SERVICE}" || {
         echo "${DATAPATH_SERVICE} must be running" >&2
         return 1
@@ -277,15 +343,25 @@ timestamp() {
 
 backup_preimage() {
     mkdir -p "${STATE_DIR}"
-    local stamp config_backup metadata
+    local stamp config_backup metadata tmpfiles_backup tmpfiles_present
     stamp="$(timestamp)"
     config_backup="${STATE_DIR}/aria-agent-openstack.${stamp}.bak"
     metadata="${STATE_DIR}/run-aria.${stamp}.meta"
+    tmpfiles_backup="${STATE_DIR}/aria-tmpfiles.${stamp}.bak"
     cp -p "${CONFIG_PATH}" "${config_backup}"
+    tmpfiles_present=0
+    if [ -f "${TMPFILES_PATH}" ]; then
+        cp -p "${TMPFILES_PATH}" "${tmpfiles_backup}"
+        tmpfiles_present=1
+    else
+        : >"${tmpfiles_backup}"
+    fi
     {
         echo "uid=$(stat -c '%u' "${RUN_ARIA_DIR}")"
         echo "gid=$(stat -c '%g' "${RUN_ARIA_DIR}")"
         echo "mode=$(stat -c '%a' "${RUN_ARIA_DIR}")"
+        echo "tmpfiles_present=${tmpfiles_present}"
+        echo "tmpfiles_backup=${tmpfiles_backup}"
     } >"${metadata}"
     ln -sfn "${config_backup}" "${STATE_DIR}/aria-agent-openstack.latest.bak"
     ln -sfn "${metadata}" "${STATE_DIR}/run-aria.latest.meta"
@@ -304,14 +380,25 @@ restore_latest() {
         return 1
     }
     local config_backup metadata uid gid mode temp_config
+    local tmpfiles_present tmpfiles_backup temp_tmpfiles
     config_backup="$(readlink -f "${config_link}")"
     metadata="$(readlink -f "${metadata_link}")"
     uid="$(sed -n 's/^uid=//p' "${metadata}")"
     gid="$(sed -n 's/^gid=//p' "${metadata}")"
     mode="$(sed -n 's/^mode=//p' "${metadata}")"
+    tmpfiles_present="$(sed -n 's/^tmpfiles_present=//p' "${metadata}")"
+    tmpfiles_backup="$(sed -n 's/^tmpfiles_backup=//p' "${metadata}")"
     temp_config="$(mktemp "${CONFIG_PATH}.rollback.XXXXXX")"
     cp -p "${config_backup}" "${temp_config}" || return 1
     mv -f "${temp_config}" "${CONFIG_PATH}" || return 1
+    if [ "${tmpfiles_present:-0}" = "1" ]; then
+        [ -f "${tmpfiles_backup}" ] || return 1
+        temp_tmpfiles="$(mktemp "${TMPFILES_PATH}.rollback.XXXXXX")"
+        cp -p "${tmpfiles_backup}" "${temp_tmpfiles}" || return 1
+        mv -f "${temp_tmpfiles}" "${TMPFILES_PATH}" || return 1
+    else
+        rm -f "${TMPFILES_PATH}"
+    fi
     chown "${uid}:${gid}" "${RUN_ARIA_DIR}" || return 1
     chmod "${mode}" "${RUN_ARIA_DIR}" || return 1
     docker restart "${DATAPATH_SERVICE}" >/dev/null || return 1
@@ -323,6 +410,7 @@ apply_profile() {
     require_root_host
     discover_identity
     if check_config >/dev/null 2>&1 &&
+        check_runtime_directory_profile >/dev/null 2>&1 &&
         [ "$(stat -c '%a' "${RUN_ARIA_DIR}")" = "770" ] &&
         [ "$(stat -c '%g' "${RUN_ARIA_DIR}")" = "${NEUTRON_GID}" ]; then
         if check_runtime; then
@@ -345,8 +433,7 @@ apply_profile() {
     chown "${config_uid}:${config_gid}" "${temp_config}"
     chmod "${config_mode}" "${temp_config}"
     mv -f "${temp_config}" "${CONFIG_PATH}"
-    chgrp "${NEUTRON_GID}" "${RUN_ARIA_DIR}"
-    chmod 0770 "${RUN_ARIA_DIR}"
+    install_runtime_directory_profile
 
     if ! restart_datapath || ! check_runtime; then
         log "hardened apply failed; restoring the preimage"

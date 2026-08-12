@@ -117,4 +117,15 @@ if CONFIG_PATH="${SOURCE_CONFIG}" \
     exit 1
 fi
 
+tmpfiles_line="$({
+    RUN_ARIA_DIR=/run/aria \
+    HOST_GROUP_NAME=aria-neutron \
+    INSTALLER="${INSTALLER}" \
+        bash -c 'source "${INSTALLER}"; expected_tmpfiles_line'
+})"
+[ "${tmpfiles_line}" = 'd /run/aria 0770 root aria-neutron -' ] || {
+    echo "unexpected runtime-directory tmpfiles profile: ${tmpfiles_line}" >&2
+    exit 1
+}
+
 echo "aria_uds_peercred_profile_contract=pass"

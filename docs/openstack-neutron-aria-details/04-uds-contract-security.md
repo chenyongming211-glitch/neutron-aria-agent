@@ -78,8 +78,10 @@ deployment uses
 `deploy/kolla/package/install_aria_uds_peercred_profile.sh`, which discovers
 the final numeric identity from the running Neutron agent container, renders
 one exact allow-list, atomically replaces the host-mounted Kolla config, and
-keeps a rollback preimage. Re-running `apply` on a valid profile performs a
-read-only verification and does not restart the datapath.
+keeps a rollback preimage. It also maps the container GID to a host system
+group and installs a `systemd-tmpfiles` rule so `/run/aria` returns with the
+same ownership after a host reboot. Re-running `apply` on a valid profile
+performs a read-only verification and does not restart the datapath.
 
 ## Peer Authentication
 
