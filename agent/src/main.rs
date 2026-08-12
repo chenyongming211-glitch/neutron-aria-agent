@@ -201,6 +201,10 @@ fn default_mode() -> AgentMode {
     AgentMode::Standalone
 }
 
+fn detach_runtime_on_shutdown(mode: AgentMode) -> bool {
+    todo!("classify shutdown ownership by agent mode")
+}
+
 fn default_ebpf_path() -> String {
     "/usr/local/lib/libebpf_firewall.so".to_string()
 }
@@ -1231,6 +1235,12 @@ mod tests {
         assert!(config.neutron_socket_enabled());
         assert_eq!(config.neutron_socket_mode, 0o660);
         assert!(!config.neutron_peercred_enforce);
+    }
+
+    #[test]
+    fn neutron_managed_shutdown_preserves_kernel_runtime() {
+        assert!(!detach_runtime_on_shutdown(AgentMode::NeutronManaged));
+        assert!(detach_runtime_on_shutdown(AgentMode::Standalone));
     }
 
     #[test]
