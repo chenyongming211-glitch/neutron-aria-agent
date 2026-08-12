@@ -2356,6 +2356,14 @@ mod tests {
     }
 
     #[test]
+    fn legacy_tc_filters_count_as_preexisting_live_runtime() {
+        assert_eq!(
+            classify_preexisting_runtime_attachments(false, false, false, true, true),
+            (true, true, true)
+        );
+    }
+
+    #[test]
     fn legacy_tc_health_requires_one_exact_name_and_program_id() {
         let owned = r#"[{"kind":"bpf","options":{"name":"tc_ingress","id":77}}]"#;
         let unrelated = r#"[{"kind":"bpf","options":{"name":"tc_egress","id":88}}]"#;
