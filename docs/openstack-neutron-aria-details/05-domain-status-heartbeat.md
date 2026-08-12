@@ -1,6 +1,7 @@
 # 05. Domain Status And Heartbeat Contract
 
-Status: implemented for the v0.9 Status V1 and Neutron heartbeat projection.
+Status: implemented for the v0.9 Status V1 runtime model and bounded Neutron
+Heartbeat V2 projection.
 Legacy Neutron port-field projection and product UI wording remain separate work.
 
 ## Purpose
@@ -184,6 +185,14 @@ The status surfaces have separate responsibilities:
 Heartbeat is therefore not a per-port database, event audit log, or debugging
 dump. Removing samples from `report_state` does not remove the complete local
 runtime rows or the dedicated ACL port-status publication path.
+
+Field acceptance uses `neutron_aria_heartbeat_smoke.sh` with
+`REQUIRE_HEARTBEAT_V2=true`. The gate requires schema version 2,
+`summary_only`, absence of the three legacy sample collections, and a bounded
+serialized `agent-show` response. Supplying `HEARTBEAT_PORT_STATUS_ID` also
+proves that the dedicated per-port API remains available after heartbeat
+compaction. The default 16 KiB smoke ceiling is an operational guard, not a
+wire-protocol maximum, and may only be raised with recorded payload evidence.
 
 `domain_counts` preserves an explicit `effective_action` when present. For
 legacy rows without one, the compatibility fallback is `ready -> enforce`,

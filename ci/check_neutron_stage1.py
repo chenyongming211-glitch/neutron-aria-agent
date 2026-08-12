@@ -624,6 +624,15 @@ def run_readiness_endpoint_smoke_contract_test():
          "ci.test_neutron_aria_readiness_endpoint_smoke"])
 
 
+def run_heartbeat_v2_smoke_contract_test():
+    bash = shutil.which("bash")
+    if not bash:
+        print("SKIP: bash not found; cannot test Heartbeat V2 smoke")
+        return
+    print("==> checking Heartbeat V2 smoke contract")
+    run([bash, bash_path("ci", "test_neutron_aria_heartbeat_v2_smoke.sh")])
+
+
 def run_agent_package_installer_test():
     bash = shutil.which("bash")
     if not bash:
@@ -689,6 +698,7 @@ def run_fast_contracts():
     check_public_smoke_entrypoints()
     run_smoke_syntax()
     run_readiness_endpoint_smoke_contract_test()
+    run_heartbeat_v2_smoke_contract_test()
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
     run_acl_enforcement_gap_smoke_test()

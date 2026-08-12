@@ -29,7 +29,7 @@ or an explicitly approved later phase.
 | `02-aria-acl-plugin.md` | Detail the minimum `aria_acl` Neutron service plugin/API/DB plan. |
 | `03-neutron-acl-source.md` | Detail how `neutron-aria-agent` reads `aria_acl` and builds effective ACL input. |
 | `04-uds-contract-security.md` | Detail UDS contract, body limits, error hash, peer auth, and audit. |
-| `05-domain-status-heartbeat.md` | Document the implemented Status V1 contract and its Neutron heartbeat/product-status projections. |
+| `05-domain-status-heartbeat.md` | Document the implemented Status V1 runtime contract, bounded Heartbeat V2 projection, and dedicated product-status surfaces. |
 | `06-deployment-n05-runbook.md` | Detail deployment enablement, N0.5 evidence, smoke, and rollback. |
 | `07-transaction-wal.md` | Detail snapshot apply transaction, WAL intent/commit, replay, timeout, and idempotency. |
 | `08-stage3-acl-production-hardening.md` | Detail Stage-Three ACL Production Hardening, release/CI, persistent UDS rollout, and N3 fault/lifecycle gates. |

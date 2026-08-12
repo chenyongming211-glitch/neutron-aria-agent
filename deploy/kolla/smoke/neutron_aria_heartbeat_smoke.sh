@@ -5,7 +5,17 @@ EXPECTED_HOSTS="${EXPECTED_HOSTS:-compute-1.example.test compute-2.example.test 
 ADMINRC="${ADMINRC:-/root/adminrc}"
 REQUIRE_HEARTBEAT_SUMMARY_FIELDS="${REQUIRE_HEARTBEAT_SUMMARY_FIELDS:-false}"
 REQUIRE_P3_PROJECTION_FIELDS="${REQUIRE_P3_PROJECTION_FIELDS:-false}"
+REQUIRE_HEARTBEAT_V2="${REQUIRE_HEARTBEAT_V2:-false}"
 HEARTBEAT_SUMMARY_TIMEOUT="${HEARTBEAT_SUMMARY_TIMEOUT:-45}"
+HEARTBEAT_MAX_PAYLOAD_BYTES="${HEARTBEAT_MAX_PAYLOAD_BYTES:-16384}"
+HEARTBEAT_PORT_STATUS_ID="${HEARTBEAT_PORT_STATUS_ID:-}"
+
+case "${HEARTBEAT_MAX_PAYLOAD_BYTES}" in
+    ''|*[!0-9]*|0)
+        echo "HEARTBEAT_MAX_PAYLOAD_BYTES must be a positive integer" >&2
+        exit 2
+        ;;
+esac
 
 if [ -r "${ADMINRC}" ]; then
     # Source OpenStack credentials when the script is run on a host shell.
@@ -58,6 +68,35 @@ p3_projection_fields_present() {
     done
 }
 
+heartbeat_v2_summary_present() {
+    local details="$1"
+    local payload_bytes
+    local forbidden
+
+    echo "${details}" | grep -E 'heartbeat_schema_version[^0-9]*2' >/dev/null || return 1
+    echo "${details}" | grep -E 'heartbeat_detail_mode[^a-z_]*summary_only' >/dev/null || return 1
+    for forbidden in \
+        last_managed_ports_detail \
+        last_port_statuses \
+        last_event_decisions; do
+        if echo "${details}" | grep "${forbidden}" >/dev/null; then
+            return 1
+        fi
+    done
+    payload_bytes="$(printf '%s' "${details}" | wc -c | tr -d ' ')"
+    [ "${payload_bytes}" -le "${HEARTBEAT_MAX_PAYLOAD_BYTES}" ]
+}
+
+port_status_fields_present() {
+    local details="$1"
+    local field
+
+    for field in port_id status runtime_status effective_action; do
+        echo "${details}" | grep "${field}" >/dev/null || return 1
+    done
+    echo "${details}" | grep "${HEARTBEAT_PORT_STATUS_ID}" >/dev/null
+}
+
 for host in ${EXPECTED_HOSTS}; do
     line="$(neutron agent-list | grep "Aria ACL agent" | grep " ${host} " || true)"
     if [ -z "${line}" ]; then
@@ -97,6 +136,33 @@ for host in ${EXPECTED_HOSTS}; do
         done
         echo "p3_projection_fields=ok host=${host}"
     fi
+
+    if [ "${REQUIRE_HEARTBEAT_V2}" = "true" ]; then
+        deadline=$((SECONDS + HEARTBEAT_SUMMARY_TIMEOUT))
+        while ! heartbeat_v2_summary_present "${details}"; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "heartbeat V2 summary-only contract failed on ${host}" >&2
+                echo "payload_bytes=$(printf '%s' "${details}" | wc -c | tr -d ' ') max_bytes=${HEARTBEAT_MAX_PAYLOAD_BYTES}" >&2
+                echo "${details}" >&2
+                exit 1
+            fi
+            sleep 3
+            details="$(neutron agent-show "${agent_id}" -f json)"
+        done
+        echo "heartbeat_v2_summary=ok host=${host}"
+    fi
 done
+
+if [ -n "${HEARTBEAT_PORT_STATUS_ID}" ]; then
+    port_status="$(
+        neutron aria-acl-port-status-show "${HEARTBEAT_PORT_STATUS_ID}" -f json
+    )"
+    if ! port_status_fields_present "${port_status}"; then
+        echo "dedicated ACL port-status projection failed for ${HEARTBEAT_PORT_STATUS_ID}" >&2
+        echo "${port_status}" >&2
+        exit 1
+    fi
+    echo "heartbeat_port_status_api=ok port_id=${HEARTBEAT_PORT_STATUS_ID}"
+fi
 
 echo "neutron-aria-agent heartbeat smoke passed"

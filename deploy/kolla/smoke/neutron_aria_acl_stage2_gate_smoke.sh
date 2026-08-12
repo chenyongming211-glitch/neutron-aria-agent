@@ -89,6 +89,7 @@ smoke() {
     log "Checking neutron-aria-agent heartbeat summary"
     EXPECTED_HOSTS="${HOST_FQDN:-$(hostname -f)}" \
         REQUIRE_HEARTBEAT_SUMMARY_FIELDS=true \
+        REQUIRE_HEARTBEAT_V2=true \
         bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh"
 
     log "Checking enabled ACL ports for enforcement gaps"
