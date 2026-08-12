@@ -157,6 +157,7 @@ The default config is heartbeat-only:
 ```ini
 [agent]
 full_resync_enabled = false
+heartbeat_detail_mode = summary_only
 
 [neutron]
 port_source = disabled
@@ -171,6 +172,12 @@ Aria ACL agent | <compute-fqdn> | :-) | True | neutron-aria-agent
 ```
 
 It must not submit an empty snapshot and must not touch any tap datapath.
+
+`summary_only` also keeps `neutron agent-show` independent of the number of
+local ports. Per-port ACL runtime detail remains available through the
+`aria-acl-port-status` API. Use `legacy_sample` only as a temporary rolling
+upgrade compatibility setting; it adds at most three port/event sample rows to
+the heartbeat.
 
 ## RPC Event Gate
 

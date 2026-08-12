@@ -127,6 +127,7 @@ class StatusReporterTestCase(unittest.TestCase):
             incremental_rpc_enabled=True,
             revisionless_incremental_mode="disabled",
             event_merge_interval=0.4,
+            heartbeat_detail_mode="legacy_sample",
         )
         reporter = build_neutron_status_reporter(
             "compute-1",
@@ -144,6 +145,7 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertTrue(configurations["incremental_rpc_enabled"])
         self.assertEqual("disabled", configurations["revisionless_incremental_mode"])
         self.assertEqual(0.4, configurations["event_merge_interval"])
+        self.assertEqual("legacy_sample", configurations["heartbeat_detail_mode"])
 
     def test_report_projects_domain_counts_and_degraded_reasons(self):
         api = FakeReportStateApi()
@@ -198,12 +200,31 @@ class StatusReporterTestCase(unittest.TestCase):
             configurations["degraded_reasons"],
         )
 
-    def test_report_compacts_large_heartbeat_configurations(self):
+    def test_report_preserves_agent_degraded_reason_without_port_rows(self):
+        api = FakeReportStateApi()
+        runtime_status = AgentRuntimeStatus("compute-1")
+        runtime_status.mark_degraded(
+            "resync_degraded",
+            RuntimeError("neutron API timeout"),
+        )
+        reporter = NeutronStatusReporter(api, context="ctx", host="compute-1")
+
+        configurations = reporter.report(runtime_status)["configurations"]
+
+        self.assertFalse(configurations["ready"])
+        self.assertTrue(configurations["degraded"])
+        self.assertEqual("resync_degraded", configurations["reason"])
+        self.assertEqual(
+            [{"reason": "resync_degraded", "count": 1}],
+            configurations["degraded_reasons"],
+        )
+
+    def test_report_uses_summary_only_heartbeat_by_default(self):
         api = FakeReportStateApi()
         runtime_status = AgentRuntimeStatus("compute-1")
         managed_ports = []
         port_statuses = []
-        for i in range(20):
+        for i in range(1000):
             port_id = "port-%02d-00000000-0000-0000-0000-000000000000" % i
             managed_ports.append({
                 "port_id": port_id,
@@ -227,8 +248,8 @@ class StatusReporterTestCase(unittest.TestCase):
             })
         runtime_status.mark_ready(
             generation=12,
-            snapshot_ports=20,
-            managed_ports=20,
+            snapshot_ports=1000,
+            managed_ports=1000,
             managed_ports_detail=managed_ports,
             port_statuses=port_statuses,
         )
@@ -237,12 +258,69 @@ class StatusReporterTestCase(unittest.TestCase):
         agent_state = reporter.report(runtime_status)
         configurations = agent_state["configurations"]
 
+        self.assertEqual(2, configurations["heartbeat_schema_version"])
+        self.assertEqual("summary_only", configurations["heartbeat_detail_mode"])
+        self.assertNotIn("last_managed_ports_detail", configurations)
+        self.assertNotIn("last_managed_ports_detail_truncated", configurations)
+        self.assertNotIn("last_port_statuses", configurations)
+        self.assertNotIn("last_port_statuses_truncated", configurations)
+        self.assertNotIn("last_event_decisions", configurations)
+        self.assertNotIn("last_event_decisions_truncated", configurations)
+        self.assertEqual(
+            [{"reason": "no_enabled_binding", "count": 1000}],
+            configurations["status_reason_counts"],
+        )
+        self.assertEqual([], configurations["degraded_reasons"])
+        self.assertLess(len(json.dumps(configurations, sort_keys=True)), 2500)
+
+    def test_report_can_publish_legacy_bounded_samples_during_upgrade(self):
+        api = FakeReportStateApi()
+        runtime_status = AgentRuntimeStatus("compute-1")
+        managed_ports = []
+        port_statuses = []
+        event_decisions = []
+        for i in range(5):
+            port_id = "port-%s" % i
+            managed_ports.append({
+                "port_id": port_id,
+                "ifname": "tap%s" % i,
+                "managed_domains": ["acl"],
+            })
+            port_statuses.append({
+                "port_id": port_id,
+                "status": "ready",
+                "domains": [{"domain": "acl", "status": "ready"}],
+            })
+            event_decisions.append({
+                "port_id": port_id,
+                "action": "port_scoped",
+                "reason": "local_port_update",
+            })
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=5,
+            managed_ports=5,
+            managed_ports_detail=managed_ports,
+            port_statuses=port_statuses,
+        )
+        runtime_status.record_event_decisions(event_decisions)
+        reporter = NeutronStatusReporter(
+            api,
+            context="ctx",
+            host="compute-1",
+            heartbeat_detail_mode="legacy_sample",
+        )
+
+        configurations = reporter.report(runtime_status)["configurations"]
+
+        self.assertEqual(2, configurations["heartbeat_schema_version"])
+        self.assertEqual("legacy_sample", configurations["heartbeat_detail_mode"])
         self.assertEqual(3, len(configurations["last_managed_ports_detail"]))
         self.assertTrue(configurations["last_managed_ports_detail_truncated"])
         self.assertEqual(3, len(configurations["last_port_statuses"]))
         self.assertTrue(configurations["last_port_statuses_truncated"])
-        self.assertNotIn("desired_hash", configurations["last_port_statuses"][0])
-        self.assertLess(len(json.dumps(configurations, sort_keys=True)), 4000)
+        self.assertEqual(3, len(configurations["last_event_decisions"]))
+        self.assertTrue(configurations["last_event_decisions_truncated"])
 
     def test_second_report_clears_start_flag(self):
         api = FakeReportStateApi()

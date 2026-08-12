@@ -10,6 +10,7 @@ DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 DEFAULT_OVS_BRIDGE = "br-int"
 DEFAULT_MANAGED_DOMAINS = ("acl",)
 DEFAULT_REPORT_INTERVAL = 30
+DEFAULT_HEARTBEAT_DETAIL_MODE = "summary_only"
 DEFAULT_PORT_SOURCE = "disabled"
 DEFAULT_EVENT_MERGE_INTERVAL = 0.2
 DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
@@ -25,6 +26,7 @@ SUPPORTED_MANAGED_DOMAINS = ("acl",)
 SUPPORTED_ACL_SOURCES = ("disabled", "fixture", "neutron")
 SUPPORTED_PORT_SOURCES = ("disabled", "neutronclient")
 SUPPORTED_REVISIONLESS_INCREMENTAL_MODES = ("disabled", "experimental")
+SUPPORTED_HEARTBEAT_DETAIL_MODES = ("summary_only", "legacy_sample")
 SYNC_MODE_HEARTBEAT_ONLY = "heartbeat_only"
 SYNC_MODE_POLLING_FULL_RESYNC = "polling_full_resync"
 SYNC_MODE_RPC_FULL_RESYNC = "rpc_full_resync"
@@ -62,6 +64,7 @@ class AgentConfig(object):
         timeout_convergence_interval=DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL,
         resync_interval=60,
         report_interval=DEFAULT_REPORT_INTERVAL,
+        heartbeat_detail_mode=DEFAULT_HEARTBEAT_DETAIL_MODE,
         full_resync_enabled=False,
         port_source=DEFAULT_PORT_SOURCE,
         port_page_size=None,
@@ -87,6 +90,9 @@ class AgentConfig(object):
         self.timeout_convergence_interval = float(timeout_convergence_interval)
         self.resync_interval = int(resync_interval)
         self.report_interval = int(report_interval)
+        self.heartbeat_detail_mode = (
+            heartbeat_detail_mode or DEFAULT_HEARTBEAT_DETAIL_MODE
+        ).strip().lower()
         self.full_resync_enabled = bool(full_resync_enabled)
         self.port_source = port_source or DEFAULT_PORT_SOURCE
         self.port_page_size = _optional_positive_int(
@@ -192,6 +198,11 @@ def validate_config(config):
             "unsupported neutron.revisionless_incremental_mode: %s"
             % config.revisionless_incremental_mode
         )
+    if config.heartbeat_detail_mode not in SUPPORTED_HEARTBEAT_DETAIL_MODES:
+        raise ConfigError(
+            "unsupported agent.heartbeat_detail_mode: %s"
+            % config.heartbeat_detail_mode
+        )
     if config.full_resync_enabled and config.port_source == "disabled":
         raise ConfigError(
             "full_resync_enabled=true requires [neutron] port_source=neutronclient"
@@ -288,6 +299,12 @@ def load_config(path):
         ),
         resync_interval=_get(parser, "agent", "resync_interval", "60"),
         report_interval=_get(parser, "agent", "report_interval", str(DEFAULT_REPORT_INTERVAL)),
+        heartbeat_detail_mode=_get(
+            parser,
+            "agent",
+            "heartbeat_detail_mode",
+            DEFAULT_HEARTBEAT_DETAIL_MODE,
+        ),
         full_resync_enabled=_parse_bool(
             _get(parser, "agent", "full_resync_enabled", "false"),
             default=False,

@@ -40,6 +40,7 @@ summary_fields_present() {
         applied_generation \
         generation_lag \
         domain_counts \
+        status_reason_counts \
         degraded_reasons; do
         echo "${details}" | grep "${field}" >/dev/null || return 1
     done
@@ -48,9 +49,10 @@ summary_fields_present() {
 p3_projection_fields_present() {
     local details="$1"
     for field in \
+        heartbeat_schema_version \
+        heartbeat_detail_mode \
         projection_index \
         last_event_decision_counts \
-        last_event_decisions \
         last_event_decision_updated_at; do
         echo "${details}" | grep "${field}" >/dev/null || return 1
     done

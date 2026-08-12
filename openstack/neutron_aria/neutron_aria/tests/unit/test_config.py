@@ -27,6 +27,7 @@ host = compute-1.example.test
 managed_domains = acl
 resync_interval = 120
 report_interval = 15
+heartbeat_detail_mode = legacy_sample
 full_resync_enabled = true
 resync_backoff_initial = 7
 resync_backoff_max = 77
@@ -64,6 +65,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual(["acl"], config.managed_domains)
             self.assertEqual(120, config.resync_interval)
             self.assertEqual(15, config.report_interval)
+            self.assertEqual("legacy_sample", config.heartbeat_detail_mode)
             self.assertTrue(config.full_resync_enabled)
             self.assertEqual(7, config.resync_backoff_initial)
             self.assertEqual(77, config.resync_backoff_max)
@@ -97,6 +99,24 @@ fixture_path = /tmp/aria-acl-fixture.json
                 AgentConfig(acl_page_size=None, port_page_size=50)
             ),
         )
+
+    def test_heartbeat_detail_mode_defaults_to_summary_only(self):
+        self.assertEqual(
+            "summary_only",
+            AgentConfig().heartbeat_detail_mode,
+        )
+
+    def test_rejects_unknown_heartbeat_detail_mode(self):
+        path = self._write_config("""
+[agent]
+heartbeat_detail_mode = everything
+""")
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("heartbeat_detail_mode", str(ctx.exception))
+        finally:
+            os.unlink(path)
 
     def test_rejects_non_positive_page_sizes(self):
         for option in ("port_page_size", "acl_page_size"):

@@ -156,14 +156,34 @@ fields through Neutron `report_state`:
 | `generation_lag` | `max(0, last_submitted_generation - applied_generation)`. |
 | `last_snapshot_ports`, `last_managed_ports` | Snapshot and managed-port counts. |
 | `domain_counts` | Count grouped by domain, status, and effective action. |
-| `degraded_reasons` | Count grouped by each non-ready reason emitted by current port/domain rows. |
+| `status_reason_counts` | Count grouped by every non-ready reason, including normal `not_requested` states such as `no_enabled_binding`. |
+| `degraded_reasons` | Count grouped only from `blocked`, `degraded`, or `error` port/domain rows. If the agent is degraded before any port row exists, preserve one agent-level fallback reason. |
 | `projection_index` | Bounded projected-port/network/revision debug counts. |
 | `last_event_decision_counts` | Count by the last event batch's action and reason. |
-| `last_event_decisions` | Bounded sample, not a durable audit log. |
 
-Managed-port, port-status, and event-decision samples are capped at three rows
-and carry explicit truncation flags. Hashes, interface internals, and full
-domain evidence are omitted from the compact heartbeat sample.
+Heartbeat schema V2 defaults to `heartbeat_detail_mode=summary_only`. It does
+not publish managed-port, port-status, or event-decision rows, so the Neutron
+`agent-show` payload remains bounded as the host grows from tens to thousands
+of ports. `heartbeat_schema_version=2` and `heartbeat_detail_mode` make this
+contract explicit.
+
+`legacy_sample` is a temporary rolling-upgrade mode. It restores the historical
+three-row samples and truncation flags, but hashes, interface internals, and
+full domain evidence remain omitted. Product deployments must converge back to
+`summary_only` after compatibility validation.
+
+The status surfaces have separate responsibilities:
+
+| Surface | Responsibility |
+| --- | --- |
+| `neutron agent-show` | Process/node health, convergence generations, port counts, domain/reason aggregates, and RPC decision counts. |
+| `neutron port-show <port-id>` | Product-level ACL summary for one Neutron port. |
+| `neutron aria-acl-port-status-show <port-id>` | Full runtime ACL status for one port from `aria_acl_port_statuses`. |
+| Agent logs and metrics | Per-event decisions, history, profiling, and failure evidence. |
+
+Heartbeat is therefore not a per-port database, event audit log, or debugging
+dump. Removing samples from `report_state` does not remove the complete local
+runtime rows or the dedicated ACL port-status publication path.
 
 `domain_counts` preserves an explicit `effective_action` when present. For
 legacy rows without one, the compatibility fallback is `ready -> enforce`,

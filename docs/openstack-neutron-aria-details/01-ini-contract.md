@@ -17,6 +17,7 @@ field written by `neutron-aria-agent` when it submits
 host = compute-01
 agent_type = Aria ACL agent
 report_interval = 30
+heartbeat_detail_mode = summary_only
 resync_interval = 300
 full_resync_enabled = false
 managed_domains = acl
@@ -46,6 +47,7 @@ source = disabled
 | --- | --- | --- |
 | `managed_domains` | `neutron-aria-agent` | Default `acl`; later may include `qos`, `mirror` only by explicit scope decision. |
 | `full_resync_enabled` | `[agent]` | Safe default `false`; production enablement requires gates. |
+| `heartbeat_detail_mode` | `[agent]` | Default `summary_only`; `legacy_sample` is a temporary rolling-upgrade compatibility mode. |
 | `port_source` | `[neutron]` | Safe default `disabled`; use `neutronclient` after auth and N0.5 gates. |
 | `socket_path` | `[aria]` | UDS path to local datapath. |
 | `integration_bridge` | `[ovs]` | Used for inventory/classification or delegated validation. |
@@ -102,6 +104,7 @@ function-by-function design until the config PR is opened.
 | `[agent]` | `host` | Local compute host identity reported to Neutron and datapath. |
 | `[agent]` | `agent_type` | Neutron agent type string. |
 | `[agent]` | `report_interval` | Heartbeat interval. |
+| `[agent]` | `heartbeat_detail_mode` | `summary_only` publishes only bounded node-level summaries. `legacy_sample` additionally publishes at most three managed-port, port-status, and event-decision rows. Unknown values are rejected. |
 | `[agent]` | `resync_interval` | Periodic resync cadence when enabled. Current Python code uses this key. |
 | `[agent]` | `full_resync_enabled` | Safe default `false`; production enablement requires gates. |
 | `[agent]` | `managed_domains` | Domain authority list, default `acl`. |

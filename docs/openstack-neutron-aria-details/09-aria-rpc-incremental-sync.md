@@ -369,8 +369,9 @@ Enablement sequence:
 Observation window:
 
 - Watch for repeated full-resync loops after a single event.
-- Watch `last_event_decision_counts`, `last_event_decisions`, generation lag,
-  degraded reasons, and managed-port counts.
+- Watch heartbeat `last_event_decision_counts`, generation lag, degraded
+  reasons, and managed-port counts. Inspect per-event decisions in agent logs;
+  summary-only heartbeat intentionally does not carry event rows.
 - Watch RabbitMQ consumer errors and oslo.messaging reconnect churn.
 - Do not promote the next host until the current host can be rolled back to
   `sync_mode=polling_full_resync` cleanly.
@@ -437,7 +438,7 @@ Required startup/status fields:
 | `incremental_rpc_enabled` | heartbeat configurations | Shows whether P3 port-scoped apply is enabled. |
 | `revisionless_incremental_mode` | heartbeat configurations | Shows whether old-Neutron revisionless P3 is disabled or explicitly experimental. |
 | `last_event_decision_counts` | runtime status | Summarizes event actions such as full-resync, ignore, local delete, or scoped apply. |
-| `last_event_decisions` | runtime status | Keeps bounded decision details for troubleshooting. |
+| `last_event_decisions` | runtime status and agent logs | Keeps bounded local decision details for troubleshooting; not copied into summary-only Neutron heartbeat. |
 | `projection_index` | runtime status | Shows projected local-port inventory used by event filtering. |
 
 Expected mode mapping:

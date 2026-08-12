@@ -6,7 +6,10 @@ from neutron_aria.agent.status import ARIA_AGENT_TYPE
 
 ARIA_AGENT_BINARY = "neutron-aria-agent"
 ARIA_AGENT_TOPIC = "N/A"
+HEARTBEAT_SCHEMA_VERSION = 2
 HEARTBEAT_SAMPLE_LIMIT = 3
+HEARTBEAT_DETAIL_SUMMARY_ONLY = "summary_only"
+HEARTBEAT_DETAIL_LEGACY_SAMPLE = "legacy_sample"
 ARIA_ACL_PORT_STATUS_FIELDS = set([
     "port_id",
     "host",
@@ -36,6 +39,7 @@ class NeutronStatusReporter(object):
         topic=ARIA_AGENT_TOPIC,
         use_call=False,
         configurations=None,
+        heartbeat_detail_mode=HEARTBEAT_DETAIL_SUMMARY_ONLY,
     ):
         self.report_state_api = report_state_api
         self.context = context
@@ -45,6 +49,7 @@ class NeutronStatusReporter(object):
         self.topic = topic
         self.use_call = use_call
         self.configurations = dict(configurations or {})
+        self.heartbeat_detail_mode = heartbeat_detail_mode
         self.start_flag = True
 
     def report(self, runtime_status):
@@ -63,19 +68,15 @@ class NeutronStatusReporter(object):
 
     def build_agent_state(self, runtime_status):
         payload = runtime_status.heartbeat_payload()
-        managed_port_sample = self._compact_managed_ports(
-            payload.get("last_managed_ports_detail") or [],
-        )
-        port_status_sample = self._compact_port_statuses(
-            payload.get("last_port_statuses") or [],
-        )
-        event_decision_sample = self._compact_event_decisions(
-            payload.get("last_event_decisions") or [],
-        )
         configurations = dict(self.configurations)
         feature_ready_generation_by_domain = dict(
             payload.get("last_feature_ready_generation_by_domain") or {}
         )
+        degraded_reasons = self._degraded_reason_counts(
+            payload.get("last_port_statuses") or [],
+        )
+        if payload.get("degraded") and not degraded_reasons:
+            degraded_reasons = list(payload.get("degraded_reasons") or [])
         configured_domains = configurations.get("managed_domains")
         if configured_domains is not None:
             configured_domains = set(configured_domains)
@@ -85,6 +86,8 @@ class NeutronStatusReporter(object):
                 if domain in configured_domains
             }
         configurations.update({
+            "heartbeat_schema_version": HEARTBEAT_SCHEMA_VERSION,
+            "heartbeat_detail_mode": self.heartbeat_detail_mode,
             "ready": payload.get("ready"),
             "degraded": payload.get("degraded"),
             "reason": payload.get("reason"),
@@ -102,6 +105,37 @@ class NeutronStatusReporter(object):
             "generation_lag": payload.get("generation_lag"),
             "last_snapshot_ports": payload.get("last_snapshot_ports"),
             "last_managed_ports": payload.get("last_managed_ports"),
+            "domain_counts": payload.get("domain_counts") or [],
+            "status_reason_counts": payload.get("degraded_reasons") or [],
+            "degraded_reasons": degraded_reasons,
+            "projection_index": payload.get("projection_index") or {},
+            "last_event_decision_counts": payload.get("last_event_decision_counts") or [],
+            "last_event_decision_updated_at": payload.get("last_event_decision_updated_at"),
+            "updated_at": payload.get("updated_at"),
+        })
+        if self.heartbeat_detail_mode == HEARTBEAT_DETAIL_LEGACY_SAMPLE:
+            self._add_legacy_samples(configurations, payload)
+
+        return {
+            "binary": self.binary,
+            "host": self.host,
+            "topic": self.topic,
+            "agent_type": self.agent_type,
+            "configurations": configurations,
+            "start_flag": self.start_flag,
+        }
+
+    def _add_legacy_samples(self, configurations, payload):
+        managed_port_sample = self._compact_managed_ports(
+            payload.get("last_managed_ports_detail") or [],
+        )
+        port_status_sample = self._compact_port_statuses(
+            payload.get("last_port_statuses") or [],
+        )
+        event_decision_sample = self._compact_event_decisions(
+            payload.get("last_event_decisions") or [],
+        )
+        configurations.update({
             "last_managed_ports_detail": managed_port_sample,
             "last_managed_ports_detail_truncated": (
                 len(payload.get("last_managed_ports_detail") or []) >
@@ -112,27 +146,28 @@ class NeutronStatusReporter(object):
                 len(payload.get("last_port_statuses") or []) >
                 len(port_status_sample)
             ),
-            "domain_counts": payload.get("domain_counts") or [],
-            "degraded_reasons": payload.get("degraded_reasons") or [],
-            "projection_index": payload.get("projection_index") or {},
-            "last_event_decision_counts": payload.get("last_event_decision_counts") or [],
             "last_event_decisions": event_decision_sample,
             "last_event_decisions_truncated": (
                 len(payload.get("last_event_decisions") or []) >
                 len(event_decision_sample)
             ),
-            "last_event_decision_updated_at": payload.get("last_event_decision_updated_at"),
-            "updated_at": payload.get("updated_at"),
         })
 
-        return {
-            "binary": self.binary,
-            "host": self.host,
-            "topic": self.topic,
-            "agent_type": self.agent_type,
-            "configurations": configurations,
-            "start_flag": self.start_flag,
-        }
+    def _degraded_reason_counts(self, statuses):
+        counts = {}
+        degraded_states = set(["blocked", "degraded", "error"])
+        for port_status in statuses or []:
+            domains = port_status.get("domains") or []
+            rows = domains or [port_status]
+            for row in rows:
+                status = row.get("status") or port_status.get("status")
+                reason = row.get("reason") or port_status.get("reason")
+                if status in degraded_states and reason:
+                    counts[reason] = counts.get(reason, 0) + 1
+        return [
+            {"reason": reason, "count": counts[reason]}
+            for reason in sorted(counts)
+        ]
 
     def _compact_managed_ports(self, ports):
         sample = []
@@ -329,6 +364,7 @@ def build_neutron_status_reporter(
         context=context,
         host=host,
         configurations=configurations,
+        heartbeat_detail_mode=config.heartbeat_detail_mode,
     )
     if getattr(config, "acl_source", None) != "neutron":
         return heartbeat_reporter
