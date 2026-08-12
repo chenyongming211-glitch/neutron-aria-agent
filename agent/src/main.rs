@@ -202,7 +202,7 @@ fn default_mode() -> AgentMode {
 }
 
 fn detach_runtime_on_shutdown(mode: AgentMode) -> bool {
-    todo!("classify shutdown ownership by agent mode")
+    mode == AgentMode::Standalone
 }
 
 fn default_ebpf_path() -> String {
@@ -1127,8 +1127,14 @@ async fn main() {
     // Final compact: ensure WAL is flushed to snapshot
     control_plane.compact_all().await;
 
-    // Graceful shutdown: detach all instances
-    registry.shutdown().await;
+    if detach_runtime_on_shutdown(config.mode) {
+        registry.shutdown().await;
+    } else {
+        info!(
+            mode = config.mode.as_str(),
+            "preserving Neutron-managed kernel runtime across agent shutdown"
+        );
+    }
 
     info!("aria-agent stopped");
 }
