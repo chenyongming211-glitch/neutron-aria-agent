@@ -152,6 +152,22 @@ fn tc_attachment_ready(
     tcx_live || legacy == LegacyTcAttachmentObservation::Owned
 }
 
+fn classify_preexisting_runtime_attachments(
+    xdp_link_pinned: bool,
+    tc_ingress_link_pinned: bool,
+    tc_egress_link_pinned: bool,
+    legacy_tc_ingress_live: bool,
+    legacy_tc_egress_live: bool,
+) -> (bool, bool, bool) {
+    let tc_ingress_live = tc_ingress_link_pinned || legacy_tc_ingress_live;
+    let tc_egress_live = tc_egress_link_pinned || legacy_tc_egress_live;
+    (
+        xdp_link_pinned || tc_ingress_live || tc_egress_live,
+        tc_ingress_live,
+        tc_egress_live,
+    )
+}
+
 fn collect_tc_program_ids(
     value: &serde_json::Value,
     prog_name: &str,
@@ -1638,13 +1654,29 @@ impl FirewallInstance {
         let created_shared_runtime = self.shared_runtime && !pin_path_preexisted;
         let xdp_link_pin = self.xdp_link_pin_path();
         let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
-        let preexisting_tc_ingress_link =
+        let tc_ingress_link_pinned =
             Path::new(&self.tc_link_pin_path("tc_ingress")).exists();
-        let preexisting_tc_egress_link =
+        let tc_egress_link_pinned =
             Path::new(&self.tc_link_pin_path("tc_egress")).exists();
-        let preexisting_live_links = preexisting_xdp_link
-            || preexisting_tc_ingress_link
-            || preexisting_tc_egress_link;
+        let legacy_tc_ingress_live = self.legacy_tc_attachment_is_live(
+            "tc_ingress",
+            aya::programs::tc::TcAttachType::Ingress,
+        );
+        let legacy_tc_egress_live = self.legacy_tc_attachment_is_live(
+            "tc_egress",
+            aya::programs::tc::TcAttachType::Egress,
+        );
+        let (
+            preexisting_live_links,
+            preexisting_tc_ingress_link,
+            preexisting_tc_egress_link,
+        ) = classify_preexisting_runtime_attachments(
+            preexisting_xdp_link,
+            tc_ingress_link_pinned,
+            tc_egress_link_pinned,
+            legacy_tc_ingress_live,
+            legacy_tc_egress_live,
+        );
         let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
         let mut persisted_live_runtime = self.persisted_live_ifaces_active()?;
         let pinned_live_runtime = if pin_path_preexisted {
