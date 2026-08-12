@@ -13363,6 +13363,72 @@ mod tests {
     }
 
     #[test]
+    fn restart_missing_committed_tap_is_deferred_for_full_resync() {
+        let mut results = vec![
+            crate::tap_registry::RuntimeReconcileResult {
+                ifname: "tap-missing".to_string(),
+                action: "claim_committed".to_string(),
+                status: "blocked".to_string(),
+                reason: Some("attach failed: interface not found".to_string()),
+            },
+            crate::tap_registry::RuntimeReconcileResult {
+                ifname: "tap-present".to_string(),
+                action: "claim_committed".to_string(),
+                status: "blocked".to_string(),
+                reason: Some("attach failed: verifier rejected program".to_string()),
+            },
+        ];
+        let missing_ifnames = BTreeSet::from(["tap-missing".to_string()]);
+
+        assert!(defer_missing_committed_interfaces(
+            &mut results,
+            &missing_ifnames,
+        ));
+        assert_eq!(results[0].status, "deferred");
+        assert_eq!(
+            results[0].reason.as_deref(),
+            Some("runtime_rebuild_required")
+        );
+        assert_eq!(results[1].status, "blocked");
+        assert_eq!(
+            results[1].reason.as_deref(),
+            Some("attach failed: verifier rejected program")
+        );
+    }
+
+    #[test]
+    fn restart_missing_tap_projects_degraded_full_resync_not_operator() {
+        let mut port = managed("vm-port", "tap-missing");
+        port.managed_domains = vec!["acl".to_string()];
+        let status = runtime_rebuild_port_status(&port, 42, Some("hash-42".to_string()));
+        let runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("hash-42".to_string()),
+            applied_desired_hash: Some("hash-42".to_string()),
+            authority_state: "runtime_reconcile_requires_full_resync".to_string(),
+            wal_status: "runtime_reconcile_requires_full_resync".to_string(),
+            ports: BTreeMap::from([(port.port_id.clone(), port)]),
+            port_statuses: BTreeMap::from([("vm-port".to_string(), status)]),
+            ..Default::default()
+        };
+
+        let projection = project_neutron_status_v1(&runtime);
+        assert_eq!(
+            projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+    }
+
+    #[test]
     fn affected_domains_include_attach_and_feature_domains() {
         let ports = vec![ManagedNeutronPort {
             port_id: "vm-port".to_string(),
