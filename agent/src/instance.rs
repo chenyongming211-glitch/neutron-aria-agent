@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
@@ -447,6 +448,8 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RuntimeMetadata {
     schema_version: u32,
+    #[serde(default)]
+    boot_id: Option<String>,
     ebpf_sha256: String,
     required_program_pins: Vec<String>,
     optional_program_pins: Vec<String>,
@@ -476,6 +479,18 @@ enum RuntimeInventoryStatus {
 
 fn default_persisted_live_iface_active() -> bool {
     true
+}
+
+fn runtime_metadata_is_from_prior_boot(
+    metadata_boot_id: Option<&str>,
+    current_boot_id: &str,
+    metadata_modified: Option<SystemTime>,
+    current_boot_time: SystemTime,
+) -> bool {
+    match metadata_boot_id {
+        Some(metadata_boot_id) => metadata_boot_id != current_boot_id,
+        None => metadata_modified.is_some_and(|modified| modified < current_boot_time),
+    }
 }
 
 impl FirewallInstance {
@@ -948,6 +963,7 @@ impl FirewallInstance {
     fn expected_runtime_metadata(&self, ebpf_path: &str) -> Result<RuntimeMetadata, String> {
         Ok(RuntimeMetadata {
             schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+            boot_id: Some(Self::current_boot_id()?),
             ebpf_sha256: self.compute_ebpf_sha256(ebpf_path)?,
             required_program_pins: Self::required_program_pins(),
             optional_program_pins: Self::optional_program_pins(),
@@ -962,6 +978,77 @@ impl FirewallInstance {
             .map_err(|e| format!("read runtime metadata {}: {}", path.display(), e))?;
         serde_json::from_str(&raw)
             .map_err(|e| format!("parse runtime metadata {}: {}", path.display(), e))
+    }
+
+    fn current_boot_id() -> Result<String, String> {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|value| value.trim().to_string())
+            .map_err(|e| format!("read current boot id: {}", e))
+            .and_then(|boot_id| {
+                if boot_id.is_empty() {
+                    Err("current boot id is empty".to_string())
+                } else {
+                    Ok(boot_id)
+                }
+            })
+    }
+
+    fn current_boot_time() -> Result<SystemTime, String> {
+        let raw = std::fs::read_to_string("/proc/stat")
+            .map_err(|e| format!("read /proc/stat for boot time: {}", e))?;
+        let boot_seconds = raw
+            .lines()
+            .find_map(|line| line.strip_prefix("btime "))
+            .ok_or_else(|| "boot time is missing from /proc/stat".to_string())?
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| format!("parse boot time from /proc/stat: {}", e))?;
+        Ok(UNIX_EPOCH + std::time::Duration::from_secs(boot_seconds))
+    }
+
+    fn persisted_runtime_is_from_prior_boot(
+        &self,
+        expected_metadata: &RuntimeMetadata,
+    ) -> Result<bool, String> {
+        let metadata_path = self.runtime_metadata_path();
+        if !metadata_path.exists() {
+            return Ok(false);
+        }
+        let persisted = self.load_runtime_metadata()?;
+        let modified = std::fs::metadata(&metadata_path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let current_boot_id = expected_metadata
+            .boot_id
+            .as_deref()
+            .ok_or_else(|| "expected runtime metadata is missing current boot id".to_string())?;
+        Ok(runtime_metadata_is_from_prior_boot(
+            persisted.boot_id.as_deref(),
+            current_boot_id,
+            modified,
+            Self::current_boot_time()?,
+        ))
+    }
+
+    fn clear_prior_boot_shared_runtime_state(&self) -> Result<Vec<String>, String> {
+        let path = self.persisted_live_ifaces_path();
+        let state = self.load_persisted_live_ifaces()?;
+        let stale_ifaces = state
+            .ifaces
+            .into_iter()
+            .map(|entry| entry.iface)
+            .collect::<Vec<_>>();
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| {
+                format!(
+                    "remove prior-boot persisted live ifaces {}: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+        }
+        self.clear_runtime_metadata();
+        Ok(stale_ifaces)
     }
 
     fn load_persisted_live_ifaces(&self) -> Result<PersistedLiveIfaces, String> {
@@ -1324,6 +1411,16 @@ impl FirewallInstance {
                 metadata.schema_version, expected.schema_version
             ));
         }
+        if let (Some(metadata_boot_id), Some(expected_boot_id)) =
+            (metadata.boot_id.as_deref(), expected.boot_id.as_deref())
+        {
+            if metadata_boot_id != expected_boot_id {
+                return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                    "runtime boot id {} != current boot id {}",
+                    metadata_boot_id, expected_boot_id
+                ));
+            }
+        }
         if metadata.ebpf_sha256 != expected.ebpf_sha256 {
             return RuntimeInventoryStatus::StaleOrIncomplete(format!(
                 "runtime eBPF hash {} != expected {}",
@@ -1555,6 +1652,20 @@ impl FirewallInstance {
         } else {
             false
         };
+        if !pin_path_preexisted
+            && !known_live_runtime
+            && !pinned_live_runtime
+            && persisted_live_runtime
+            && self.persisted_runtime_is_from_prior_boot(&expected_metadata)?
+        {
+            let cleared = self.clear_prior_boot_shared_runtime_state()?;
+            info!(
+                instance = %self.iface,
+                stale_ifaces = ?cleared,
+                "cleared prior-boot shared runtime reservations before rebuild"
+            );
+            persisted_live_runtime = false;
+        }
         if !pin_path_preexisted
             && !known_live_runtime
             && !pinned_live_runtime
@@ -2171,6 +2282,58 @@ impl FirewallInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_metadata_boot_identity_distinguishes_reboot_from_same_boot_restart() {
+        let boot_time = UNIX_EPOCH + std::time::Duration::from_secs(200);
+        let before_boot = UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let after_boot = UNIX_EPOCH + std::time::Duration::from_secs(300);
+
+        assert!(!runtime_metadata_is_from_prior_boot(
+            Some("boot-a"),
+            "boot-a",
+            Some(before_boot),
+            boot_time,
+        ));
+        assert!(runtime_metadata_is_from_prior_boot(
+            Some("boot-a"),
+            "boot-b",
+            Some(after_boot),
+            boot_time,
+        ));
+        assert!(runtime_metadata_is_from_prior_boot(
+            None,
+            "boot-b",
+            Some(before_boot),
+            boot_time,
+        ));
+        assert!(!runtime_metadata_is_from_prior_boot(
+            None,
+            "boot-b",
+            Some(after_boot),
+            boot_time,
+        ));
+        assert!(!runtime_metadata_is_from_prior_boot(
+            None, "boot-b", None, boot_time,
+        ));
+    }
+
+    #[test]
+    fn legacy_runtime_metadata_without_boot_id_remains_deserializable() {
+        let metadata: RuntimeMetadata = serde_json::from_str(
+            r#"{
+                "schema_version": 2,
+                "ebpf_sha256": "abc",
+                "required_program_pins": ["xdp_firewall"],
+                "optional_program_pins": ["tc_ingress", "tc_egress"],
+                "present_program_pins": [],
+                "critical_map_pins": []
+            }"#,
+        )
+        .expect("v2 runtime metadata must remain readable");
+
+        assert_eq!(metadata.boot_id, None);
+    }
 
     #[test]
     fn tc_attachment_readiness_accepts_tcx_or_exact_legacy_identity() {
