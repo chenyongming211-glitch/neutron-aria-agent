@@ -44,7 +44,11 @@ case "${1:-}" in
     neutron)
         [ "${env_file}" = "${EXPECTED_ADMIN_RC}" ] || exit 43
         printf '%s\n' "${env_file}" >"${ADMINRC_RECORD}"
-        printf 'aria-acl-policy-create\naria-acl-binding-create\n'
+        if [ "${2:-}" = "aria-acl-policy-show" ]; then
+            printf '%s\n' '--with-rules'
+        else
+            printf 'aria-acl-policy-create\naria-acl-binding-create\n'
+        fi
         ;;
     *) exit 44 ;;
 esac

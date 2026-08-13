@@ -101,6 +101,14 @@ PY
         echo "aria-acl binding CLI command is not visible in neutron help" >&2
         exit 1
     }
+    local policy_show_help
+    policy_show_help="$(docker exec -u 0 --env-file "${ADMIN_RC_FILE}" \
+        "${SERVICE_NAME}" neutron aria-acl-policy-show --help 2>&1)"
+    printf '%s\n' "${policy_show_help}" | grep -q -- '--with-rules' || {
+        printf '%s\n' "${policy_show_help}" >&2
+        echo "aria-acl-policy-show does not expose --with-rules" >&2
+        exit 1
+    }
     log "neutronclient aria-acl CLI smoke ok"
 }
 

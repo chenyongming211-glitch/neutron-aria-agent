@@ -169,6 +169,53 @@ class AriaAclPolicyShow(_AriaAclShow):
     id_path = "/aria-acl-policies/%s"
     resource_path = "/aria-acl-policies/%s"
 
+    def add_known_arguments(self, parser):
+        parser.add_argument(
+            "--with-rules",
+            action="store_true",
+            help=(
+                "Include rule IDs for this policy, ordered by direction, "
+                "priority, and rule ID."
+            ),
+        )
+
+    def execute(self, parsed_args):
+        neutron_client = self._client(parsed_args)
+        data = neutron_client.show_ext(self.id_path, parsed_args.id)
+        if getattr(parsed_args, "with_rules", False):
+            rule_data = neutron_client.list_ext(
+                "/aria-acl-rules",
+                policy_id=parsed_args.id,
+            )
+            rules = sorted(
+                rule_data.get("aria_acl_rules") or [],
+                key=self._rule_sort_key,
+            )
+            policy = data.get(self.resource) or {}
+            policy["rule_count"] = len(rules)
+            policy["rule_ids"] = self._format_rule_ids(rules)
+            data[self.resource] = policy
+        self.format_output_data(data)
+        return self._show_rows(data)
+
+    def _rule_sort_key(self, rule):
+        direction_order = {"ingress": 0, "egress": 1}
+        direction = rule.get("direction") or ""
+        try:
+            priority = int(rule.get("priority"))
+        except (TypeError, ValueError):
+            priority = 2147483647
+        return (
+            direction_order.get(direction, 2),
+            priority,
+            str(rule.get("id") or ""),
+        )
+
+    def _format_rule_ids(self, rules):
+        if not rules:
+            return "(none)"
+        return "\n".join(str(rule.get("id") or "") for rule in rules)
+
 
 class AriaAclPolicyCreate(_AriaAclCreate):
     """Create an Aria ACL policy."""

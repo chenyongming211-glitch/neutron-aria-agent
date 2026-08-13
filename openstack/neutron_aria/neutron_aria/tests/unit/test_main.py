@@ -139,11 +139,11 @@ class FakeAriaAclClient(object):
                 "stateful": True,
             }],
             "rules": [{
-                "id": "allow-ssh",
+                "id": "drop-ssh",
                 "policy_id": "policy-prod",
                 "direction": "ingress",
                 "priority": 100,
-                "action": "allow",
+                "action": "drop",
                 "ethertype": "IPv4",
                 "protocol": "tcp",
                 "dst_port_min": 22,
@@ -325,7 +325,7 @@ rpc_events_enabled = true
             self.assertEqual("policy-prod", port["acl"]["policy_id"])
             self.assertEqual("production-acl", port["acl"]["policy_name"])
             self.assertEqual("enforce", port["acl"]["effective_action"])
-            self.assertEqual("allow-ssh", port["acl"]["rules"][0]["id"])
+            self.assertEqual("drop-ssh", port["acl"]["rules"][0]["id"])
         finally:
             shutil.rmtree(state_dir)
 

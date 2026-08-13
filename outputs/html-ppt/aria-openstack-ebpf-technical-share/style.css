@@ -375,6 +375,10 @@ footer {
   grid-template-columns: 1.25fr 1.25fr 1fr 0.8fr;
 }
 
+.matrix.capacity-matrix {
+  grid-template-columns: 1.55fr 1fr 1fr 1fr 1fr;
+}
+
 .matrix .th,
 .matrix .td {
   min-height: 56px;
@@ -400,6 +404,16 @@ footer {
   border-right: 0;
 }
 
+.matrix.capacity-matrix .th,
+.matrix.capacity-matrix .td {
+  border-right: 1px solid var(--line);
+}
+
+.matrix.capacity-matrix .th:nth-child(5n),
+.matrix.capacity-matrix .td:nth-child(5n) {
+  border-right: 0;
+}
+
 .matrix.two .th:nth-child(2n),
 .matrix.two .td:nth-child(2n) {
   border-right: 0;
@@ -420,6 +434,11 @@ footer {
 
 .matrix .td.strong {
   color: var(--ink);
+  font-weight: 800;
+}
+
+.matrix .td.ok {
+  color: var(--green);
   font-weight: 800;
 }
 

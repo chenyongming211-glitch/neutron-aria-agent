@@ -6,6 +6,10 @@
 !/release/support-matrix.json
 /.downloads/
 /.artifacts/
+/.superpowers/
+/.tmp-*/
+/.tmp-*
+/tools/.tmp_*
 __pycache__/
 *.py[cod]
 

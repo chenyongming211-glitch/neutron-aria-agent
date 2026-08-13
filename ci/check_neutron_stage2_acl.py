@@ -149,10 +149,31 @@ def check_production_acl_smoke():
     datapath_image_builder = _read(os.path.join(
         "deploy", "kolla", "package", "build_aria_datapath_image.sh"
     ))
+    legacy_cli = _read(os.path.join(
+        "openstack", "neutronclient_aria", "neutronclient_aria", "v2_0",
+        "aria_acl.py",
+    ))
+    legacy_cli_installer = _read(os.path.join(
+        "deploy", "kolla", "package", "install_neutronclient_aria_cli.sh"
+    ))
     workflow = _read(os.path.join(".github", "workflows", "build.yml"))
     release_governance = _read(os.path.join(
         "docs", "stage2-acl-release-governance.md"
     ))
+    for term in (
+        '"--with-rules"',
+        'policy["rule_count"]',
+        'policy["rule_ids"]',
+        'policy_id=parsed_args.id',
+    ):
+        if term not in legacy_cli:
+            raise SystemExit("ERROR: legacy policy-with-rules CLI missing %s" % term)
+    for term in (
+        "aria-acl-policy-show --help",
+        "--with-rules",
+    ):
+        if term not in legacy_cli_installer:
+            raise SystemExit("ERROR: legacy CLI installer smoke missing %s" % term)
     for term in (
         "neutron ext-list",
         "ACL_SOURCE=neutron",

@@ -41,7 +41,11 @@ except ImportError:
             parser = argparse.ArgumentParser(prog=prog_name)
             parser.add_argument("--request-format", default="json")
             parser.add_argument("id")
+            self.add_known_arguments(parser)
             return parser
+
+        def add_known_arguments(self, parser):
+            return None
 
     extension.ClientExtensionList = StubListCommand
     extension.ClientExtensionShow = StubShowCommand
@@ -75,6 +79,126 @@ class FakeApp(object):
 
 
 class AriaAclCliTest(unittest.TestCase):
+    def _show_result(self, result):
+        columns, values = result
+        return dict(zip(columns, values))
+
+    def test_policy_show_default_does_not_fetch_rules(self):
+        class FakeClient(object):
+            def __init__(self):
+                self.show_calls = []
+                self.list_calls = []
+
+            def show_ext(self, path, resource_id):
+                self.show_calls.append((path, resource_id))
+                return {"aria_acl_policy": {"id": resource_id, "name": "web"}}
+
+            def list_ext(self, path, **kwargs):
+                self.list_calls.append((path, kwargs))
+                return {"aria_acl_rules": []}
+
+        client = FakeClient()
+        command = aria_acl.AriaAclPolicyShow(FakeApp(client), None)
+        parsed_args = command.get_parser("aria-acl-policy-show").parse_args([
+            "policy-1",
+        ])
+
+        rows = self._show_result(command.execute(parsed_args))
+
+        self.assertEqual(
+            [("/aria-acl-policies/%s", "policy-1")],
+            client.show_calls,
+        )
+        self.assertEqual([], client.list_calls)
+        self.assertNotIn("rule_count", rows)
+        self.assertNotIn("rule_ids", rows)
+        self.assertNotIn("rules", rows)
+
+    def test_policy_show_with_rules_fetches_and_formats_sorted_rule_ids(self):
+        class FakeClient(object):
+            def __init__(self):
+                self.list_calls = []
+
+            def show_ext(self, path, resource_id):
+                return {
+                    "aria_acl_policy": {
+                        "id": resource_id,
+                        "name": "web",
+                    },
+                }
+
+            def list_ext(self, path, **kwargs):
+                self.list_calls.append((path, kwargs))
+                return {
+                    "aria_acl_rules": [{
+                        "id": "rule-egress",
+                        "direction": "egress",
+                        "priority": 10,
+                        "action": "allow",
+                        "protocol": "tcp",
+                        "dst_port_min": 443,
+                        "dst_port_max": 443,
+                        "enabled": True,
+                        "revision_number": 2,
+                    }, {
+                        "id": "rule-ingress-200",
+                        "direction": "ingress",
+                        "priority": 200,
+                        "action": "drop",
+                        "protocol": "icmp",
+                        "enabled": False,
+                        "revision_number": 3,
+                    }, {
+                        "id": "rule-ingress-100",
+                        "direction": "ingress",
+                        "priority": 100,
+                        "action": "allow",
+                        "src_cidr": "10.0.0.0/24",
+                        "enabled": True,
+                        "revision_number": 1,
+                    }],
+                }
+
+        client = FakeClient()
+        command = aria_acl.AriaAclPolicyShow(FakeApp(client), None)
+        parsed_args = command.get_parser("aria-acl-policy-show").parse_args([
+            "--with-rules",
+            "policy-1",
+        ])
+
+        rows = self._show_result(command.execute(parsed_args))
+
+        self.assertEqual(
+            [("/aria-acl-rules", {"policy_id": "policy-1"})],
+            client.list_calls,
+        )
+        self.assertEqual(3, rows["rule_count"])
+        self.assertEqual(
+            "rule-ingress-100\nrule-ingress-200\nrule-egress",
+            rows["rule_ids"],
+        )
+        self.assertNotIn("rules", rows)
+
+    def test_policy_show_with_rules_formats_empty_policy(self):
+        class FakeClient(object):
+            def show_ext(self, path, resource_id):
+                return {"aria_acl_policy": {"id": resource_id}}
+
+            def list_ext(self, path, **kwargs):
+                return {"aria_acl_rules": []}
+
+        command = aria_acl.AriaAclPolicyShow(FakeApp(FakeClient()), None)
+        parsed_args = command.get_parser("aria-acl-policy-show").parse_args([
+            "--with-rules",
+            "policy-empty",
+        ])
+
+        rows = self._show_result(command.execute(parsed_args))
+
+        self.assertEqual(0, rows["rule_count"])
+        self.assertEqual("(none)", rows["rule_ids"])
+        self.assertNotIn("rules", rows)
+
     def test_list_parser_forwards_native_page_and_sort_options(self):
         class FakeClient(object):
             def __init__(self):

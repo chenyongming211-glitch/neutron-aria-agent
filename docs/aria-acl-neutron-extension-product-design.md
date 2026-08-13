@@ -572,6 +572,7 @@ policy 命令：
 ```bash
 neutron aria-acl-policy-list
 neutron aria-acl-policy-show <policy-id-or-name>
+neutron aria-acl-policy-show --with-rules <policy-id>
 neutron aria-acl-policy-create \
   --name web-db-acl \
   --description "web to db acl" \

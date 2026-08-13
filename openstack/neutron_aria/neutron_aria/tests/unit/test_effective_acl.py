@@ -839,6 +839,69 @@ class EffectiveAclTestCase(unittest.TestCase):
         self.assertIn("destination ports require tcp or udp", result["reason"])
         self.assertEqual("bypass", result["effective_action"])
 
+    def test_default_deny_degrades_before_datapath_submit(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "deny"}],
+            bindings=[
+                {"id": "b1", "policy_id": "policy-1", "target_type": "port", "target_id": PORT_ID},
+            ],
+        )
+
+        result = index.effective_for_port(port(), snapshot())
+
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertFalse(result["enabled"])
+        self.assertIn(
+            "unsupported_policy:default_action must be allow",
+            result["reason"],
+        )
+        self.assertEqual("bypass", result["effective_action"])
+
+    def test_unsupported_rule_fields_degrade_before_datapath_submit(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "allow"}],
+            rules=[
+                {
+                    "id": "src-port",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 100,
+                    "action": "drop",
+                    "protocol": "tcp",
+                    "src_port_min": 1024,
+                },
+                {
+                    "id": "ipv6-cidr",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 101,
+                    "action": "drop",
+                    "protocol": "tcp",
+                    "src_cidr": "2001:db8::/64",
+                },
+                {
+                    "id": "bad-protocol",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 102,
+                    "action": "drop",
+                    "protocol": "gre",
+                },
+            ],
+            bindings=[
+                {"id": "b1", "policy_id": "policy-1", "target_type": "port", "target_id": PORT_ID},
+            ],
+        )
+
+        result = index.effective_for_port(port(), snapshot())
+
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertFalse(result["enabled"])
+        self.assertIn("unsupported_rule:src-port", result["reason"])
+        self.assertIn("invalid_acl_ipv4_cidr:src:ipv6-cidr", result["reason"])
+        self.assertIn("unsupported_rule:bad-protocol", result["reason"])
+        self.assertEqual("bypass", result["effective_action"])
+
     def test_ineligible_port_is_unsupported(self):
         index = EffectiveAclIndex(
             policies=[{"id": "policy-1"}],
