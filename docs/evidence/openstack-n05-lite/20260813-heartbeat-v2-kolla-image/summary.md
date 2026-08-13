@@ -66,4 +66,13 @@ The test is currently `running`, not yet recorded as passed. It includes:
 - three-node ICMP drop with TCP/8080 and UDP/1080 allow traffic;
 - final ACL cleanup and connectivity rollback.
 
-The first runtime and ACL traffic samples passed on all three nodes.
+The ACL traffic test adds temporary managed bindings. The first runtime
+monitors were started before those bindings had fully converged, so the node 3
+monitor correctly rejected a managed-port count change. This was a test
+orchestration baseline error, not a readiness or datapath failure.
+
+The read-only runtime monitors were restarted after convergence with observed
+baselines of 23, 5, and 14 managed ports on compute nodes 2, 3, and 4. Their
+first two samples passed with `overall_readiness=ready`, no pending generation,
+and accepted generation equal to applied generation. The first four ACL
+traffic samples passed on all three nodes.
