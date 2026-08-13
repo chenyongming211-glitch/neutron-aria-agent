@@ -959,14 +959,20 @@ impl NeutronApiState {
             match domain.as_str() {
                 "acl" if errors.is_empty() => {
                     match purge_neutron_acl_transactionally(self, &port.ifname, &port.port_id).await {
-                        Ok(_) => statuses.push(domain_status(
+                        Ok(_) => statuses.push(domain_status_with_action(
                             domain,
                             "recovered",
                             Some("acl_scrubbed_after_incomplete_wal_intent".to_string()),
+                            Some("bypass".to_string()),
                         )),
                         Err(e) => {
-                            let reason = format!("acl_recovery_failed:{}", e);
-                            statuses.push(domain_status(domain, "blocked", Some(reason.clone())));
+                            let reason = format!("acl_recovery_failed:{}", e.details);
+                            statuses.push(domain_status_with_action(
+                                domain,
+                                "blocked",
+                                Some(reason.clone()),
+                                Some(e.effective_action.to_string()),
+                            ));
                             errors.push(reason);
                         }
                     }
@@ -2946,8 +2952,8 @@ async fn apply_snapshot_runtime_transaction(
         let ifname = port.ifname.clone();
         let purge_started = Instant::now();
         if let Err(e) = purge_neutron_acl_transactionally(state, &port.ifname, &port.port_id).await {
-            let reason = format!("neutron_acl_purge_failed:{}", e);
-            warn!(port_id = %port.port_id, ifname = %port.ifname, error = %e,
+            let reason = format!("neutron_acl_purge_failed:{}", e.details);
+            warn!(port_id = %port.port_id, ifname = %port.ifname, error = %e.details,
                 "keeping attached Neutron interface quiesced after ACL purge failure");
             next_statuses.insert(
                 port.port_id.clone(),
@@ -3447,7 +3453,7 @@ async fn apply_snapshot_runtime_transaction(
                         warn!(
                             port_id = %port.port_id,
                             ifname = %port.ifname,
-                            error = %purge_err,
+                            error = %purge_err.details,
                             "keeping attached Neutron interface quiesced after ACL purge failure"
                         );
                         true
@@ -4301,8 +4307,11 @@ fn build_committed_delete_runtime(
 
 fn build_blocked_delete_runtime(
     previous: &NeutronRuntimeState,
+    port: &ManagedNeutronPort,
     generation: u64,
     wal_status: &str,
+    reason: &str,
+    acl_effective_action: &'static str,
 ) -> NeutronRuntimeState {
     let mut blocked = previous.clone();
     blocked.pending_generation = Some(generation);
@@ -4310,7 +4319,91 @@ fn build_blocked_delete_runtime(
     blocked.authority_state = "blocked_recovery_required".to_string();
     blocked.wal_status = wal_status.to_string();
     blocked.recovery_cause = None;
+    blocked.ports.insert(port.port_id.clone(), port.clone());
+
+    let domains = runtime_domain_statuses_for(
+        &port.managed_domains,
+        "blocked",
+        Some(reason.to_string()),
+    )
+    .into_iter()
+    .map(|domain| {
+        if domain.domain == "acl" {
+            domain_status_with_action(
+                "acl",
+                "blocked",
+                Some(reason.to_string()),
+                Some(acl_effective_action.to_string()),
+            )
+        } else {
+            domain
+        }
+    })
+    .collect();
+    blocked.port_statuses.insert(
+        port.port_id.clone(),
+        port_runtime_status(
+            &port.port_id,
+            &port.ifname,
+            generation,
+            None,
+            port.managed_domains.clone(),
+            "blocked",
+            Some(reason.to_string()),
+            domains,
+        ),
+    );
     blocked
+}
+
+async fn publish_blocked_delete_failure(
+    state: &NeutronApiState,
+    previous: &NeutronRuntimeState,
+    port: &ManagedNeutronPort,
+    generation: u64,
+    wal_status: &str,
+    reason: String,
+    acl_effective_action: &'static str,
+) -> String {
+    let mut blocked = build_blocked_delete_runtime(
+        previous,
+        port,
+        generation,
+        wal_status,
+        &reason,
+        acl_effective_action,
+    );
+    let response_error = match state.wal.append_snapshot_commit(blocked.to_wal_state()) {
+        Ok(()) => reason,
+        Err(error) => {
+            blocked.wal_status = "delete_blocked_checkpoint_failed".to_string();
+            format!(
+                "{}; delete_blocked_checkpoint_failed:{}",
+                reason, error
+            )
+        }
+    };
+    {
+        let mut runtime = state.runtime.write().await;
+        *runtime = blocked;
+    }
+    response_error
+}
+
+fn failed_neutron_delete(
+    port: &ManagedNeutronPort,
+    error: String,
+) -> (StatusCode, NeutronDeleteResponse) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        NeutronDeleteResponse {
+            port_id: port.port_id.clone(),
+            ifname: Some(port.ifname.clone()),
+            detached: false,
+            status: "error".to_string(),
+            error: Some(error),
+        },
+    )
 }
 
 async fn finalize_detached_neutron_delete(
@@ -4321,42 +4414,32 @@ async fn finalize_detached_neutron_delete(
     precommit: Result<(), String>,
 ) -> (StatusCode, NeutronDeleteResponse) {
     if let Err(error) = precommit {
-        let blocked =
-            build_blocked_delete_runtime(previous, generation, "delete_after_detach_failed");
-        {
-            let mut runtime = state.runtime.write().await;
-            *runtime = blocked;
-        }
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            NeutronDeleteResponse {
-                port_id: port.port_id.clone(),
-                ifname: Some(port.ifname.clone()),
-                detached: false,
-                status: "error".to_string(),
-                error: Some(error),
-            },
-        );
+        let error = publish_blocked_delete_failure(
+            state,
+            previous,
+            port,
+            generation,
+            "delete_after_detach_failed",
+            error,
+            "bypass",
+        )
+        .await;
+        return failed_neutron_delete(port, error);
     }
 
     let committed = build_committed_delete_runtime(previous, &port.port_id);
     if let Err(error) = state.wal.append_delete_commit(committed.to_wal_state()) {
-        let blocked =
-            build_blocked_delete_runtime(previous, generation, "delete_commit_failed");
-        {
-            let mut runtime = state.runtime.write().await;
-            *runtime = blocked;
-        }
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            NeutronDeleteResponse {
-                port_id: port.port_id.clone(),
-                ifname: Some(port.ifname.clone()),
-                detached: false,
-                status: "error".to_string(),
-                error: Some(format!("wal_commit_failed:{}", error)),
-            },
-        );
+        let error = publish_blocked_delete_failure(
+            state,
+            previous,
+            port,
+            generation,
+            "delete_commit_failed",
+            format!("wal_commit_failed:{}", error),
+            "bypass",
+        )
+        .await;
+        return failed_neutron_delete(port, error);
     }
 
     {
@@ -4383,19 +4466,60 @@ fn finalize_recovered_delete_intent(
     recovery_failed: bool,
 ) -> NeutronRuntimeState {
     let recovered_statuses = recovered.port_statuses;
-    let blocked = |wal_status: &str| {
-        let mut blocked =
-            build_blocked_delete_runtime(previous, intent.generation, wal_status);
-        for port_id in &intent.port_ids {
-            if let Some(status) = recovered_statuses.get(port_id) {
-                blocked.port_statuses.insert(port_id.clone(), status.clone());
-            }
+    let blocked = |wal_status: &str, default_acl_action: &'static str| {
+        let port = intent.port_ids.iter().find_map(|port_id| {
+            previous
+                .ports
+                .get(port_id)
+                .or_else(|| {
+                    intent
+                        .affected_ports
+                        .iter()
+                        .find(|port| &port.port_id == port_id)
+                })
+        });
+        let Some(port) = port else {
+            let mut blocked = previous.clone();
+            blocked.pending_generation = Some(intent.generation);
+            blocked.desired_hash = None;
+            blocked.authority_state = "blocked_recovery_required".to_string();
+            blocked.wal_status = wal_status.to_string();
+            blocked.recovery_cause = None;
+            return blocked;
+        };
+        let recovered_status = recovered_statuses.get(&port.port_id);
+        let reason = recovered_status
+            .and_then(|status| status.reason.as_deref())
+            .unwrap_or(wal_status);
+        let recovered_acl_action = recovered_status
+            .and_then(|status| {
+                status
+                    .domains
+                    .iter()
+                    .find(|domain| domain.domain == "acl")
+            })
+            .and_then(|domain| domain.effective_action.as_deref());
+        let acl_effective_action = match recovered_acl_action {
+            Some("unchanged") => "unchanged",
+            Some("bypass") => "bypass",
+            _ => default_acl_action,
+        };
+        let mut blocked = build_blocked_delete_runtime(
+            previous,
+            port,
+            intent.generation,
+            wal_status,
+            reason,
+            acl_effective_action,
+        );
+        if let Some(status) = blocked.port_statuses.get_mut(&port.port_id) {
+            status.reason = Some(reason.to_string());
         }
         blocked
     };
 
     if recovery_failed {
-        return blocked("intent_recovery_blocked");
+        return blocked("intent_recovery_blocked", "unchanged");
     }
 
     let mut committed = previous.clone();
@@ -4415,7 +4539,7 @@ fn finalize_recovered_delete_intent(
             error = %error,
             "failed to commit recovered Neutron delete intent"
         );
-        return blocked("delete_recovery_commit_failed");
+        return blocked("delete_recovery_commit_failed", "bypass");
     }
     committed
 }
@@ -4463,38 +4587,42 @@ async fn apply_delete_neutron_port(
         );
     }
     if let Err(e) = fault_injection::check("neutron.delete.after_intent").await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            NeutronDeleteResponse {
-                port_id: port.port_id,
-                ifname: Some(port.ifname),
-                detached: false,
-                status: "error".to_string(),
-                error: Some(e),
-            },
-        );
+        let error = publish_blocked_delete_failure(
+            &state,
+            &previous,
+            &port,
+            generation,
+            "delete_after_intent_failed",
+            e,
+            "unchanged",
+        )
+        .await;
+        return failed_neutron_delete(&port, error);
     }
 
     if detached_port_cleanup_requires_acl_purge(read_ifindex(&port.ifname).is_some()) {
-        if let Err(e) =
+        if let Err(error) =
             purge_neutron_acl_transactionally(&state, &port.ifname, &port.port_id).await
         {
+            let effective_action = error.effective_action;
+            let details = error.details;
             warn!(
                 port_id = %port.port_id,
                 ifname = %port.ifname,
-                error = %e,
+                error = %details,
                 "keeping attached Neutron interface quiesced after ACL purge failure"
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                NeutronDeleteResponse {
-                    port_id: port.port_id,
-                    ifname: Some(port.ifname),
-                    detached: false,
-                    status: "error".to_string(),
-                    error: Some(format!("neutron_acl_purge_failed:{}", e)),
-                },
-            );
+            let error = publish_blocked_delete_failure(
+                &state,
+                &previous,
+                &port,
+                generation,
+                "delete_acl_purge_failed",
+                format!("neutron_acl_purge_failed:{}", details),
+                effective_action,
+            )
+            .await;
+            return failed_neutron_delete(&port, error);
         }
     } else {
         info!(
@@ -4504,16 +4632,17 @@ async fn apply_delete_neutron_port(
         );
     }
     if let Err(e) = fault_injection::check("neutron.delete.after_acl_purge").await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            NeutronDeleteResponse {
-                port_id: port.port_id,
-                ifname: Some(port.ifname),
-                detached: false,
-                status: "error".to_string(),
-                error: Some(e),
-            },
-        );
+        let error = publish_blocked_delete_failure(
+            &state,
+            &previous,
+            &port,
+            generation,
+            "delete_after_acl_purge_failed",
+            e,
+            "bypass",
+        )
+        .await;
+        return failed_neutron_delete(&port, error);
     }
 
     match state.registry.detach(&port.ifname).await {
@@ -4527,16 +4656,19 @@ async fn apply_delete_neutron_port(
             )
             .await
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            NeutronDeleteResponse {
-                port_id: port.port_id,
-                ifname: Some(port.ifname),
-                detached: false,
-                status: "error".to_string(),
-                error: Some(e),
-            },
-        ),
+        Err(e) => {
+            let error = publish_blocked_delete_failure(
+                &state,
+                &previous,
+                &port,
+                generation,
+                "delete_detach_failed",
+                e,
+                "bypass",
+            )
+            .await;
+            failed_neutron_delete(&port, error)
+        }
     }
 }
 
@@ -5864,12 +5996,17 @@ async fn purge_neutron_acl_transactionally(
     state: &NeutronApiState,
     ifname: &str,
     port_id: &str,
-) -> Result<OwnedAclReconcileReport, String> {
+) -> Result<OwnedAclReconcileReport, NeutronAclReconcileError> {
     state
         .registry
         .update_neutron_acl_runtime_gate(ifname, false, false, false)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            acl_reconcile_error(
+                AclReconcileFailurePhase::BeforeQuiesce,
+                error.to_string(),
+            )
+        })?;
     state
         .control_plane
         .replace_owned_acl_and_flush(
@@ -5881,7 +6018,12 @@ async fn purge_neutron_acl_transactionally(
             false,
         )
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error.to_string(),
+            )
+        })
 }
 
 async fn check_managed_acl_precommit_fault() -> Result<(), String> {
@@ -12225,7 +12367,10 @@ mod tests {
             );
             assert_eq!(runtime.desired_hash, None);
             assert_eq!(runtime.authority_state, "blocked_recovery_required");
-            assert_eq!(runtime.wal_status, "delete_commit_failed");
+            assert_eq!(
+                runtime.wal_status,
+                "delete_blocked_checkpoint_failed"
+            );
         }
         let replay = state.wal.replay();
         assert_eq!(

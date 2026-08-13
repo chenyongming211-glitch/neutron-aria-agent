@@ -203,6 +203,44 @@ fn protected_inventory_snapshot_commit_valid(
         && state.port_statuses == baseline.port_statuses)
 }
 
+fn blocked_delete_snapshot_commit_valid(
+    state: &NeutronWalState,
+    intent: &PendingNeutronIntent,
+    baseline: &NeutronWalState,
+) -> Result<bool, String> {
+    Ok(intent.kind == "delete"
+        && state.status_hash.is_some()
+        && state.status_hash_valid()?
+        && state.pending_generation == Some(intent.generation)
+        && state.desired_hash.is_none()
+        && state.authority_state == "blocked_recovery_required"
+        && state.accepted_generation == baseline.accepted_generation
+        && state.applied_generation == baseline.applied_generation
+        && state.applied_desired_hash == baseline.applied_desired_hash
+        && intent.port_ids.iter().all(|port_id| {
+            state.ports.contains_key(port_id) && state.port_statuses.contains_key(port_id)
+        }))
+}
+
+fn matching_delete_commit_valid(
+    state: &NeutronWalState,
+    intent: &PendingNeutronIntent,
+    baseline: &NeutronWalState,
+) -> Result<bool, String> {
+    Ok(intent.kind == "delete"
+        && state.status_hash.is_some()
+        && state.status_hash_valid()?
+        && state.accepted_generation == intent.generation
+        && state.accepted_generation == baseline.accepted_generation
+        && state.applied_generation == baseline.applied_generation
+        && state.applied_desired_hash == baseline.applied_desired_hash
+        && state.pending_generation.is_none()
+        && state.desired_hash == state.applied_desired_hash
+        && intent.port_ids.iter().all(|port_id| {
+            !state.ports.contains_key(port_id) && !state.port_statuses.contains_key(port_id)
+        }))
+}
+
 fn empty_neutron_wal_state() -> NeutronWalState {
     NeutronWalState {
         authority_state: "idle".to_string(),
@@ -425,19 +463,62 @@ impl NeutronWal {
                     scan.failures += 1;
                 }
                 NeutronWalEntry::SnapshotCommit { state }
+                    if scan
+                        .pending_intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.kind == "delete") =>
+                {
+                    let intent = scan
+                        .pending_intent
+                        .as_ref()
+                        .expect("delete intent guard requires a pending intent");
+                    let baseline = scan
+                        .last_committed_state
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(empty_neutron_wal_state);
+                    match blocked_delete_snapshot_commit_valid(&state, intent, &baseline) {
+                        Ok(true) => {
+                            scan.last_committed_state = Some(state);
+                        }
+                        Ok(false) | Err(_) => {
+                            scan.failures += 1;
+                        }
+                    }
+                }
+                NeutronWalEntry::DeleteCommit { state }
+                    if scan
+                        .pending_intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.kind == "delete") =>
+                {
+                    let intent = scan
+                        .pending_intent
+                        .as_ref()
+                        .expect("delete intent guard requires a pending intent");
+                    let baseline = scan
+                        .last_committed_state
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(empty_neutron_wal_state);
+                    match matching_delete_commit_valid(&state, intent, &baseline) {
+                        Ok(true) => {
+                            scan.last_committed_state = Some(state);
+                            scan.pending_intent = None;
+                        }
+                        Ok(false) | Err(_) => {
+                            scan.failures += 1;
+                        }
+                    }
+                }
+                NeutronWalEntry::DeleteCommit { .. } if scan.pending_intent.is_some() => {
+                    scan.failures += 1;
+                }
+                NeutronWalEntry::SnapshotCommit { state }
                 | NeutronWalEntry::DeleteCommit { state } => {
-                    match state.status_hash_valid() {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            scan.failures += 1;
-                            scan.pending_intent = None;
-                            continue;
-                        }
-                        Err(_) => {
-                            scan.failures += 1;
-                            scan.pending_intent = None;
-                            continue;
-                        }
+                    if !matches!(state.status_hash_valid(), Ok(true)) {
+                        scan.failures += 1;
+                        continue;
                     }
                     scan.last_committed_state = Some(state);
                     scan.pending_intent = None;
