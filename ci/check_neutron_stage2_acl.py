@@ -2,8 +2,6 @@
 from __future__ import print_function
 
 import os
-import subprocess
-import sys
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -403,14 +401,6 @@ def check_active_matrix_contract():
         for term in terms:
             if term not in source:
                 raise SystemExit("ERROR: active ACL matrix %s missing %s" % (path, term))
-
-    for command in (
-        [sys.executable, os.path.join(ROOT, "ci", "test_neutron_aria_acl_nonce_echo.py"), "-v"],
-        ["bash", "ci/test_neutron_aria_acl_active_matrix_case.sh"],
-        ["bash", "ci/test_neutron_aria_acl_active_matrix_soak.sh"],
-    ):
-        subprocess.check_call(command, cwd=ROOT)
-
 
 def main():
     # Executable behavior is owned by the required full Python discovery in

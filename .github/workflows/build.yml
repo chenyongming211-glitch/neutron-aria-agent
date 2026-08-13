@@ -91,6 +91,9 @@ jobs:
           python3 -m unittest ci.test_legacy_kernel_canary_contract
           python3 ci/check_rust_warning_hygiene.py
           bash ci/check_release_reproducibility.sh
+          python3 ci/test_neutron_aria_acl_nonce_echo.py -v
+          bash ci/test_neutron_aria_acl_active_matrix_case.sh
+          bash ci/test_neutron_aria_acl_active_matrix_soak.sh
 
       - name: Check public Neutron contracts
         run: python3 ci/check_neutron_stage1.py --fast-contracts
