@@ -187,26 +187,39 @@ cleanup_all() {
     checkpoint cleanup "" "" done
 }
 
+owned_vm_ids() {
+    { [ ! -f "${WORK_DIR}/vms.tsv" ] || awk -F '\t' 'NF >= 2 {print $2}' "${WORK_DIR}/vms.tsv"
+      [ ! -f "${WORK_DIR}/owned.tsv" ] || awk -F '\t' '$1 == "vm" {print $2}' "${WORK_DIR}/owned.tsv"
+    } | awk 'NF' | sort -u
+}
+
+nova_server_is_cleaned() {
+    local server_id="$1" output status
+    output="$(nova_cli show "${server_id}" 2>/dev/null)" || return 0
+    status="$(printf '%s\n' "${output}" | table_field status)"
+    [ "${status}" = SOFT_DELETED ] || [ "${status}" = DELETED ]
+}
+
 finalize_run() {
     local rc="$?"
     trap - EXIT INT TERM
     cleanup_all
     local remaining=0
-    if [ -f "${WORK_DIR}/vms.tsv" ]; then
+    if [ -f "${WORK_DIR}/vms.tsv" ] || [ -f "${WORK_DIR}/owned.tsv" ]; then
         local attempt server_id all_gone
         for attempt in $(seq 1 30); do
             all_gone=true
-            while IFS=$'\t' read -r _alias server_id _rest; do
-                if nova_cli show "${server_id}" >/dev/null 2>&1; then
+            while read -r server_id; do
+                if ! nova_server_is_cleaned "${server_id}"; then
                     all_gone=false
                 fi
-            done <"${WORK_DIR}/vms.tsv"
+            done < <(owned_vm_ids)
             [ "${all_gone}" = true ] && break
             sleep 2
         done
-        while IFS=$'\t' read -r _alias server_id _rest; do
-            nova_cli show "${server_id}" >/dev/null 2>&1 && remaining=$((remaining + 1))
-        done <"${WORK_DIR}/vms.tsv"
+        while read -r server_id; do
+            nova_server_is_cleaned "${server_id}" || remaining=$((remaining + 1))
+        done < <(owned_vm_ids)
     fi
     [ "${remaining}" -eq 0 ] || rc=1
     printf '%s\n' "${rc}" >"${WORK_DIR}/exit-code"
