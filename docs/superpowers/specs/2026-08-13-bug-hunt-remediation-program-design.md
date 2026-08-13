@@ -212,5 +212,9 @@ are complete; its target-kernel evidence remains pending under its independent
 phase-aware failure publication, and implementation `477761e` plus legacy WAL
 compatibility follow-up `d8ae123` passed exact-head Build
 [31698764813](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31698764813).
-The active next batch is `REVIEW-TXN-032` atomic standalone state persistence;
+`REVIEW-TXN-032` atomic standalone state persistence is complete: RED
+`9309fe9` exposed the torn-write boundary and GREEN `37740d4` passed exact-head
+Build
+[31717345713](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31717345713).
+The active next batch is `REVIEW-OPS-038/040` startup configuration safety;
 later batches remain in the fixed order above.

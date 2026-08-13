@@ -1,6 +1,6 @@
 # REVIEW-TXN-032 Atomic State File Design
 
-**Status:** approved repair direction; implementation pending RED evidence
+**Status:** source implementation and exact-head hosted CI complete
 
 **Date:** 2026-08-13
 
@@ -124,6 +124,16 @@ RED Rust behaviors cover:
 
 Hosted GREEN requires the exact-head `rust-behavior`, warning-denied
 `rust-build`, eBPF build, and fast contracts. No local Cargo command is used.
+
+RED commit `9309fe9` added the four `atomic_state_file_` behavior tests and
+failed in Build
+[31716994234](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31716994234)
+because the old implementation had neither the atomic writer nor its failure
+phases. GREEN commit `37740d4` added the shared primitive and passed the same
+behaviors plus warning-denied eBPF, userspace and agent builds in exact-head
+Build
+[31717345713](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31717345713).
+The state and WAL schemas are unchanged.
 
 ## 7. Scope
 

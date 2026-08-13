@@ -62,15 +62,15 @@ where
     F: FnMut(AtomicStateWritePhase) -> Result<(), String>;
 ```
 
-- [ ] Add a test seeding a non-empty old `state.json`, inject failure at
+- [x] Add a test seeding a non-empty old `state.json`, inject failure at
   `AfterFileSync`, and assert the target bytes are unchanged and still decode.
-- [ ] Add a compacted-empty-WAL test which repeats that failure and asserts
+- [x] Add a compacted-empty-WAL test which repeats that failure and asserts
   `load_with_wal` returns the old group/rule state rather than default state.
-- [ ] Add success and `AfterRename` tests proving the target always contains a
+- [x] Add success and `AfterRename` tests proving the target always contains a
   complete new JSON document and no invocation-owned temp remains after a
   returned normal error.
-- [ ] Run `python3 ci/check_blocked_terms.py` and `git diff --check`.
-- [ ] Commit as `test: expose torn state snapshot window`, push, and capture
+- [x] Run `python3 ci/check_blocked_terms.py` and `git diff --check`.
+- [x] Commit as `test: expose torn state snapshot window`, push, and capture
   the exact hosted RED failure caused by the absent future interface or old
   truncate behavior.
 
@@ -86,19 +86,19 @@ where
 - Produces `pub(crate) fn persist_state_file_atomically(&Path, &[u8])`.
 - Keeps the phase-hook helper private to `state.rs` behavior tests.
 
-- [ ] Generate a same-directory writer-owned temp path using process identity,
+- [x] Generate a same-directory writer-owned temp path using process identity,
   a monotonic counter, and `OpenOptions::create_new(true)`; retry only name
   collisions.
-- [ ] Write all bytes and call `sync_all` before the `AfterFileSync` hook.
-- [ ] Rename over the target, invoke `AfterRename`, then sync the parent
+- [x] Write all bytes and call `sync_all` before the `AfterFileSync` hook.
+- [x] Rename over the target, invoke `AfterRename`, then sync the parent
   directory. Clean up only the owned temp on pre-rename failure.
-- [ ] Serialize `FirewallState` before calling the helper from
+- [x] Serialize `FirewallState` before calling the helper from
   `StateManager::with_state`; remove direct target truncation.
-- [ ] Replace the fixed `state.json.tmp` block in `WalWriter::compact` with the
+- [x] Replace the fixed `state.json.tmp` block in `WalWriter::compact` with the
   shared helper; keep WAL truncation and fsync after successful replacement.
-- [ ] Run the allowed Python/static checks, commit as
+- [x] Run the allowed Python/static checks, commit as
   `fix: publish state snapshots atomically`, and push.
-- [ ] Require exact-head `rust-behavior`, warning-denied `rust-build`, eBPF,
+- [x] Require exact-head `rust-behavior`, warning-denied `rust-build`, eBPF,
   fast contracts, and nonzero matching test execution.
 
 ### Task 3: Contract And Register Closure
@@ -111,13 +111,25 @@ where
   `docs/superpowers/specs/2026-08-13-bug-hunt-remediation-program-design.md`
 - Modify this plan and its design
 
-- [ ] Record exact RED/GREEN commits, Build URLs, pre/post-rename behavior, and
+- [x] Record exact RED/GREEN commits, Build URLs, pre/post-rename behavior, and
   the unchanged WAL format.
-- [ ] Mark `REVIEW-TXN-032` fixed only after exact-head GREEN.
-- [ ] Advance the fixed-order program to `REVIEW-OPS-038/040`.
-- [ ] Run public-release, CI-lane, blocked-term, and diff checks.
-- [ ] Commit/push the documentation closure and require the selected exact-head
+- [x] Mark `REVIEW-TXN-032` fixed only after exact-head GREEN.
+- [x] Advance the fixed-order program to `REVIEW-OPS-038/040`.
+- [x] Run public-release, CI-lane, blocked-term, and diff checks.
+- [x] Commit/push the documentation closure and require the selected exact-head
   fast/static Build to pass.
+
+## Execution Evidence
+
+- Design: `1b6b406`; exact-head Build
+  [31716894986](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31716894986).
+- RED: `9309fe9`; Build
+  [31716994234](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31716994234)
+  failed on the deliberately absent atomic writer/phase interface.
+- GREEN: `37740d4`; exact-head Build
+  [31717345713](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31717345713)
+  passed all four `atomic_state_file_` behaviors, fast contracts and
+  warning-denied eBPF/userspace/agent builds.
 
 ## Plan Self-Review
 

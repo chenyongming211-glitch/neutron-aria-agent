@@ -39,6 +39,22 @@ affected-port set. Its Rust minimum design and tests are recorded separately in
 | Idempotent generation handling | partial | Same generation replay and desired hash behavior exist in Rust side. |
 | Rich transaction status | planned | Needs clearer external status projection and contract tests. |
 
+### Atomic Standalone State Publication
+
+Every authoritative `state.json` update now uses one shared atomic persistence
+primitive. The complete next JSON document is serialized before file I/O,
+written to a writer-owned sibling temporary file, fsynced, atomically renamed
+over `state.json`, and followed by a parent-directory fsync. A failure before
+rename leaves the prior snapshot byte-for-byte intact; a failure after rename
+can return an uncertain result, but the target is still one complete JSON
+document rather than an empty or torn file.
+
+`StateManager` and `WalWriter::compact` share this primitive. Compaction keeps
+the durable ordering `publish snapshot -> truncate and fsync WAL`; truncate-
+first is forbidden. State and WAL schemas are unchanged. The duplicate-replay
+window between snapshot rename and WAL truncation remains independently owned
+by `REVIEW-TXN-033` and is not concealed by this atomic-file fix.
+
 ## Transaction Boundary
 
 Snapshot apply follows this high-level order:
