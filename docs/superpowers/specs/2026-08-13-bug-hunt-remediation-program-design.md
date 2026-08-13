@@ -1,6 +1,6 @@
 # Full-Code Bug-Hunt Remediation Program Design
 
-Status: approved program boundary; implementation not started
+Status: approved program boundary; implementation in progress
 
 Date: 2026-08-13
 
@@ -205,8 +205,10 @@ This program is complete only when:
 - the REVIEW register, architecture contracts and batch documents agree on
   severity, status and product scope.
 
-The immediate next batch is the bounded `REVIEW-ACL-075/076` TC parser safety
-work. Its independent
-[design](2026-08-13-acl-075-076-tc-parser-safety-design.md) and
-[RED/GREEN implementation plan](../plans/2026-08-13-acl-075-076-tc-parser-safety.md)
-are now recorded. No RED test or production implementation has landed yet.
+The `REVIEW-ACL-075/076` TC parser safety source implementation and hosted CI
+are complete; its target-kernel evidence remains pending under its independent
+[design](2026-08-13-acl-075-076-tc-parser-safety-design.md). The active next
+batch is `REVIEW-TXN-031/034`, whose approved delete-failure recovery boundary
+is recorded in
+[its independent design](2026-08-13-review-txn-031-034-delete-failure-recovery-design.md).
+No RED test or production implementation for that delete batch has landed yet.
