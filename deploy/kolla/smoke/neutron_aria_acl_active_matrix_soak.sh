@@ -276,7 +276,7 @@ preflight() {
     neutron_cli net-show "${NETWORK_ID}" >/dev/null
     nova_cli flavor-show "${FLAVOR_ID}" >/dev/null
     assert_cluster_heartbeat
-    for port in 1 18080 18081 18082; do
+    for port in 1 28080 28081 28082; do
         if ss -lntu "sport = :${port}" 2>/dev/null | grep -q ":${port}"; then
             die "host target port ${port} is already in use"
         fi
@@ -376,12 +376,12 @@ start_host_listener() {
 start_host_listeners() {
     start_host_listener tcp 1
     start_host_listener udp 1
-    start_host_listener tcp 18080
-    start_host_listener tcp 18081
-    start_host_listener tcp 18082
-    start_host_listener udp 18080
-    start_host_listener udp 18081
-    start_host_listener udp 18082
+    start_host_listener tcp 28080
+    start_host_listener tcp 28081
+    start_host_listener tcp 28082
+    start_host_listener udp 28080
+    start_host_listener udp 28081
+    start_host_listener udp 28082
 }
 
 start_ovs_canary() {
@@ -403,15 +403,15 @@ matrix_rows() {
     # The final row is the required egress TCP single:1 boundary case.
     cat <<'EOF'
 ingress	icmp	true	none	8080	8080	8081
-egress	icmp	true	none	18081	18081	18080
+egress	icmp	true	none	28081	28081	28080
 ingress	tcp	true	single	8080	8080	8081
-egress	tcp	true	single	18081	18081	18080
+egress	tcp	true	single	28081	28081	28080
 ingress	udp	true	single	1080	1080	1081
-egress	udp	true	single	18082	18082	18080
+egress	udp	true	single	28082	28082	28080
 ingress	tcp	false	range	8080	8082	65535
-egress	udp	false	range	18080	18082	1
+egress	udp	false	range	28080	28082	1
 ingress	tcp	false	single	65535	65535	8081
-egress	tcp	false	single	1	1	18081
+egress	tcp	false	single	1	1	28081
 EOF
 }
 

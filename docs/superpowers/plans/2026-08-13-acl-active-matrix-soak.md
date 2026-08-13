@@ -302,7 +302,7 @@ image, network, and flavor exist
 all target computes are enabled/up
 all three Aria heartbeats are alive, ready, non-degraded, generation_lag=0
 node-local case runner, nonce helper, and CirrOS listener tool exist
-host target ports 1 and 18080-18082 are free; the harness never kills a
+host target ports 1 and 28080-28082 are free; the harness never kills a
   listener it did not start
 fixed-soak ports are not present in the generated VM manifest
 ```
@@ -328,16 +328,16 @@ Use this fixed matrix and run each row on all three nodes serially before advanc
 ingress icmp stateful  none
 egress  icmp stateful  none
 ingress tcp  stateful  single:8080
-egress  tcp  stateful  single:18081
+egress  tcp  stateful  single:28081
 ingress udp  stateful  single:1080
-egress  udp  stateful  single:18082
+egress  udp  stateful  single:28082
 ingress tcp  stateless range:8080-8082
-egress  udp  stateless range:18080-18082
+egress  udp  stateless range:28080-28082
 ingress tcp  stateless single:65535
 egress  tcp  stateless single:1
 ```
 
-The host-side root nonce server owns port `1`, `18080`, `18081`, and `18082`. Each case uses a distinct non-matching port with a confirmed listener. The scheduler tick is one minute; if a case is active, append `skipped_active_tick` and do not fork another case.
+The host-side root nonce server owns port `1`, `28080`, `28081`, and `28082`. Each case uses a distinct non-matching port with a confirmed listener. The scheduler tick is one minute; if a case is active, append `skipped_active_tick` and do not fork another case.
 
 - [ ] **Step 6: Implement final cleanup and summary**
 
