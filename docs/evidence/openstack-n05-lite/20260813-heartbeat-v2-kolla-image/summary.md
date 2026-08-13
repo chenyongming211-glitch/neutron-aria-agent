@@ -57,10 +57,12 @@ All temporary ACL objects were removed after the regression.
 
 ## Stability Test
 
-A new 12-hour stability test started at approximately `2026-08-13T02:33Z`
-and is expected to finish at approximately `2026-08-13T14:33Z`.
+A 12-hour stability test started at approximately `2026-08-13T02:33Z`, but
+was intentionally paused at approximately `2026-08-13T02:55Z` so that daytime
+functional acceptance could continue. This interrupted run is not counted as
+a stability pass. A fresh, uninterrupted 12-hour window must start tonight.
 
-The test is currently `running`, not yet recorded as passed. It includes:
+The full test includes:
 
 - per-node readiness, generation, RSS, FD, thread, WAL, and pin sampling;
 - three-node ICMP drop with TCP/8080 and UDP/1080 allow traffic;
@@ -74,5 +76,10 @@ orchestration baseline error, not a readiness or datapath failure.
 The read-only runtime monitors were restarted after convergence with observed
 baselines of 23, 5, and 14 managed ports on compute nodes 2, 3, and 4. Their
 first two samples passed with `overall_readiness=ready`, no pending generation,
-and accepted generation equal to applied generation. The first four ACL
-traffic samples passed on all three nodes.
+and accepted generation equal to applied generation. Five ACL traffic samples
+passed on all three nodes before the intentional pause.
+
+The pause used the ACL test's normal exit cleanup path. API verification
+confirmed that all three temporary bindings, rules, and policies were absent,
+and ICMP connectivity recovered to all three test VMs. The runtime monitors
+and ACL traffic process are no longer running.
