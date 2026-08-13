@@ -35,6 +35,8 @@ grep -q 'cleanup_owned_vms' "${SOAK}" || \
     fail "VM cleanup must cover failures before vms.tsv is populated"
 grep -q 'SOFT_DELETED' "${SOAK}" || \
     fail "legacy Nova soft-deleted records must count as cleaned resources"
+grep -q 'nova_cli force-delete' "${SOAK}" || \
+    fail "owned test VMs must be hard-deleted so Neutron ports do not linger"
 grep -q 'while \[ "$(date +%s)" -lt "${DEADLINE_EPOCH}" \]' "${SOAK}" || \
     fail "matrix must repeat until the absolute deadline"
 

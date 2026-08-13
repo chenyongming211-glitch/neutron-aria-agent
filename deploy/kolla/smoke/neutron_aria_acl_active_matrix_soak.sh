@@ -142,7 +142,8 @@ cleanup_vms() {
     [ -f "${WORK_DIR}/vms.tsv" ] || return 0
     tac "${WORK_DIR}/vms.tsv" | while IFS=$'\t' read -r alias server_id port_id ip host ifname; do
         [ -n "${server_id}" ] || continue
-        nova_cli delete "${server_id}" >/dev/null 2>&1 || true
+        nova_cli force-delete "${server_id}" >/dev/null 2>&1 || \
+            nova_cli delete "${server_id}" >/dev/null 2>&1 || true
         event vm_delete pass "${alias}:${server_id}:${port_id}"
     done
 }
@@ -159,7 +160,8 @@ cleanup_owned_vms() {
                 "${WORK_DIR}/vms.tsv"; then
             continue
         fi
-        nova_cli delete "${server_id}" >/dev/null 2>&1 || true
+        nova_cli force-delete "${server_id}" >/dev/null 2>&1 || \
+            nova_cli delete "${server_id}" >/dev/null 2>&1 || true
         event vm_delete pass "owned-journal:${server_id}"
     done
 }
