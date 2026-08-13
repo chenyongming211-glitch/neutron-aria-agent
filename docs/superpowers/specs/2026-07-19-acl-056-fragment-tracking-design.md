@@ -405,10 +405,14 @@ still evaluated before resolution, so they can observe missing-context drops.
 
 At TC only, an Ethernet frame positively identified as IPv4 or IPv6 (including
 one 802.1Q tag) must not fail open when full parsing fails. The datapath first
-uses the existing safe `pull_data(0)` and reparses with refreshed pointers for a
-possibly non-linear skb. A second failure is `TC_ACT_SHOT` with stable
-`malformed-ip` drop accounting. Non-IP/unsupported Ethernet remains pass, and
-the intentionally neutral XDP parser-failure behavior is unchanged.
+parses against the current direct-access boundary while validating advertised IP
+lengths against the complete TC wire length. On failure it requests exactly one
+bounded prefix, `min(packet_len, 256)`, refreshes packet pointers, and reparses.
+A helper error or second failure is `TC_ACT_SHOT` with the established malformed
+or invalid-first-fragment-L4 reason. Non-IP/unsupported Ethernet remains pass,
+and the intentionally neutral XDP parser-failure behavior is unchanged. The
+complete parser envelope and evidence boundary are defined in
+[`2026-08-13-acl-075-076-tc-parser-safety-design.md`](2026-08-13-acl-075-076-tc-parser-safety-design.md).
 
 ## 8. Failure And Recovery Matrix
 

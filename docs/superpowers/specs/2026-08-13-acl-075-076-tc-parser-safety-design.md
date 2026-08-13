@@ -1,7 +1,7 @@
 # REVIEW-ACL-075/076 Bounded TC Parser Safety Design
 
-**Status:** proposed batch design; no RED test or production implementation has
-landed
+**Status:** source implementation and exact-head hosted CI complete; maintained
+enterprise 4.18 target-kernel evidence deferred/pending
 
 **Date:** 2026-08-13
 
@@ -252,7 +252,8 @@ There is no loop around the helper and no full-skb retry.
 ## 8. RED And GREEN Evidence
 
 The existing host-side raw parser fixture is the executable behavior boundary.
-RED tests are added to `abi/tests/fragment_parser_contract.rs` and must cover:
+RED commit `cb9deb5` added tests to
+`abi/tests/fragment_parser_contract.rs` covering:
 
 1. IPv4 and IPv6 packets whose complete wire length exceeds the simulated
    linear head but whose required headers are linear;
@@ -271,14 +272,26 @@ The old Python test which parses private TC function bodies to demand
 `TC_ACT_OK` is removed. It is not replaced by an inverse source checker.
 Behavior belongs in Rust tests and the compiled eBPF artifact gates.
 
-Hosted GREEN requires:
+The exact-head RED Build
+[`31695043494`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31695043494)
+failed in `rust-behavior` only on the intended missing parser signature,
+constants and failure classifier. `fast-contracts` passed; the older production
+eBPF artifact and stack-budget gate passed before the remaining RED run was
+cancelled after the expected failure was captured.
+
+GREEN commit `29636e6` implemented the separate wire/direct bounds, one bounded
+TC pull, eight-header limit, stable drop classification, and identical ingress
+and egress behavior. Its exact-head Build
+[`31695508165`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31695508165)
+passed:
 
 - `fast-contracts`, including the remaining legacy packet-bound structural
   contracts;
 - `rust-behavior` with warnings denied;
 - `rust-build`, including warning-denied eBPF compilation and the 448-byte
   linked-artifact stack budget;
-- exact-head Build success before the register status changes.
+- the linked-artifact stack gate with `tc_ingress` and `tc_egress` both at 448
+  bytes on their maximum call paths.
 
 No local Cargo command is allowed.
 

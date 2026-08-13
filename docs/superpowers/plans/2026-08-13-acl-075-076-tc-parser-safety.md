@@ -1,5 +1,9 @@
 # REVIEW-ACL-075/076 Bounded TC Parser Safety Implementation Plan
 
+**Current status:** Tasks 1-4 complete. RED `cb9deb5` reproduced the intended
+contract failure in Build `31695043494`; GREEN `29636e6` passed exact-head Build
+`31695508165`. Task 5 target-kernel evidence remains deferred/pending.
+
 > **For agentic workers:** use the repository's normal TDD workflow. Work every
 > task directly on `v0.9-neutron-agent`; do not create a branch, worktree or PR.
 
@@ -77,7 +81,7 @@ Rust/eBPF builds, linked eBPF stack-budget analysis.
 - Uses existing ABI reasons `DROP_MALFORMED_IP` and
   `DROP_FRAGMENT_INVALID_L4`.
 
-- [ ] **Step 1: Add fixtures for an arbitrary IPv6 extension chain**
+- [x] **Step 1: Add fixtures for an arbitrary IPv6 extension chain**
 
 Add a helper which starts from a valid Ethernet/IPv6/UDP frame and inserts
 `count` eight-byte Destination Options headers. Each header points to the next
@@ -106,7 +110,7 @@ unsafe fn parse_v6_with_linear_len(
 Create the analogous IPv4 helper. The test allocation still contains the
 complete frame; only `data_end` simulates the directly readable prefix.
 
-- [ ] **Step 2: Add wire-length versus linear-head RED behaviors**
+- [x] **Step 2: Add wire-length versus linear-head RED behaviors**
 
 Add tests whose names begin with `fragment_tc_parser_`:
 
@@ -133,7 +137,7 @@ Expected old behavior: the first two assertions fail because `data_end` is
 incorrectly used as full wire length. The future parser signature is also
 missing.
 
-- [ ] **Step 3: Add bounded pull and extension-chain RED behaviors**
+- [x] **Step 3: Add bounded pull and extension-chain RED behaviors**
 
 Assert exactly:
 
@@ -148,7 +152,7 @@ Add successful five-header and eight-header fixtures. Add a nine-header
 fixture which returns false and is classified as `DROP_MALFORMED_IP` rather
 than becoming a pass candidate.
 
-- [ ] **Step 4: Add stable failure-reason RED behaviors**
+- [x] **Step 4: Add stable failure-reason RED behaviors**
 
 For malformed supported IPv4/IPv6, assert that
 `tc_parse_failure_reason(&info)` returns `DROP_MALFORMED_IP`.
@@ -159,12 +163,12 @@ existing `invalid_l4_failure` accessor to assert the preserved family and
 protocol. Retain the existing assertions that stale port and fragment fields
 are cleared.
 
-- [ ] **Step 5: Update every fixture call to the required signature**
+- [x] **Step 5: Update every fixture call to the required signature**
 
 Pass `frame.len()` as `wire_len` for ordinary fully linear host fixtures. Do
 not change their expected fragment, port, TCP or VLAN semantics.
 
-- [ ] **Step 6: Verify only non-Cargo repository structure locally**
+- [x] **Step 6: Verify only non-Cargo repository structure locally**
 
 Run:
 
@@ -175,7 +179,7 @@ git diff --check
 
 Expected: exit 0. Do not run Cargo locally.
 
-- [ ] **Step 7: Commit, push and capture hosted RED**
+- [x] **Step 7: Commit, push and capture hosted RED**
 
 ```bash
 git add abi/tests/fragment_parser_contract.rs
@@ -208,7 +212,7 @@ limited to the intended ACL-075/076 contracts before production editing.
 - `pub fn bounded_tc_pull_len(packet_len: u32) -> u32`
 - `pub fn tc_parse_failure_reason(info: &PacketInfo) -> u8`
 
-- [ ] **Step 1: Add exact compile-time bounds and failure value**
+- [x] **Step 1: Add exact compile-time bounds and failure value**
 
 In `ebpf/src/parser.rs`, import the existing drop constants and add scalar-only
 constants/functions. `bounded_tc_pull_len` must be branch-based and
@@ -219,7 +223,7 @@ it returns `DROP_FRAGMENT_INVALID_L4`; otherwise it returns
 `DROP_MALFORMED_IP`. Family/protocol remain available through
 `invalid_l4_failure` and are not copied into a new aggregate.
 
-- [ ] **Step 2: Separate IPv4 wire validation from pointer validation**
+- [x] **Step 2: Separate IPv4 wire validation from pointer validation**
 
 Add `wire_len` between `data_end` and `offset`. Keep all existing fixed/direct
 pointer checks. Replace the full-payload `data_end` comparison with scalar
@@ -239,7 +243,7 @@ if ip_total_len < ihl || ip_total_len > available_wire_ip_len {
 Do not construct `ip_offset + ip_total_len`. `parse_transport` continues to
 check every actual TCP/UDP read against `data_end`.
 
-- [ ] **Step 3: Separate IPv6 wire validation and raise the count bound**
+- [x] **Step 3: Separate IPv6 wire validation and raise the count bound**
 
 Use scalar `wire_len` arithmetic to validate the advertised IPv6 payload, but
 retain `data_end` checks for the base header, each extension-header field, each
@@ -250,7 +254,7 @@ Replace the literal four-iteration bound with
 after eight iterations, return false. Do not add unbounded loops or support
 new extension types in this batch.
 
-- [ ] **Step 4: Update full-linear XDP and host call sites**
+- [x] **Step 4: Update full-linear XDP and host call sites**
 
 In `xdp_firewall`, pass `(data_end - data)` as wire length to both parsers.
 This preserves neutral XDP behavior. Ordinary host fixtures pass `frame.len()`.
@@ -258,7 +262,7 @@ This preserves neutral XDP behavior. Ordinary host fixtures pass `frame.len()`.
 In `parse_tc_family`, accept a scalar `wire_len` argument and forward it; Task
 3 will supply `ctx.len()` from the TC wrapper.
 
-- [ ] **Step 5: Review verifier-sensitive arithmetic**
+- [x] **Step 5: Review verifier-sensitive arithmetic**
 
 Before proceeding, inspect the diff and require:
 
@@ -290,7 +294,7 @@ Do not commit or push yet; Task 3 completes the same atomic GREEN behavior.
   zero-or-drop-reason result, and a common stable drop path for ingress and
   egress.
 
-- [ ] **Step 1: Replace both zero-length pulls with one bounded retry**
+- [x] **Step 1: Replace both zero-length pulls with one bounded retry**
 
 Change `parse_tc_packet` from `bool` to a scalar `u8` result where zero means
 success and a nonzero value is the exact existing drop reason. Then:
@@ -310,7 +314,7 @@ success and a nonzero value is the exact existing drop reason. Then:
 Delete the TCP `flags == 0 && seq == 0` retry block. There must be no
 `pull_data(0)` and no `pull_data(ctx.len())` in the TC parser path.
 
-- [ ] **Step 2: Restore one common parse-drop recorder**
+- [x] **Step 2: Restore one common parse-drop recorder**
 
 Add a small inlined helper which receives context, direction, packet length,
 drop reason and protocol, resolves the tap from the current ifindex and records
@@ -320,7 +324,7 @@ parse drop and do not add a map.
 If the reason is `DROP_FRAGMENT_INVALID_L4`, increment the existing invalid-L4
 metric for the preserved family before recording the drop.
 
-- [ ] **Step 3: Wire identical ingress and egress behavior**
+- [x] **Step 3: Wire identical ingress and egress behavior**
 
 Both entry functions consume the scalar result identically:
 
@@ -335,14 +339,14 @@ if reason != 0:
 Do not change the `PKT_SCRATCH`/`PIPE_SCRATCH` `None => TC_ACT_OK` paths,
 unsupported-family raw mirror path, or later pipeline error results.
 
-- [ ] **Step 4: Remove the contradictory implementation-shape checker**
+- [x] **Step 4: Remove the contradictory implementation-shape checker**
 
 Delete only `test_tc_parse_uncertainty_is_fail_open` from
 `ci/test_ebpf_legacy_packet_bounds.py`. Remove `_block_after` from its imports
 when it becomes unused. Do not add a test that searches for
 `TC_ACT_SHOT`, the new helper name or source order.
 
-- [ ] **Step 5: Run allowed local checks**
+- [x] **Step 5: Run allowed local checks**
 
 Run:
 
@@ -355,7 +359,7 @@ git diff --check
 
 Expected: all exit 0. Do not run Cargo locally.
 
-- [ ] **Step 6: Commit and push the complete GREEN implementation**
+- [x] **Step 6: Commit and push the complete GREEN implementation**
 
 ```bash
 git add ebpf/src/parser.rs ebpf/src/lib.rs \
@@ -364,7 +368,7 @@ git commit -m "fix: bound TC parser recovery"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Require exact-head hosted GREEN**
+- [x] **Step 7: Require exact-head hosted GREEN**
 
 Require the implementation commit's GitHub Actions Build to show:
 
@@ -393,13 +397,13 @@ and drop contract.
 - Modify:
   `docs/openstack-neutron-aria-details/12-review-bug-backlog.md`
 
-- [ ] **Step 1: Correct the older fragment design**
+- [x] **Step 1: Correct the older fragment design**
 
 Replace the `pull_data(0)` statement with the implemented separate-wire-length
 and bounded-prefix behavior. Link to this design and retain the explicit XDP,
 non-IP and scratch-failure exclusions.
 
-- [ ] **Step 2: Record exact evidence without over-closing**
+- [x] **Step 2: Record exact evidence without over-closing**
 
 Record:
 
@@ -413,7 +417,7 @@ Set `REVIEW-ACL-075/076` to the repository's established
 target-kernel case has actually run. Keep `REVIEW-ACL-087` merged, not fixed as
 an independent item.
 
-- [ ] **Step 3: Validate and publish documentation closure**
+- [x] **Step 3: Validate and publish documentation closure**
 
 Run:
 
