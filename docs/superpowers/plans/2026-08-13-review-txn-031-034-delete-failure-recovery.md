@@ -1,5 +1,8 @@
 # REVIEW-TXN-031/034 Delete Failure Recovery Implementation Plan
 
+**Status:** Tasks 1-3 complete; exact RED/GREEN hosted evidence captured;
+Task 4 documentation closure in progress
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking. Execute inline on the sole
@@ -90,7 +93,7 @@ async fn publish_blocked_delete_failure(
 ) -> String;
 ```
 
-- [ ] **Step 1: Add RED WAL checkpoint-retention behavior**
+- [x] **Step 1: Add RED WAL checkpoint-retention behavior**
 
 Add a test which writes a committed state containing `p1`, appends its
 `DeleteIntent`, then appends a valid blocked `SnapshotCommit` with:
@@ -106,7 +109,7 @@ port_statuses: blocked_statuses,
 Assert replay returns the blocked port status and the exact pending delete
 intent. The old scanner must fail because it clears `pending_intent`.
 
-- [ ] **Step 2: Add RED mismatch and exact-close WAL behaviors**
+- [x] **Step 2: Add RED mismatch and exact-close WAL behaviors**
 
 Add two tests:
 
@@ -119,7 +122,7 @@ Add two tests:
 Also append an invalid-status-hash commit after a delete intent and assert the
 intent survives. Do not inspect scanner source text.
 
-- [ ] **Step 3: Add RED phase-aware blocked runtime behavior**
+- [x] **Step 3: Add RED phase-aware blocked runtime behavior**
 
 Create one committed ACL-managed port with a ready ACL `enforce` status. Call
 the future builder twice and assert:
@@ -147,7 +150,7 @@ Both retain the port, set the hashless pending identity, and make the port
 non-ready. The ACL domain must be `unchanged` in `before` and `bypass` in
 `after`; neither may remain `ready/enforce`.
 
-- [ ] **Step 4: Add RED blocked-checkpoint failure behavior**
+- [x] **Step 4: Add RED blocked-checkpoint failure behavior**
 
 Append the baseline commit and delete intent, replace the WAL parent with the
 existing `WalParentReplacement`, and call
@@ -159,7 +162,7 @@ existing `WalParentReplacement`, and call
   non-ready ACL `bypass` evidence;
 - replay still returns the original delete intent and committed baseline.
 
-- [ ] **Step 5: Run allowed local checks**
+- [x] **Step 5: Run allowed local checks**
 
 Run:
 
@@ -170,7 +173,7 @@ git diff --check
 
 Expected: exit 0. Do not run Cargo locally.
 
-- [ ] **Step 6: Commit and push RED**
+- [x] **Step 6: Commit and push RED**
 
 ```bash
 git add agent/src/neutron_wal.rs agent/src/neutron_api.rs
@@ -178,7 +181,13 @@ git commit -m "test: expose delete intent loss"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Capture exact hosted RED**
+- [x] **Step 7: Capture exact hosted RED**
+
+RED `db14bfa` / Build
+[31697811403](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31697811403)
+failed in `rust-behavior` with `E0061` and `E0425`, exactly exposing the old
+builder signature and absent failure publisher. Fast contracts passed; the
+remaining long build was cancelled after the RED evidence was durable.
 
 Require `rust-behavior` to fail only because the old scanner clears the delete
 intent and the two future blocked-delete interfaces are missing or have the old
@@ -213,7 +222,7 @@ fn matching_delete_commit_valid(
 ) -> Result<bool, String>;
 ```
 
-- [ ] **Step 1: Implement blocked snapshot checkpoint validation**
+- [x] **Step 1: Implement blocked snapshot checkpoint validation**
 
 Require the future design fields exactly:
 
@@ -233,14 +242,14 @@ state.status_hash.is_some()
 
 Reject non-delete intents at the helper boundary.
 
-- [ ] **Step 2: Implement matching delete commit validation**
+- [x] **Step 2: Implement matching delete commit validation**
 
 Require valid hashed state, `accepted_generation == intent.generation`, the
 same accepted/applied/applied-hash baseline, no pending generation, restored
 `desired_hash == applied_desired_hash`, and absence of every intended port from
 both maps.
 
-- [ ] **Step 3: Split replay by pending intent kind and commit kind**
+- [x] **Step 3: Split replay by pending intent kind and commit kind**
 
 Preserve the protected-inventory branch first. Then implement:
 
@@ -254,7 +263,7 @@ Preserve the protected-inventory branch first. Then implement:
 - ordinary pending snapshot + valid `SnapshotCommit`: preserve existing
   completion behavior.
 
-- [ ] **Step 4: Review checkpoint/legacy compatibility**
+- [x] **Step 4: Review checkpoint/legacy compatibility**
 
 Inspect `checkpoint_entries`, protected inventory tests, legacy hashless commit
 tests, and existing snapshot intent tests. Do not change record serialization or
@@ -286,7 +295,7 @@ async fn purge_neutron_acl_transactionally(
 ) -> Result<OwnedAclReconcileReport, NeutronAclReconcileError>;
 ```
 
-- [ ] **Step 1: Preserve ACL purge failure phase**
+- [x] **Step 1: Preserve ACL purge failure phase**
 
 Map runtime-gate update failure with
 `acl_reconcile_error(AclReconcileFailurePhase::BeforeQuiesce, ...)` and owned
@@ -297,7 +306,7 @@ Update existing non-direct-delete callers to use `error.details` where they
 previously formatted the string. Do not change their control flow or absorb
 their status semantics into this batch.
 
-- [ ] **Step 2: Implement the phase-aware blocked runtime builder**
+- [x] **Step 2: Implement the phase-aware blocked runtime builder**
 
 Clone the previous runtime, retain the port, set the hashless pending fields,
 and replace the affected port status. Include `attach` plus normalized managed
@@ -305,7 +314,7 @@ domains. Every domain becomes non-ready with the exact stable reason; the ACL
 domain uses `domain_status_with_action` and the supplied `unchanged` or
 `bypass`. No other port status changes.
 
-- [ ] **Step 3: Implement the concrete blocked failure publisher**
+- [x] **Step 3: Implement the concrete blocked failure publisher**
 
 Build the blocked runtime and call
 `state.wal.append_snapshot_commit(blocked.to_wal_state())` before RAM
@@ -320,7 +329,7 @@ combined string such as
 `forced detach failure; delete_blocked_checkpoint_failed:forced write failure`
 on checkpoint failure. Do not clear the intent or remove the port.
 
-- [ ] **Step 4: Route every post-intent direct-delete failure**
+- [x] **Step 4: Route every post-intent direct-delete failure**
 
 Use the publisher at these exact boundaries:
 
@@ -336,14 +345,14 @@ Use the publisher at these exact boundaries:
 Every response remains HTTP 500, `status=error`, and `detached=false`. The
 normal not-found and successful durable delete responses remain unchanged.
 
-- [ ] **Step 5: Reuse truthful blocked status in startup recovery failures**
+- [x] **Step 5: Reuse truthful blocked status in startup recovery failures**
 
 Update `finalize_recovered_delete_intent` to build the same non-ready retained
 port evidence from the recovery result. Successful recovery still appends
 `DeleteCommit` and removes the port only afterward. A recovery-commit failure
 retains the intent and reports ACL `bypass` when recovery was quiesced.
 
-- [ ] **Step 6: Run allowed local checks**
+- [x] **Step 6: Run allowed local checks**
 
 Run:
 
@@ -355,7 +364,7 @@ git diff --check
 
 Expected: all pass. Do not run Cargo locally.
 
-- [ ] **Step 7: Commit and push GREEN**
+- [x] **Step 7: Commit and push GREEN**
 
 ```bash
 git add agent/src/neutron_wal.rs agent/src/neutron_api.rs
@@ -363,7 +372,13 @@ git commit -m "fix: preserve failed delete recovery"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 8: Require exact-head hosted GREEN**
+- [x] **Step 8: Require exact-head hosted GREEN**
+
+GREEN implementation `477761e` and compatibility follow-up `d8ae123` passed
+exact-head Build
+[31698764813](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31698764813):
+`fast-contracts`, `rust-behavior`, warning-denied `rust-build`, eBPF stack
+budget, database contracts, and clean install were all successful.
 
 Require:
 
@@ -397,26 +412,26 @@ not weaken tests, suppress warnings, or expand into another REVIEW item.
 - Produces: authoritative fixed status for `REVIEW-TXN-031/034` and next-batch
   handoff to `REVIEW-TXN-032`.
 
-- [ ] **Step 1: Update design and transaction contract**
+- [x] **Step 1: Update design and transaction contract**
 
 Record the implemented matching matrix and concrete evidence. Add the durable
 rule to `07-transaction-wal.md`: a blocked `SnapshotCommit` may checkpoint an
 unresolved delete but never resolves it; only a matching `DeleteCommit` does.
 
-- [ ] **Step 2: Update the REVIEW rows**
+- [x] **Step 2: Update the REVIEW rows**
 
 Set both rows to `fixed` only after exact-head GREEN. Record exact RED/GREEN
 commits and Build links, the phase-aware status result, intent retention, and
 successful forward retry. State explicitly that no WAL schema or privileged
 field evidence applies.
 
-- [ ] **Step 3: Advance the program index**
+- [x] **Step 3: Advance the program index**
 
 Mark this source/CI batch complete in the program narrative and identify
 `REVIEW-TXN-032` atomic `state.json` persistence as the next fixed-order batch.
 Do not alter severities or pull later work forward.
 
-- [ ] **Step 4: Validate documentation closure**
+- [x] **Step 4: Validate documentation closure**
 
 Run:
 

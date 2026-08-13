@@ -78,6 +78,16 @@ Minimum record kinds:
 Intent without commit must be recoverable. Recovery may replay, scrub, or wait
 for full resync, but must not silently widen permissions.
 
+An unresolved delete has stricter completion rules. A `snapshot commit` may
+checkpoint a retained-port `blocked_recovery_required` status after a delete
+failure, but it does not resolve the `delete intent`. Replay retains that exact
+intent across valid blocked checkpoints and across invalid, unrelated, or
+mismatched commits. Only a matching `delete commit` at the intent generation,
+with the intended port absent and the preceding committed generation/hash
+baseline preserved, closes the intent. Historical cause-free hashless delete
+commits remain readable under the same identity checks; newly written commits
+continue to carry a status hash.
+
 ## Generation And Desired Hash
 
 Rules:
@@ -294,9 +304,13 @@ Rust side:
 1. Validate route, port id, and authority.
 2. Acquire the Neutron apply lock.
 3. Append delete intent.
-4. Remove Neutron-owned state for that port only.
-5. Preserve unrelated local standalone state.
-6. Append delete commit and update status.
+4. Quiesce and remove Neutron-owned state for that port only.
+5. On any post-intent failure, checkpoint and publish a retained-port blocked
+   status: pre-quiesce ACL action is `unchanged`; post-quiesce action is
+   `bypass`.
+6. Preserve unrelated local standalone state.
+7. Append a matching delete commit.
+8. Publish port absence only after that delete commit is durable.
 
 ### State Model
 

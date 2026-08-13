@@ -207,8 +207,10 @@ This program is complete only when:
 
 The `REVIEW-ACL-075/076` TC parser safety source implementation and hosted CI
 are complete; its target-kernel evidence remains pending under its independent
-[design](2026-08-13-acl-075-076-tc-parser-safety-design.md). The active next
-batch is `REVIEW-TXN-031/034`, whose approved delete-failure recovery boundary
-is recorded in
-[its independent design](2026-08-13-review-txn-031-034-delete-failure-recovery-design.md).
-No RED test or production implementation for that delete batch has landed yet.
+[design](2026-08-13-acl-075-076-tc-parser-safety-design.md).
+`REVIEW-TXN-031/034` are also complete: RED `db14bfa` exposed the missing
+phase-aware failure publication, and implementation `477761e` plus legacy WAL
+compatibility follow-up `d8ae123` passed exact-head Build
+[31698764813](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31698764813).
+The active next batch is `REVIEW-TXN-032` atomic standalone state persistence;
+later batches remain in the fixed order above.

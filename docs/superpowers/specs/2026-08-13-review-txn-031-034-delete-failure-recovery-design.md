@@ -1,7 +1,6 @@
 # REVIEW-TXN-031/034 Delete Failure Recovery Design
 
-**Status:** approved design boundary; written specification awaiting final
-review; no RED test or production implementation has landed
+**Status:** implemented and hosted-CI verified; `REVIEW-TXN-031/034` fixed
 
 **Date:** 2026-08-13
 
@@ -293,3 +292,19 @@ Explicitly excluded:
    behaviors remain green.
 8. Exact-head hosted CI passes with warnings denied before either REVIEW row is
    closed.
+
+## 12. Delivery Evidence
+
+- RED `db14bfa`, Build
+  [31697811403](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31697811403):
+  `rust-behavior` failed on the absent phase-aware builder and blocked failure
+  publisher (`E0061`, `E0425`), while fast contracts passed.
+- GREEN implementation `477761e` introduced exact commit-to-intent matching and
+  phase-aware delete failure publication. Its first hosted run exposed one
+  pre-existing legacy hashless delete-commit compatibility requirement.
+- Compatibility follow-up `d8ae123`, exact-head Build
+  [31698764813](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31698764813):
+  `fast-contracts`, `rust-behavior`, `rust-build`, eBPF stack budget, database
+  contracts, and clean-agent install all passed with warnings denied.
+- No WAL record schema, public UDS/status vocabulary, Python behavior, or
+  privileged datapath evidence changed.
