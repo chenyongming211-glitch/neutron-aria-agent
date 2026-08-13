@@ -147,6 +147,23 @@ cleanup_vms() {
     done
 }
 
+cleanup_owned_vms() {
+    set +e
+    [ -f "${WORK_DIR}/owned.tsv" ] || return 0
+    local object_type server_id _detail
+    tac "${WORK_DIR}/owned.tsv" | while IFS=$'\t' read -r object_type server_id _detail; do
+        [ "${object_type}" = vm ] || continue
+        [ -n "${server_id}" ] || continue
+        if [ -f "${WORK_DIR}/vms.tsv" ] && \
+            awk -F '\t' -v wanted="${server_id}" '$2 == wanted { found=1 } END { exit !found }' \
+                "${WORK_DIR}/vms.tsv"; then
+            continue
+        fi
+        nova_cli delete "${server_id}" >/dev/null 2>&1 || true
+        event vm_delete pass "owned-journal:${server_id}"
+    done
+}
+
 stop_guest_listeners() {
     set +e
     [ -f "${WORK_DIR}/vms.tsv" ] || return 0
@@ -166,6 +183,7 @@ cleanup_all() {
     stop_guest_listeners
     cleanup_case_objects
     cleanup_vms
+    cleanup_owned_vms
     checkpoint cleanup "" "" done
 }
 
@@ -303,6 +321,8 @@ row = rows[0]
 fixed = row.get("fixed_ips") or []
 if isinstance(fixed, str):
     fixed = json.loads(fixed.replace("'", '"'))
+if isinstance(fixed, dict):
+    fixed = [fixed]
 ip = fixed[0].get("ip_address") if fixed else ""
 print("%s\t%s" % (row.get("id") or row.get("ID"), ip))
 PY

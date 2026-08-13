@@ -29,6 +29,10 @@ for marker in \
 done
 grep -q 'preflight)' "${SOAK}" || fail "missing non-mutating preflight action"
 grep -q 'item.get("Field")' "${SOAK}" || fail "missing legacy neutron JSON adapter"
+grep -q 'isinstance(fixed, dict)' "${SOAK}" || \
+    fail "fixed_ips must accept the legacy single-object response"
+grep -q 'cleanup_owned_vms' "${SOAK}" || \
+    fail "VM cleanup must cover failures before vms.tsv is populated"
 grep -q 'while \[ "$(date +%s)" -lt "${DEADLINE_EPOCH}" \]' "${SOAK}" || \
     fail "matrix must repeat until the absolute deadline"
 
