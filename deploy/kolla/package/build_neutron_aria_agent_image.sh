@@ -48,7 +48,7 @@ docker build \
     "${REPO_ROOT}"
 
 log "Validating image entrypoint import"
-docker run --rm --entrypoint python "${IMAGE_TAG}" - <<'PY'
+docker run --rm -i --entrypoint python "${IMAGE_TAG}" - <<'PY'
 from __future__ import print_function
 
 from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env

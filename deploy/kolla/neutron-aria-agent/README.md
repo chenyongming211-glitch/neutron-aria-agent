@@ -27,6 +27,30 @@ sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
   deploy/kolla/package/build_neutron_aria_agent_image.sh
 ```
 
+## Release Candidate Image Rollout
+
+Use the image installer when replacing an existing Kolla
+`neutron_aria_agent` container. It preserves the current container as an
+install-failure recovery point, records the previous image and configuration,
+recreates only the Python agent container, and verifies that the Aria datapath
+and Neutron OVS agent were not restarted.
+
+```bash
+sudo IMAGE_REF=neutron-aria-agent:<candidate-tag> \
+  IMAGE_TAR=/path/to/neutron-aria-agent-image.tar.gz \
+  EXPECTED_IMAGE_ID=sha256:<image-id> \
+  CANDIDATE_CONFIG_SOURCE=/path/to/candidate-neutron-aria-agent.ini \
+  ROLLBACK_CONFIG_SOURCE=/path/to/previous-neutron-aria-agent.ini \
+  deploy/kolla/package/install_neutron_aria_agent_rc_image.sh install
+
+sudo deploy/kolla/package/install_neutron_aria_agent_rc_image.sh check
+sudo deploy/kolla/package/install_neutron_aria_agent_rc_image.sh rollback
+```
+
+The installer copies container environment values into a root-only state
+directory and never prints them. Rollback creates a fresh container from the
+recorded previous image rather than reusing the candidate writable layer.
+
 For a host-local smoke using the currently deployed OVS agent image as the base:
 
 ```bash

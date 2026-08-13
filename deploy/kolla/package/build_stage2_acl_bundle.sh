@@ -165,6 +165,19 @@ sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
   deploy/kolla/package/build_neutron_aria_agent_image.sh
 ```
 
+Install or roll back that image without restarting the datapath or OVS:
+
+```bash
+sudo IMAGE_REF=<registry-or-local-image>:<immutable-tag> \
+  IMAGE_TAR=<optional-image-tar-or-tar-gz> \
+  EXPECTED_IMAGE_ID=sha256:<image-id> \
+  CANDIDATE_CONFIG_SOURCE=/path/to/candidate-neutron-aria-agent.ini \
+  ROLLBACK_CONFIG_SOURCE=/path/to/previous-neutron-aria-agent.ini \
+  deploy/kolla/package/install_neutron_aria_agent_rc_image.sh install
+sudo deploy/kolla/package/install_neutron_aria_agent_rc_image.sh check
+sudo deploy/kolla/package/install_neutron_aria_agent_rc_image.sh rollback
+```
+
 Optional datapath image build using CI/release Rust artifacts:
 
 ```bash
@@ -333,6 +346,7 @@ EOF
         echo "legacy_cli_installer=deploy/kolla/package/install_neutronclient_aria_cli.sh"
         echo "legacy_cli_package=openstack/neutronclient_aria"
         echo "agent_image_builder=deploy/kolla/package/build_neutron_aria_agent_image.sh"
+        echo "agent_rc_installer=deploy/kolla/package/install_neutron_aria_agent_rc_image.sh"
         echo "datapath_image_builder=deploy/kolla/package/build_aria_datapath_image.sh"
         echo "datapath_rc_installer=deploy/kolla/package/install_aria_datapath_rc_image.sh"
         echo "uds_peercred_profile_installer=deploy/kolla/package/install_aria_uds_peercred_profile.sh"

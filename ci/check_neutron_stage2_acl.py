@@ -143,6 +143,9 @@ def check_production_acl_smoke():
     image_builder = _read(os.path.join(
         "deploy", "kolla", "package", "build_neutron_aria_agent_image.sh"
     ))
+    agent_rc_installer = _read(os.path.join(
+        "deploy", "kolla", "package", "install_neutron_aria_agent_rc_image.sh"
+    ))
     datapath_image_builder = _read(os.path.join(
         "deploy", "kolla", "package", "build_aria_datapath_image.sh"
     ))
@@ -232,6 +235,8 @@ def check_production_acl_smoke():
         "build_neutron_aria_egg.sh",
         "neutron_aria_acl_stage2_gate_smoke.sh",
         "build_neutron_aria_agent_image.sh",
+        "install_neutron_aria_agent_rc_image.sh",
+        "agent_rc_installer=deploy/kolla/package/install_neutron_aria_agent_rc_image.sh",
         "build_aria_datapath_image.sh",
         "deploy/kolla/aria-datapath",
         "tar --sort=name",
@@ -245,10 +250,23 @@ def check_production_acl_smoke():
         "SAVE_IMAGE",
         "docker build",
         "docker save",
+        "docker run --rm -i --entrypoint python",
         "image_imports=ok",
     ):
         if term not in image_builder:
             raise SystemExit("ERROR: neutron-aria-agent image builder missing %s" % term)
+    for term in (
+        "install|check|rollback",
+        "EXPECTED_IMAGE_ID",
+        "CANDIDATE_CONFIG_SOURCE",
+        "ROLLBACK_CONFIG_SOURCE",
+        "container.env",
+        "Aria datapath container identity changed",
+        "Neutron OVS agent container identity changed",
+        "heartbeat_detail_mode == \"summary_only\"",
+    ):
+        if term not in agent_rc_installer:
+            raise SystemExit("ERROR: agent RC image installer missing %s" % term)
     for term in (
         "BASE_IMAGE",
         "IMAGE_TAG",
