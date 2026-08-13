@@ -401,7 +401,8 @@ prepare_guest_listeners() {
 }
 
 start_host_listener() {
-    local protocol="$1" port="$2" ready="${WORK_DIR}/host-${protocol}-${port}.ready"
+    local protocol="$1" port="$2" ready
+    ready="${WORK_DIR}/host-${protocol}-${port}.ready"
     "${PYTHON_BIN}" "${NONCE_ECHO}" serve "${protocol}" 0.0.0.0 "${port}" "${ready}" \
         >>"${WORK_DIR}/host-listeners.log" 2>&1 &
     local pid=$!
