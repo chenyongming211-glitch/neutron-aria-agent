@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -9,7 +9,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::state::FirewallState;
+use crate::state::{persist_state_file_atomically, FirewallState};
 
 /// Time-based compact interval (5 minutes)
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
@@ -106,16 +106,6 @@ pub struct WalWriter {
     last_compact_time: Instant,
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 impl WalWriter {
     pub fn open(state_path: &str) -> Result<Self, String> {
         let wal_path = PathBuf::from(format!("{}/state.wal", state_path));
@@ -203,22 +193,8 @@ impl WalWriter {
             .parent()
             .ok_or_else(|| "WAL path has no parent directory".to_string())?;
         let state_file = state_dir.join("state.json");
-        let tmp_file = state_dir.join("state.json.tmp");
-
-        // Atomic write: tmp + fsync + rename
-        let write_result = (|| -> Result<(), std::io::Error> {
-            let mut f = File::create(&tmp_file)?;
-            f.write_all(state_json.as_bytes())?;
-            f.sync_all()?;
-            fs::rename(&tmp_file, &state_file)?;
-            sync_directory(state_dir)?;
-            Ok(())
-        })();
-
-        if let Err(e) = write_result {
-            let _ = fs::remove_file(&tmp_file);
-            return Err(format!("Failed to write snapshot: {}", e));
-        }
+        persist_state_file_atomically(&state_file, state_json.as_bytes())
+            .map_err(|error| format!("Failed to write snapshot: {}", error))?;
 
         // Truncate WAL
         let file = OpenOptions::new()

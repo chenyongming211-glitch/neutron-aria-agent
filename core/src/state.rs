@@ -1,10 +1,14 @@
 use fslock::LockFile;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
+
+static STATE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const STATE_TEMP_CREATE_ATTEMPTS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupInfo {
@@ -632,6 +636,122 @@ fn release_port_set(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicStateWritePhase {
+    AfterFileSync,
+    AfterRename,
+}
+
+fn create_atomic_state_temp(state_file: &Path) -> Result<(PathBuf, File), String> {
+    let parent = state_file
+        .parent()
+        .ok_or_else(|| format!("State file has no parent: {}", state_file.display()))?;
+    let file_name = state_file
+        .file_name()
+        .ok_or_else(|| format!("State file has no name: {}", state_file.display()))?;
+
+    for _ in 0..STATE_TEMP_CREATE_ATTEMPTS {
+        let sequence = STATE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut temp_name = file_name.to_os_string();
+        temp_name.push(format!(".tmp.{}.{}", std::process::id(), sequence));
+        let temp_path = parent.join(temp_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create state temporary file {}: {}",
+                    temp_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to allocate unique state temporary file for {} after {} attempts",
+        state_file.display(),
+        STATE_TEMP_CREATE_ATTEMPTS
+    ))
+}
+
+#[cfg(unix)]
+fn sync_state_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_state_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn persist_state_file_atomically_with_hook<F>(
+    state_file: &Path,
+    contents: &[u8],
+    mut hook: F,
+) -> Result<(), String>
+where
+    F: FnMut(AtomicStateWritePhase) -> Result<(), String>,
+{
+    let parent = state_file
+        .parent()
+        .ok_or_else(|| format!("State file has no parent: {}", state_file.display()))?;
+    let (temp_path, mut temp_file) = create_atomic_state_temp(state_file)?;
+    let mut renamed = false;
+    let result = (|| {
+        temp_file.write_all(contents).map_err(|error| {
+            format!(
+                "Failed to write state temporary file {}: {}",
+                temp_path.display(),
+                error
+            )
+        })?;
+        temp_file.sync_all().map_err(|error| {
+            format!(
+                "Failed to sync state temporary file {}: {}",
+                temp_path.display(),
+                error
+            )
+        })?;
+        drop(temp_file);
+        hook(AtomicStateWritePhase::AfterFileSync)?;
+        fs::rename(&temp_path, state_file).map_err(|error| {
+            format!(
+                "Failed to replace state file {} from {}: {}",
+                state_file.display(),
+                temp_path.display(),
+                error
+            )
+        })?;
+        renamed = true;
+        hook(AtomicStateWritePhase::AfterRename)?;
+        sync_state_directory(parent).map_err(|error| {
+            format!(
+                "Failed to sync state directory {}: {}",
+                parent.display(),
+                error
+            )
+        })?;
+        Ok(())
+    })();
+
+    if result.is_err() && !renamed {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+pub(crate) fn persist_state_file_atomically(
+    state_file: &Path,
+    contents: &[u8],
+) -> Result<(), String> {
+    persist_state_file_atomically_with_hook(state_file, contents, |_| Ok(()))
+}
+
 pub struct StateManager {
     state_file: PathBuf,
 }
@@ -685,22 +805,9 @@ impl StateManager {
 
         f(&mut state)?;
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&self.state_file)
-            .map_err(|e| format!("Failed to open state file for writing: {}", e))?;
-
         let contents = serde_json::to_string_pretty(&state)
             .map_err(|e| format!("Failed to serialize state: {}", e))?;
-
-        file.write_all(contents.as_bytes())
-            .map_err(|e| format!("Failed to write state file: {}", e))?;
-        file.sync_all()
-            .map_err(|e| format!("Failed to sync state file: {}", e))?;
-
-        Ok(())
+        persist_state_file_atomically(&self.state_file, contents.as_bytes())
     }
 
     pub fn add_group(&self, name: &str, cidr: &str) -> Result<u32, String> {
