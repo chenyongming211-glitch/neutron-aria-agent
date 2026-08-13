@@ -511,6 +511,13 @@ collect_gate() {
 
 select_python
 case "${ACTION}" in
+    preflight)
+        load_env; require_runtime
+        mkdir -p "${WORK_DIR}"
+        : >"${WORK_DIR}/events.tsv"
+        preflight
+        checkpoint preflight "" "" pass
+        log "preflight=pass work_dir=${WORK_DIR}" ;;
     launch)
         load_env; require_runtime; launch_gate ;;
     run)
@@ -520,5 +527,5 @@ case "${ACTION}" in
     collect)
         load_env; require_runtime; collect_gate ;;
     *)
-        die "usage: $0 launch|run|status|collect <runtime.env>" ;;
+        die "usage: $0 preflight|launch|run|status|collect <runtime.env>" ;;
 esac
