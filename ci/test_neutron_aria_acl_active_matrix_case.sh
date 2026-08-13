@@ -52,6 +52,7 @@ for marker in \
     binding_disable; do
     grep -q "${marker}" "${CASE_SCRIPT}" || fail "missing contract marker: ${marker}"
 done
+grep -q 'item.get("Field")' "${CASE_SCRIPT}" || fail "missing legacy neutron JSON adapter"
 
 binding_line="$(grep -n 'delete_owned_type binding' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
 rule_line="$(grep -n 'delete_owned_type rule' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"

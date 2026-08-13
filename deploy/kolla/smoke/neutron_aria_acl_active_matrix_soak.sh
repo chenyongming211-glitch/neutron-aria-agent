@@ -251,6 +251,8 @@ import ast
 import json
 import os
 row = json.loads(os.environ["DETAILS"])
+if isinstance(row, list) and all(isinstance(item, dict) for item in row):
+    row = dict((item.get("Field"), item.get("Value")) for item in row)
 cfg = row.get("configurations") or {}
 if isinstance(cfg, str):
     try: cfg = json.loads(cfg)

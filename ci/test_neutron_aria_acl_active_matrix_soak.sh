@@ -27,6 +27,7 @@ for marker in \
     grep -q "${marker}" "${SOAK}" || fail "missing scheduler marker: ${marker}"
 done
 grep -q 'preflight)' "${SOAK}" || fail "missing non-mutating preflight action"
+grep -q 'item.get("Field")' "${SOAK}" || fail "missing legacy neutron JSON adapter"
 
 launch_line="$(grep -n 'systemd-run' "${SOAK}" | head -1 | cut -d: -f1)"
 [ -n "${launch_line}" ] || fail "systemd launcher is missing"

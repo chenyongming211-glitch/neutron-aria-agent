@@ -350,6 +350,8 @@ import sys
 path, expected, port_id, host, policy_id, binding_id = sys.argv[1:7]
 with open(path) as handle:
     row = json.load(handle)
+if isinstance(row, list) and all(isinstance(item, dict) for item in row):
+    row = dict((item.get("Field"), item.get("Value")) for item in row)
 if row.get("port_id") != port_id or row.get("host") != host or row.get("stale") is True:
     raise SystemExit(1)
 if expected == "ready":
@@ -394,6 +396,8 @@ import json
 import sys
 with open(sys.argv[1]) as handle:
     row = json.load(handle)
+if isinstance(row, list) and all(isinstance(item, dict) for item in row):
+    row = dict((item.get("Field"), item.get("Value")) for item in row)
 if not row.get("alive"):
     raise SystemExit("agent is not alive")
 cfg = row.get("configurations") or {}
