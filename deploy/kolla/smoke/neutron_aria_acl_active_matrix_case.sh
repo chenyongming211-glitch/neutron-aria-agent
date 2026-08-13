@@ -284,6 +284,18 @@ nonce_value() {
     printf '%s-%s-%s\n' "${CASE_ID}" "$1" "$(now_ms)"
 }
 
+last_nonempty_line() {
+    "${PYTHON_BIN}" -c '
+from __future__ import print_function
+import sys
+
+lines = [line.strip() for line in sys.stdin.read().replace("\r", "\n").split("\n")]
+lines = [line for line in lines if line]
+if lines:
+    print(lines[-1])
+'
+}
+
 probe_once() {
     local protocol="$1"
     local direction="$2"
@@ -309,7 +321,7 @@ probe_once() {
     else
         command="printf '%s' '${nonce}' | nc -u -w ${PROBE_TIMEOUT} '${EGRESS_TARGET_IP}' '${port}'"
     fi
-    output="$(guest_exec "${command}" 2>/dev/null || true)"
+    output="$(guest_exec "${command}" 2>/dev/null | last_nonempty_line || true)"
     [ "${output}" = "${nonce}" ]
 }
 
