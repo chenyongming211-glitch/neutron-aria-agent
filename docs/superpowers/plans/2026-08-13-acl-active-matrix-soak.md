@@ -15,7 +15,7 @@
 - Do not compile Rust or eBPF locally; this plan requires no Rust/eBPF build.
 - Keep `incremental_rpc_enabled` unchanged and exercise the currently deployed RPC/full-resync mode.
 - Run active cases serially; a one-minute scheduler tick must skip while a prior case is active.
-- The overnight run is controlled entirely from `ostack2`; it must not depend on the workstation or an interactive SSH session remaining connected.
+- The overnight run is controlled entirely from the designated controller compute; it must not depend on the workstation or an interactive SSH session remaining connected.
 - Launch through a named `systemd-run` transient service with no automatic restart on assertion failure.
 - Use `default_action=allow`; unsupported defaults and fields are negative API/CLI tests only.
 - Treat the current stateful implementation as lightweight five-tuple, reply-seen, timeout-based tracking, not a strict TCP state machine.
@@ -28,6 +28,7 @@
 | File | Responsibility |
 | --- | --- |
 | `deploy/kolla/smoke/neutron_aria_acl_nonce_echo.py` | TCP/UDP nonce echo server and probe oracle, Python 2/3 compatible. |
+| `deploy/kolla/smoke/neutron_aria_cirros_guest_exec.py` | Password-file based CirrOS command execution without logging credentials. |
 | `ci/test_neutron_aria_acl_nonce_echo.py` | Local deterministic unit/integration tests for both protocols and timeout behavior. |
 | `deploy/kolla/smoke/neutron_aria_acl_active_matrix_case.sh` | Own one port, one policy, one case, status waits, traffic assertions, mutation, and cleanup. |
 | `ci/test_neutron_aria_acl_active_matrix_case.sh` | Stubbed contract tests for validation, ordering, status identity, no-overlap, and cleanup. |
@@ -511,15 +512,16 @@ Set `DEADLINE_EPOCH` far enough for exactly the first ingress ICMP stateful row 
 
 - [ ] **Step 4: Run the full matrix until the agreed deadline**
 
-Start the scheduler through its named `systemd-run` service on `ostack2` with
+Start the scheduler through its named `systemd-run` service on the designated
+controller compute with
 the absolute 09:00 deadline. The workstation SSH process must not be an
 ancestor or owner of the scheduler process.
 
 Before releasing external SSH access, complete the detached launch gate:
 
 ```text
-ostack2 can reach ostack3/ostack4 over the management network
-OpenStack token renewal succeeds from ostack2
+the controller can reach all three dedicated test VMs over the management network
+OpenStack token renewal succeeds from the controller
 staged SHA-256 values match the CI-passed files
 systemd unit is active and the flock is held
 checkpoint advances across two one-minute ticks

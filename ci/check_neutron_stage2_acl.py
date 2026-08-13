@@ -2,6 +2,8 @@
 from __future__ import print_function
 
 import os
+import subprocess
+import sys
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -380,6 +382,36 @@ def check_datapath_apply_error_observability():
         )
 
 
+def check_active_matrix_contract():
+    print("==> checking bidirectional active ACL matrix contract")
+    required = {
+        os.path.join("deploy", "kolla", "smoke", "neutron_aria_acl_nonce_echo.py"): (
+            "serve", "probe", "MAX_NONCE_BYTES",
+        ),
+        os.path.join("deploy", "kolla", "smoke", "neutron_aria_acl_active_matrix_case.sh"): (
+            "effective_policy_id", "binding_id", "generation_lag",
+            "matching_drop", "nonmatching_allow", "cleanup_complete",
+        ),
+        os.path.join("deploy", "kolla", "smoke", "neutron_aria_acl_active_matrix_soak.sh"): (
+            "systemd-run", "Type=simple", "scheduler.lock", "checkpoint.json",
+            "skipped_active_tick", "single:1", "65535",
+            "owned_resources_remaining", "no_automatic_restart",
+        ),
+    }
+    for path, terms in required.items():
+        source = _read(path)
+        for term in terms:
+            if term not in source:
+                raise SystemExit("ERROR: active ACL matrix %s missing %s" % (path, term))
+
+    for command in (
+        [sys.executable, os.path.join(ROOT, "ci", "test_neutron_aria_acl_nonce_echo.py"), "-v"],
+        ["bash", "ci/test_neutron_aria_acl_active_matrix_case.sh"],
+        ["bash", "ci/test_neutron_aria_acl_active_matrix_soak.sh"],
+    ):
+        subprocess.check_call(command, cwd=ROOT)
+
+
 def main():
     # Executable behavior is owned by the required full Python discovery in
     # check_neutron_stage1.py.  This script intentionally checks only artifacts
@@ -388,6 +420,7 @@ def main():
     check_neutron_server_contract_files()
     check_production_acl_smoke()
     check_datapath_apply_error_observability()
+    check_active_matrix_contract()
     print("stage-two static/artifact contract passed")
     print("evidence_class=static_artifact")
     print("runtime_evidence=not_evaluated")

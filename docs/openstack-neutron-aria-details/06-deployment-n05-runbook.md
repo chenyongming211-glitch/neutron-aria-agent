@@ -176,6 +176,7 @@ Each N0.5 entry should record:
 | fixture ACL smoke | `neutron_aria_acl_full_resync_smoke.sh`, `neutron_aria_acl_fault_injection_smoke.sh` | Fixture snapshot can enforce/bypass ACL without Neutron plugin. |
 | production ACL smoke | `neutron_aria_acl_neutron_source_smoke.sh` | `aria_acl` extension visible, `NeutronAclSource` reads ACL input, then snapshot reaches datapath status. |
 | active traffic ACL smoke | `neutron_aria_acl_active_traffic_smoke.sh` | A continuous host-to-VM ping stream is running before ACL apply; Neutron `aria_acl` creates a temporary ingress drop policy; datapath, port-status, blocked samples, cleanup, and post-rollback recovery all pass. |
+| active bidirectional matrix soak | `neutron_aria_acl_active_matrix_soak.sh` | Three dedicated CirrOS VMs rotate serialized ingress/egress ICMP, TCP, and UDP stateful/stateless cases, policy transitions, status identity, rollback, cleanup, and an independent OVS canary. |
 | heartbeat smoke | `neutron_aria_heartbeat_smoke.sh` | Heartbeat and per-port status summaries are visible. |
 | recovery smoke | `neutron_aria_transaction_state_smoke.sh`, `neutron_aria_crash_injection_smoke.sh`, `neutron_aria_delete_fault_injection_smoke.sh` | Restart with pending WAL intent and UDS timeout recovery. |
 | tap lifecycle smoke | `neutron_aria_tap_recreate_smoke.sh`, `neutron_aria_vm_migration_smoke.sh` | Tap recreation/detach preserves OVS forwarding, removes stale ownership, and eventually restores ACL on the current tap. Availability-first recovery does not imply zero-window enforcement. |
@@ -192,6 +193,34 @@ dedicated temporary test VM with known credentials. The rollback smoke accepts
 `TRAFFIC_CHECK_CMD` so the same harness can verify guest-originated egress when
 that access is available. The 2026-06-30 CirrOS probe is the accepted current
 evidence for this direction.
+
+### Active Bidirectional Matrix Soak
+
+The release gate uses three dedicated CirrOS VMs, one scheduled to each target
+compute. It never reuses fixed-policy soak ports. The controller runs on
+the designated controller compute as a transient systemd service, so losing the external SSH session
+does not stop the test and no host-to-host SSH trust is installed.
+
+Runtime inputs are a mode-0600 CirrOS password file, a three-row target host
+file, image/network/flavor IDs, a non-ACL OVS canary IP, controller egress IP,
+and an absolute deadline. The scheduler ticks every minute but never overlaps
+cases; active ticks are recorded as `skipped_active_tick`.
+
+The matrix covers ingress/egress ICMP, TCP, and UDP; stateful/stateless policy;
+single ports, bounded ranges, ports 1 and 65535; selector updates; rule,
+binding, and policy disable/re-enable; and rollback. TCP/UDP reachability
+requires the exact per-attempt nonce response. UDP is never declared reachable
+from `nc -uvz` or a successful send call.
+
+Before external access is released, the systemd unit must be active and atomic
+`checkpoint.json` must advance across two scheduler ticks. Assertion failures
+are not automatically restarted. Morning collection reads unit state,
+checkpoint, service log, case results, summary, exit code, cleanup inventory,
+and OVS canary samples.
+
+This gate never restarts or modifies OVS, `neutron-openvswitch-agent`, or
+`aria-datapath`. Runtime stability, fixed-policy enforcement, disabled-binding
+control-plane churn, and active-matrix results remain separate.
 
 ### Rollback Flow
 
