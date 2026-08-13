@@ -147,6 +147,39 @@ an ACL drop.
 - API latency, enforcement convergence, rollback convergence, and total cycle
   time are recorded independently.
 
+## Detached Overnight Execution
+
+The active matrix must not depend on the developer workstation, an interactive
+SSH session, or Codex remaining connected. Before the overnight gate starts,
+all scripts and runtime inputs are staged on the controller compute. The
+controller starts the scheduler as a named `systemd-run` transient service and
+the scheduler reaches the other computes over the test environment's internal
+management network.
+
+The service uses an absolute deadline, a single-instance `flock`, a private
+mode-0600 runtime environment file, append-only stdout/stderr, and an atomic
+checkpoint updated after every scheduler decision and case transition. Losing
+the external SSH path has no effect on the service. A failed assertion still
+stops the gate and preserves evidence; systemd must not automatically rerun a
+failed test and hide the first failure.
+
+Before the external connection is released, a launch gate must prove:
+
+- all three computes are reachable from the controller without workstation
+  forwarding;
+- OpenStack credentials can be renewed locally on the controller;
+- staged script hashes match the CI-passed commit;
+- the named service is active and owns the single-instance lock;
+- the checkpoint timestamp advances across two scheduler ticks;
+- all dedicated VMs are on their requested hosts and the first case has begun;
+- logs contain no immediate authentication, API, guest, or cleanup error.
+
+If this launch gate does not pass, the overnight test is not considered
+started. Morning collection reads the service result, exit code, checkpoint,
+manifest, logs, and cleanup inventory from the controller. Inability of the
+workstation to reconnect before morning is a collection delay, not a test
+failure.
+
 ## Evidence
 
 The gate writes a manifest and append-only per-cycle evidence containing:

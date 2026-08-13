@@ -15,6 +15,8 @@
 - Do not compile Rust or eBPF locally; this plan requires no Rust/eBPF build.
 - Keep `incremental_rpc_enabled` unchanged and exercise the currently deployed RPC/full-resync mode.
 - Run active cases serially; a one-minute scheduler tick must skip while a prior case is active.
+- The overnight run is controlled entirely from `ostack2`; it must not depend on the workstation or an interactive SSH session remaining connected.
+- Launch through a named `systemd-run` transient service with no automatic restart on assertion failure.
 - Use `default_action=allow`; unsupported defaults and fields are negative API/CLI tests only.
 - Treat the current stateful implementation as lightweight five-tuple, reply-seen, timeout-based tracking, not a strict TCP state machine.
 - Never write credentials, tokens, passwords, raw environment files, or internal endpoint URLs into tracked evidence.
@@ -259,6 +261,7 @@ git commit -m "test(acl): add atomic active matrix case runner"
 - Consumes required environment: `IMAGE_ID`, `NETWORK_ID`, `FLAVOR_ID`, `DEADLINE_EPOCH`, `TARGETS_FILE`, `GUEST_PASSWORD_FILE`.
 - Consumes optional environment: `SCHEDULER_INTERVAL=60`, `CASE_TIMEOUT=420`, `REMOTE_ROOT=/var/tmp/aria-acl-active-matrix`, `WORK_DIR=/var/tmp/aria-acl-active-matrix-<run-id>`.
 - Produces: one manifest, one node/case result directory, `metrics.tsv`, `summary.json`, `exit-code`, and `complete` marker.
+- Produces an atomic `checkpoint.json` after every scheduler decision and case transition, including `updated_at`, `phase`, `node_alias`, `case_id`, `cycle`, and `last_result`.
 
 - [ ] **Step 1: Write failing scheduler contract tests**
 
@@ -352,7 +355,43 @@ On success or signal: stop scheduling, terminate owned listeners, delete any rec
 
 Create `complete` only after cleanup succeeds; always write `exit-code`.
 
-- [ ] **Step 7: Run scheduler tests and syntax checks**
+- [ ] **Step 7: Implement a detached systemd launcher**
+
+Add `launch`, `status`, and `collect` subcommands to the scheduler. `launch`
+must write a mode-0600 runtime environment file, take a non-blocking `flock`,
+and start a deterministic unit name without automatic restart. A controller-
+local `run-detached.sh` performs log redirection so the command remains
+compatible with the target's older systemd:
+
+```bash
+systemd-run \
+  --unit="aria-acl-active-matrix-${RUN_ID}" \
+  --property=Type=simple \
+  --property=WorkingDirectory="${REMOTE_ROOT}/${RUN_ID}" \
+  /usr/bin/flock -n "${WORK_DIR}/scheduler.lock" \
+  /bin/bash "${REMOTE_ROOT}/${RUN_ID}/run-detached.sh" \
+  "${WORK_DIR}/runtime.env" "${WORK_DIR}/service.log"
+```
+
+`run-detached.sh` validates both paths, sets a fixed system `PATH`, then uses
+`exec ... >>"${log}" 2>&1` to run the scheduler. The preflight first verifies
+that `systemd-run` and `flock` exist and that a trivial transient unit works on
+the target systemd version.
+
+Do not set `Restart=`. A product assertion failure must remain failed instead
+of being silently retried. The `status` command prints systemd state plus the
+current checkpoint; `collect` copies evidence only and never changes test or
+OpenStack state.
+
+- [ ] **Step 8: Test SSH-disconnect independence and launch gating**
+
+Extend the scheduler contract stubs to assert that `launch` returns after the
+unit becomes active, no child remains attached to the invoking shell, and the
+unit command references only controller-local paths. Simulate advancing two
+checkpoint timestamps and require launch success; simulate a stale checkpoint
+and require launch failure plus unit stop and owned-resource cleanup.
+
+- [ ] **Step 9: Run scheduler tests and syntax checks**
 
 Run:
 
@@ -362,9 +401,10 @@ bash ci/test_neutron_aria_acl_active_matrix_soak.sh
 bash ci/test_neutron_aria_acl_active_matrix_case.sh
 ```
 
-Expected: all commands PASS.
+Expected: all commands PASS, including detached launch, stale-checkpoint, and
+single-instance cases.
 
-- [ ] **Step 8: Commit the cluster scheduler**
+- [ ] **Step 10: Commit the cluster scheduler**
 
 ```bash
 git add deploy/kolla/smoke/neutron_aria_acl_active_matrix_soak.sh ci/test_neutron_aria_acl_active_matrix_soak.sh
@@ -471,7 +511,25 @@ Set `DEADLINE_EPOCH` far enough for exactly the first ingress ICMP stateful row 
 
 - [ ] **Step 4: Run the full matrix until the agreed deadline**
 
-Start the scheduler detached with stdout/stderr and PID under its work directory. Poll once to confirm the process is alive, all three VMs are on their requested hosts, and the first case is progressing. Do not describe the gate as passed while it is still running.
+Start the scheduler through its named `systemd-run` service on `ostack2` with
+the absolute 09:00 deadline. The workstation SSH process must not be an
+ancestor or owner of the scheduler process.
+
+Before releasing external SSH access, complete the detached launch gate:
+
+```text
+ostack2 can reach ostack3/ostack4 over the management network
+OpenStack token renewal succeeds from ostack2
+staged SHA-256 values match the CI-passed files
+systemd unit is active and the flock is held
+checkpoint advances across two one-minute ticks
+all three VMs are ACTIVE on their requested hosts
+the first active case has started
+service.log contains no immediate error
+```
+
+If any item fails, stop the unit, run cleanup, and report that the overnight
+gate did not start. Do not describe the gate as passed while it is running.
 
 - [ ] **Step 5: Collect and validate evidence**
 
@@ -505,4 +563,7 @@ git push origin v0.9-neutron-agent
 
 - [ ] **Step 7: Update the morning collection automation**
 
-Add the active-matrix work directory, `exit-code`, `complete`, `summary.json`, `metrics.tsv`, cleanup inventory, and OVS-canary result to the existing soak collection instructions. If SSH is unavailable, report collection deferred rather than test failure.
+Add the systemd unit state, active-matrix work directory, `checkpoint.json`,
+`exit-code`, `complete`, `summary.json`, `metrics.tsv`, service log, cleanup
+inventory, and OVS-canary result to the existing soak collection instructions.
+If SSH is unavailable, report collection deferred rather than test failure.
