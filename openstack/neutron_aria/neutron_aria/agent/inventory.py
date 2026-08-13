@@ -11,6 +11,7 @@ except ImportError:
 
 ELIGIBLE_OVS_TAP = "eligible_ovs_tap"
 PENDING_LOCAL_VALIDATION = "pending_local_validation"
+PORT_STATUS_DOWN = "port_status_down"
 NOT_LOCAL_HOST = "not_local_host"
 TAP_NOT_FOUND = "tap_not_found"
 IFINDEX_NOT_READY = "ifindex_not_ready"
@@ -250,6 +251,15 @@ class PortCandidateBuilder(object):
                 port_id, False,
                 "unsupported_vnic_type:%s" % vnic_type,
                 device_owner, vif_type, vnic_type,
+            ))
+
+        if (
+            str(port_get(port, "status") or "").strip().upper() == "DOWN" and
+            str(device_owner or "").strip().lower() == "compute:none"
+        ):
+            return self._with_effective_domains(port, self._port_dict(
+                port_id, False, PORT_STATUS_DOWN,
+                device_owner, vif_type or "ovs", vnic_type or "normal",
             ))
 
         return self._with_effective_domains(port, self._port_dict(

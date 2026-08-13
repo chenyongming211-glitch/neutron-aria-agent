@@ -189,6 +189,30 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertFalse(sriov_entry["eligible"])
         self.assertEqual("unsupported_vif_type:hw_veb", sriov_entry["disposition"])
 
+    def test_candidate_snapshot_does_not_project_down_compute_port(self):
+        port = neutron_port(VM_PORT, owner="compute:None")
+        port["status"] = "DOWN"
+        builder = PortCandidateBuilder("compute-1", managed_domains=["acl"])
+
+        snapshot = builder.build_snapshot([port], generation=11)
+        vm_entry = snapshot["ports"][0]
+
+        self.assertFalse(vm_entry["eligible"])
+        self.assertEqual("port_status_down", vm_entry["disposition"])
+        self.assertEqual([], vm_entry["managed_domains"])
+
+    def test_candidate_snapshot_keeps_transitional_down_nova_port(self):
+        port = neutron_port(VM_PORT, owner="compute:nova")
+        port["status"] = "DOWN"
+        builder = PortCandidateBuilder("compute-1", managed_domains=["acl"])
+
+        snapshot = builder.build_snapshot([port], generation=11)
+        vm_entry = snapshot["ports"][0]
+
+        self.assertTrue(vm_entry["eligible"])
+        self.assertEqual(PENDING_LOCAL_VALIDATION, vm_entry["disposition"])
+        self.assertEqual(["acl"], vm_entry["managed_domains"])
+
     def test_candidate_snapshot_claims_acl_domain_but_bypasses_without_binding(self):
         builder = PortCandidateBuilder(
             "compute-1",
