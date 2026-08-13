@@ -53,6 +53,11 @@ for marker in \
     grep -q "${marker}" "${CASE_SCRIPT}" || fail "missing contract marker: ${marker}"
 done
 grep -q 'item.get("Field")' "${CASE_SCRIPT}" || fail "missing legacy neutron JSON adapter"
+if grep -Fq 'awk '\''NF {print $1; exit}'\''' "${CASE_SCRIPT}"; then
+    fail "legacy create output must extract a UUID instead of its first word"
+fi
+grep -q 'uuid_re' "${CASE_SCRIPT}" || \
+    fail "resource ID parser must recognize UUIDs in legacy create messages"
 
 binding_line="$(grep -n 'delete_owned_type binding' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
 rule_line="$(grep -n 'delete_owned_type rule' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"

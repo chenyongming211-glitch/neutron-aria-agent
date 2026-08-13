@@ -145,7 +145,17 @@ neutron_cli() {
 }
 
 id_from_value() {
-    awk 'NF {print $1; exit}'
+    "${PYTHON_BIN}" -c '
+from __future__ import print_function
+import re
+import sys
+
+uuid_re = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+payload = sys.stdin.read()
+match = uuid_re.search(payload)
+if match:
+    print(match.group(0))
+'
 }
 
 record_owned() {
