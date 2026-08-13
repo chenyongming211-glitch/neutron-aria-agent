@@ -7,7 +7,6 @@ import os
 import re
 import unittest
 
-from ci.check_tc_acl_datapath import _block_after
 from ci.check_tc_acl_datapath import function_body
 
 
@@ -149,18 +148,6 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             "let result = policy::evaluate_policy(p, info.dst_port);",
             self.lib_source,
         )
-
-    def test_tc_parse_uncertainty_is_fail_open(self):
-        for direction in ("ingress", "egress"):
-            body = function_body(self.lib_source, "tc_%s" % direction)
-            failure = _block_after(body, "if !parse_tc_packet")
-            self.assertIsNotNone(failure, direction)
-            failure_body = failure[0]
-            self.assertIn("return TC_ACT_OK;", failure_body, direction)
-            self.assertNotIn("TC_ACT_SHOT", failure_body, direction)
-            self.assertNotIn("record_malformed_ip_drop_tc", failure_body, direction)
-            self.assertNotIn("record_invalid_l4_drop_tc", failure_body, direction)
-
 
 if __name__ == "__main__":
     unittest.main()

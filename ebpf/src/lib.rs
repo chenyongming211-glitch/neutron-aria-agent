@@ -31,8 +31,8 @@ use common::{
     FragmentInstallDecision, FragmentKind, PipelineCtx, CT_CONTRACT_FAMILY_IPV4,
     CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS,
     CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT, CT_CONTRACT_REASON_CT_MISS,
-    CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS,
-    DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
+    CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_INVALID_L4,
+    DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
     FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON,
     FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
     TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
@@ -58,14 +58,15 @@ const TC_ACT_SHOT: i32 = 2;
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
-    let pkt_len = (data_end - data) as u32;
+    let frame_len = data_end - data;
+    let pkt_len = frame_len as u32;
     unsafe {
         let info_ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
             None => return XDP_PASS,
         };
-        if !parser::parse_eth_ipv4(data, data_end, 0, info_ptr)
-            && !parser::parse_eth_ipv6(data, data_end, 0, info_ptr)
+        if !parser::parse_eth_ipv4(data, data_end, frame_len, 0, info_ptr)
+            && !parser::parse_eth_ipv6(data, data_end, frame_len, 0, info_ptr)
         {
             return XDP_PASS;
         }
@@ -115,11 +116,19 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
             Some(p) => p,
             None => return TC_ACT_OK,
         };
-        if !parse_tc_packet(&ctx, info_ptr, family) {
-            if let Some((invalid_family, _)) = parser::invalid_l4_failure(&*info_ptr) {
-                fragment::record_invalid_l4(invalid_family);
+        let parse_failure = parse_tc_packet(&ctx, info_ptr, family);
+        if parse_failure != 0 {
+            let mut proto = 0;
+            if parse_failure == DROP_FRAGMENT_INVALID_L4 {
+                if let Some((invalid_family, invalid_proto)) =
+                    parser::invalid_l4_failure(&*info_ptr)
+                {
+                    fragment::record_invalid_l4(invalid_family);
+                    proto = invalid_proto;
+                }
             }
-            return TC_ACT_OK;
+            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure, proto);
+            return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
@@ -311,11 +320,19 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
             Some(p) => p,
             None => return TC_ACT_OK,
         };
-        if !parse_tc_packet(&ctx, info_ptr, family) {
-            if let Some((invalid_family, _)) = parser::invalid_l4_failure(&*info_ptr) {
-                fragment::record_invalid_l4(invalid_family);
+        let parse_failure = parse_tc_packet(&ctx, info_ptr, family);
+        if parse_failure != 0 {
+            let mut proto = 0;
+            if parse_failure == DROP_FRAGMENT_INVALID_L4 {
+                if let Some((invalid_family, invalid_proto)) =
+                    parser::invalid_l4_failure(&*info_ptr)
+                {
+                    fragment::record_invalid_l4(invalid_family);
+                    proto = invalid_proto;
+                }
             }
-            return TC_ACT_OK;
+            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure, proto);
+            return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
@@ -538,50 +555,63 @@ unsafe fn load_runtime_ctx_tc(ctx: &TcContext, p: &mut PipelineCtx) {
 }
 
 #[inline(always)]
-unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo, family: u8) -> bool {
+unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo, family: u8) -> u8 {
+    let wire_len = ctx.len();
     let mut data = ctx.data();
     let mut data_end = ctx.data_end();
-    let mut parsed = parse_tc_family(data, data_end, out, family);
-    if !parsed {
-        if ctx.pull_data(0).is_err() {
-            return false;
-        }
-        data = ctx.data();
-        data_end = ctx.data_end();
-        parsed = parse_tc_family(data, data_end, out, family);
-        if !parsed {
-            return false;
-        }
+    if parse_tc_family(data, data_end, wire_len as usize, out, family) {
+        return 0;
     }
 
-    let info = &*out;
-    // TC direct packet access can stop at the linear head on non-linear skbs.
-    // That leaves ports available but zeros TCP seq/flags/payload, which breaks
-    // TCP-RT while leaving port-based features apparently healthy. Re-pull only
-    // for this suspicious truncated TCP shape and re-parse.
-    if info.proto == IPPROTO_TCP && info.tcp_flags == 0 && info.tcp_seq == 0 {
-        if ctx.pull_data(0).is_ok() {
-            data = ctx.data();
-            data_end = ctx.data_end();
-            parsed = parse_tc_family(data, data_end, out, family);
-        }
+    let pull_len = parser::bounded_tc_pull_len(wire_len);
+    if pull_len == 0 || ctx.pull_data(pull_len).is_err() {
+        return DROP_MALFORMED_IP;
     }
 
-    parsed
+    data = ctx.data();
+    data_end = ctx.data_end();
+    if parse_tc_family(data, data_end, wire_len as usize, out, family) {
+        0
+    } else {
+        parser::tc_parse_failure_reason(&*out)
+    }
 }
 
 #[inline(always)]
 unsafe fn parse_tc_family(
     data: usize,
     data_end: usize,
+    wire_len: usize,
     out: *mut parser::PacketInfo,
     family: u8,
 ) -> bool {
     if family == 4 {
-        parser::parse_eth_ipv4(data, data_end, 0, out)
+        parser::parse_eth_ipv4(data, data_end, wire_len, 0, out)
     } else {
-        parser::parse_eth_ipv6(data, data_end, 0, out)
+        parser::parse_eth_ipv6(data, data_end, wire_len, 0, out)
     }
+}
+
+#[inline(always)]
+unsafe fn record_tc_parse_drop(
+    ctx: &TcContext,
+    direction: u8,
+    pkt_len: u32,
+    reason: u8,
+    proto: u8,
+) {
+    let skb = ctx.as_ptr() as *const __sk_buff;
+    drops::record_drop(&drops::DropArgs {
+        tap_id: resolve_tap_id_for_ifindex((*skb).ifindex),
+        src_id: 0,
+        dst_id: 0,
+        pkt_len,
+        now: bpf_ktime_get_ns(),
+        reason,
+        direction,
+        proto,
+        _pad: 0,
+    });
 }
 
 #[inline(always)]

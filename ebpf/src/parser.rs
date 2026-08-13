@@ -1,5 +1,17 @@
 use crate::common::{IPPROTO_TCP, IPPROTO_UDP};
-use aria_ebpf_abi::FragmentKind;
+use aria_ebpf_abi::{FragmentKind, DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP};
+
+pub const TC_PARSE_LINEAR_BYTES: u32 = 256;
+pub const MAX_IPV6_EXTENSION_HEADERS: u8 = 8;
+
+#[inline(always)]
+pub fn bounded_tc_pull_len(packet_len: u32) -> u32 {
+    if packet_len > TC_PARSE_LINEAR_BYTES {
+        TC_PARSE_LINEAR_BYTES
+    } else {
+        packet_len
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -71,6 +83,15 @@ pub fn invalid_l4_failure(info: &PacketInfo) -> Option<(u8, u8)> {
         Some((info.invalid_l4_family, info.invalid_l4_proto))
     } else {
         None
+    }
+}
+
+#[inline(always)]
+pub fn tc_parse_failure_reason(info: &PacketInfo) -> u8 {
+    if invalid_l4_failure(info).is_some() {
+        DROP_FRAGMENT_INVALID_L4
+    } else {
+        DROP_MALFORMED_IP
     }
 }
 
@@ -165,6 +186,7 @@ unsafe fn parse_transport(
 pub unsafe fn parse_eth_ipv4(
     data: usize,
     data_end: usize,
+    wire_len: usize,
     offset: usize,
     out: *mut PacketInfo,
 ) -> bool {
@@ -206,8 +228,12 @@ pub unsafe fn parse_eth_ipv4(
     }
 
     let ip_total_len = read_be16(ip_offset, 2) as usize;
-    let available_ip_len = data_end - ip_offset;
-    if ip_total_len < ihl || ip_total_len > available_ip_len {
+    let ip_wire_offset = ip_offset - data;
+    if wire_len < ip_wire_offset {
+        return false;
+    }
+    let available_wire_ip_len = wire_len - ip_wire_offset;
+    if ip_total_len < ihl || ip_total_len > available_wire_ip_len {
         return false;
     }
     let proto = read8(ip_offset, 9);
@@ -293,6 +319,7 @@ fn is_ipv6_extension_header(next_header: u8) -> bool {
 pub unsafe fn parse_eth_ipv6(
     data: usize,
     data_end: usize,
+    wire_len: usize,
     offset: usize,
     out: *mut PacketInfo,
 ) -> bool {
@@ -326,13 +353,17 @@ pub unsafe fn parse_eth_ipv6(
     }
     let ipv6_payload_len = read_be16(ip_offset, 4) as usize;
     let payload_offset = ip_offset + 40;
-    let available_payload_len = data_end - payload_offset;
-    if ipv6_payload_len > available_payload_len {
+    let payload_wire_offset = payload_offset - data;
+    if wire_len < payload_wire_offset {
+        return false;
+    }
+    let available_wire_payload_len = wire_len - payload_wire_offset;
+    if ipv6_payload_len > available_wire_payload_len {
         return false;
     }
     let mut next_header = read8(ip_offset, 6);
 
-    // 跳过 IPv6 扩展头（最多跳过 4 层，防止 BPF 验证器拒绝无界循环）
+    // Walk a fixed number of IPv6 extension headers for legacy verifiers.
     let mut transport_offset = payload_offset;
     let mut transport_len = ipv6_payload_len;
     let mut fragment_kind = FragmentKind::Unfragmented;
@@ -342,7 +373,7 @@ pub unsafe fn parse_eth_ipv6(
     let mut fragment_proto = next_header;
     let mut fragment_payload_len = 0;
     let mut i = 0u8;
-    while i < 4 && is_ipv6_extension_header(next_header) {
+    while i < MAX_IPV6_EXTENSION_HEADERS && is_ipv6_extension_header(next_header) {
         if transport_len < 2 || transport_offset + 2 > data_end {
             return false;
         }
