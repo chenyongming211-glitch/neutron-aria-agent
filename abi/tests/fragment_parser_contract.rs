@@ -5,7 +5,9 @@ mod common {
 #[path = "../../ebpf/src/parser.rs"]
 mod parser;
 
-use aria_ebpf_abi::{FragmentKind, IPPROTO_TCP, IPPROTO_UDP};
+use aria_ebpf_abi::{
+    FragmentKind, DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, IPPROTO_TCP, IPPROTO_UDP,
+};
 use core::mem::MaybeUninit;
 
 fn ethernet(ethertype: u16) -> Vec<u8> {
@@ -139,24 +141,118 @@ fn ipv6_fragment_with_destination_options(
     frame
 }
 
+fn ipv6_udp_with_destination_options(extension_count: usize) -> Vec<u8> {
+    let mut frame = ethernet(0x86dd);
+    let payload_len = extension_count * 8 + 8;
+    assert!(payload_len <= u16::MAX as usize);
+    frame.extend_from_slice(&[
+        0x60,
+        0,
+        0,
+        0,
+        (payload_len >> 8) as u8,
+        payload_len as u8,
+        if extension_count == 0 { IPPROTO_UDP } else { 60 },
+        64,
+        0x20,
+        0x01,
+        0x0d,
+        0xb8,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0x20,
+        0x01,
+        0x0d,
+        0xb8,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        53,
+    ]);
+    for index in 0..extension_count {
+        frame.extend_from_slice(&[
+            if index + 1 == extension_count {
+                IPPROTO_UDP
+            } else {
+                60
+            },
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
+    }
+    frame.extend_from_slice(&[0x9c, 0x40, 0x00, 0x35, 0x00, 0x08, 0, 0]);
+    frame
+}
+
+unsafe fn parse_v4_with_linear_len(
+    frame: &[u8],
+    linear_len: usize,
+    out: *mut parser::PacketInfo,
+) -> bool {
+    assert!(linear_len <= frame.len());
+    parser::parse_eth_ipv4(
+        frame.as_ptr() as usize,
+        frame.as_ptr() as usize + linear_len,
+        frame.len(),
+        0,
+        out,
+    )
+}
+
+unsafe fn parse_v6_with_linear_len(
+    frame: &[u8],
+    linear_len: usize,
+    out: *mut parser::PacketInfo,
+) -> bool {
+    assert!(linear_len <= frame.len());
+    parser::parse_eth_ipv6(
+        frame.as_ptr() as usize,
+        frame.as_ptr() as usize + linear_len,
+        frame.len(),
+        0,
+        out,
+    )
+}
+
 unsafe fn parse_v4(frame: &[u8]) -> parser::PacketInfo {
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    assert!(parser::parse_eth_ipv4(
-        frame.as_ptr() as usize,
-        frame.as_ptr() as usize + frame.len(),
-        0,
-        out.as_mut_ptr(),
+    assert!(parse_v4_with_linear_len(
+        frame,
+        frame.len(),
+        out.as_mut_ptr()
     ));
     out.assume_init()
 }
 
 unsafe fn parse_v6(frame: &[u8]) -> parser::PacketInfo {
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    assert!(parser::parse_eth_ipv6(
-        frame.as_ptr() as usize,
-        frame.as_ptr() as usize + frame.len(),
-        0,
-        out.as_mut_ptr(),
+    assert!(parse_v6_with_linear_len(
+        frame,
+        frame.len(),
+        out.as_mut_ptr()
     ));
     out.assume_init()
 }
@@ -180,21 +276,101 @@ fn fragment_parser_non_ip_ethernet_remains_an_unsupported_pass_candidate() {
 }
 
 #[test]
+fn fragment_tc_parser_accepts_ipv4_when_only_payload_is_not_linear() {
+    let mut udp_and_payload = vec![0; 72];
+    let udp_len = udp_and_payload.len() as u16;
+    udp_and_payload[0..2].copy_from_slice(&40000u16.to_be_bytes());
+    udp_and_payload[2..4].copy_from_slice(&53u16.to_be_bytes());
+    udp_and_payload[4..6].copy_from_slice(&udp_len.to_be_bytes());
+    let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, false, &udp_and_payload);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+
+    assert!(unsafe { parse_v4_with_linear_len(&frame, 14 + 20 + 8, out.as_mut_ptr()) });
+    let info = unsafe { out.assume_init() };
+    assert_eq!((info.src_port, info.dst_port), (40000, 53));
+}
+
+#[test]
+fn fragment_tc_parser_accepts_ipv6_when_only_payload_is_not_linear() {
+    let mut frame = ipv6_udp_with_destination_options(0);
+    frame.extend_from_slice(&[0; 64]);
+    let payload_len = (frame.len() - 14 - 40) as u16;
+    frame[14 + 4..14 + 6].copy_from_slice(&payload_len.to_be_bytes());
+    frame[14 + 40 + 4..14 + 40 + 6].copy_from_slice(&payload_len.to_be_bytes());
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+
+    assert!(unsafe { parse_v6_with_linear_len(&frame, 14 + 40 + 8, out.as_mut_ptr()) });
+    let info = unsafe { out.assume_init() };
+    assert_eq!((info.src_port, info.dst_port), (40000, 53));
+}
+
+#[test]
+fn fragment_tc_parser_requires_the_complete_selected_tcp_header_to_be_linear() {
+    let mut tcp = vec![0; 60];
+    tcp[0..2].copy_from_slice(&40000u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&443u16.to_be_bytes());
+    tcp[12] = 15 << 4;
+    let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, false, &tcp);
+    let mut short = MaybeUninit::<parser::PacketInfo>::zeroed();
+    let mut complete = MaybeUninit::<parser::PacketInfo>::zeroed();
+
+    assert!(!unsafe { parse_v4_with_linear_len(&frame, 14 + 20 + 20, short.as_mut_ptr()) });
+    assert!(unsafe { parse_v4_with_linear_len(&frame, 14 + 20 + 60, complete.as_mut_ptr()) });
+    let info = unsafe { complete.assume_init() };
+    assert_eq!((info.src_port, info.dst_port), (40000, 443));
+}
+
+#[test]
+fn fragment_tc_parser_pull_length_is_nonzero_and_bounded() {
+    assert_eq!(parser::TC_PARSE_LINEAR_BYTES, 256);
+    assert_eq!(parser::bounded_tc_pull_len(128), 128);
+    assert_eq!(parser::bounded_tc_pull_len(1500), 256);
+}
+
+#[test]
+fn fragment_tc_parser_accepts_five_ipv6_extension_headers() {
+    let frame = ipv6_udp_with_destination_options(5);
+    let info = unsafe { parse_v6(&frame) };
+
+    assert_eq!((info.src_port, info.dst_port), (40000, 53));
+}
+
+#[test]
+fn fragment_tc_parser_accepts_eight_ipv6_extension_headers() {
+    assert_eq!(parser::MAX_IPV6_EXTENSION_HEADERS, 8);
+    let frame = ipv6_udp_with_destination_options(8);
+    let info = unsafe { parse_v6(&frame) };
+
+    assert_eq!((info.src_port, info.dst_port), (40000, 53));
+}
+
+#[test]
+fn fragment_tc_parser_rejects_ninth_ipv6_extension_header_as_malformed() {
+    let frame = ipv6_udp_with_destination_options(9);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+
+    assert!(!unsafe { parse_v6_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) });
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), None);
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_MALFORMED_IP
+    );
+}
+
+#[test]
 fn fragment_parser_incomplete_supported_ipv4_is_a_malformed_drop_candidate() {
     let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, false, &[0; 4]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
 
     assert_eq!(classified_ip_family(&frame), 4);
-    assert!(!unsafe {
-        parser::parse_eth_ipv4(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    });
+    assert!(!unsafe { parse_v4_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) });
     let info = unsafe { out.assume_init() };
     assert_eq!(parser::invalid_l4_failure(&info), None);
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_MALFORMED_IP
+    );
 }
 
 #[test]
@@ -209,16 +385,13 @@ fn fragment_parser_incomplete_vlan_ipv6_is_a_malformed_drop_candidate() {
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
 
     assert_eq!(classified_ip_family(&frame), 6);
-    assert!(!unsafe {
-        parser::parse_eth_ipv6(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    });
+    assert!(!unsafe { parse_v6_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) });
     let info = unsafe { out.assume_init() };
     assert_eq!(parser::invalid_l4_failure(&info), None);
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_MALFORMED_IP
+    );
 }
 
 #[test]
@@ -253,14 +426,7 @@ fn fragment_parser_ipv4_non_initial_never_reads_payload_as_ports() {
 fn fragment_parser_ipv4_incomplete_udp_datagram_is_rejected() {
     let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, false, &[0x9c, 0x40, 0x00, 0x35]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    let accepted = unsafe {
-        parser::parse_eth_ipv4(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v4_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
 }
@@ -274,18 +440,15 @@ fn fragment_parser_ipv4_incomplete_udp_first_fragment_is_rejected() {
         (*out.as_mut_ptr()).dst_port = 65001;
         (*out.as_mut_ptr()).fragment_id = u32::MAX;
     }
-    let accepted = unsafe {
-        parser::parse_eth_ipv4(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v4_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
     let info = unsafe { out.assume_init() };
     assert_eq!(parser::invalid_l4_failure(&info), Some((4, IPPROTO_UDP)));
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_FRAGMENT_INVALID_L4
+    );
     assert_eq!((info.src_port, info.dst_port), (0, 0));
     assert_eq!(info.fragment_id, 0);
 }
@@ -295,14 +458,7 @@ fn fragment_parser_ipv4_ethertype_with_ipv6_version_never_marks_invalid_l4() {
     let mut frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, true, &[0; 4]);
     frame[14] = 0x65;
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    let accepted = unsafe {
-        parser::parse_eth_ipv4(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v4_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
     let info = unsafe { out.assume_init() };
@@ -313,32 +469,30 @@ fn fragment_parser_ipv4_ethertype_with_ipv6_version_never_marks_invalid_l4() {
 fn fragment_parser_ipv4_truncated_tcp_base_header_is_rejected() {
     let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, true, &[0; 19]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    let accepted = unsafe {
-        parser::parse_eth_ipv4(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v4_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), Some((4, IPPROTO_TCP)));
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_FRAGMENT_INVALID_L4
+    );
 }
 
 #[test]
 fn fragment_parser_ipv6_incomplete_udp_first_fragment_is_rejected() {
     let frame = ipv6_fragment(0x1234_5678, 0, true, &[0x9c, 0x40, 0x00, 0x35]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    let accepted = unsafe {
-        parser::parse_eth_ipv6(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v6_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), Some((6, IPPROTO_UDP)));
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_FRAGMENT_INVALID_L4
+    );
 }
 
 #[test]
@@ -351,18 +505,15 @@ fn fragment_parser_ipv6_incomplete_tcp_first_fragment_is_rejected() {
         (*out.as_mut_ptr()).dst_port = 65001;
         (*out.as_mut_ptr()).fragment_id = u32::MAX;
     }
-    let accepted = unsafe {
-        parser::parse_eth_ipv6(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v6_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
     let info = unsafe { out.assume_init() };
     assert_eq!(parser::invalid_l4_failure(&info), Some((6, IPPROTO_TCP)));
+    assert_eq!(
+        parser::tc_parse_failure_reason(&info),
+        DROP_FRAGMENT_INVALID_L4
+    );
     assert_eq!((info.src_port, info.dst_port), (0, 0));
     assert_eq!(info.fragment_id, 0);
 }
@@ -373,14 +524,7 @@ fn fragment_parser_ipv6_ethertype_with_ipv4_version_never_marks_invalid_l4() {
     frame[14] = 0x40;
     frame[14 + 40] = IPPROTO_TCP;
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    let accepted = unsafe {
-        parser::parse_eth_ipv6(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v6_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
     let info = unsafe { out.assume_init() };
@@ -393,14 +537,7 @@ fn fragment_parser_ipv4_tcp_data_offset_must_fit_first_fragment() {
     tcp[12] = 6 << 4;
     let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, true, &tcp);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
-    let accepted = unsafe {
-        parser::parse_eth_ipv4(
-            frame.as_ptr() as usize,
-            frame.as_ptr() as usize + frame.len(),
-            0,
-            out.as_mut_ptr(),
-        )
-    };
+    let accepted = unsafe { parse_v4_with_linear_len(&frame, frame.len(), out.as_mut_ptr()) };
 
     assert!(!accepted);
 }
