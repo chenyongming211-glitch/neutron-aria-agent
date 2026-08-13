@@ -983,6 +983,8 @@ impl StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_state_path() -> String {
@@ -991,6 +993,155 @@ mod tests {
             .unwrap()
             .as_nanos();
         format!("/tmp/aria-firewall-test-{}", nanos)
+    }
+
+    fn assert_no_atomic_state_temp_files(state_path: &str) {
+        let leftovers = fs::read_dir(state_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with("state.json.tmp."))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "atomic state writer left temporary files: {:?}",
+            leftovers
+        );
+    }
+
+    #[test]
+    fn atomic_state_file_pre_rename_failure_preserves_previous_bytes() {
+        let state_path = unique_state_path();
+        fs::create_dir_all(&state_path).unwrap();
+        let state_file = Path::new(&state_path).join("state.json");
+        let mut previous = FirewallState::default();
+        previous.add_group("committed", "10.0.0.0/24").unwrap();
+        let previous_bytes = serde_json::to_vec_pretty(&previous).unwrap();
+        fs::write(&state_file, &previous_bytes).unwrap();
+
+        let mut next = previous.clone();
+        next.add_group("uncommitted", "10.0.1.0/24").unwrap();
+        let next_bytes = serde_json::to_vec_pretty(&next).unwrap();
+        let error = persist_state_file_atomically_with_hook(
+            &state_file,
+            &next_bytes,
+            |phase| match phase {
+                AtomicStateWritePhase::AfterFileSync => {
+                    Err("forced crash before rename".to_string())
+                }
+                AtomicStateWritePhase::AfterRename => Ok(()),
+            },
+        )
+        .expect_err("pre-rename crash boundary must abort publication");
+
+        assert!(error.contains("forced crash before rename"));
+        assert_eq!(fs::read(&state_file).unwrap(), previous_bytes);
+        let decoded: FirewallState =
+            serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
+        assert!(decoded.groups.contains_key("committed"));
+        assert!(!decoded.groups.contains_key("uncommitted"));
+        assert_no_atomic_state_temp_files(&state_path);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn atomic_state_file_compacted_empty_wal_recovers_previous_snapshot_on_failure() {
+        let state_path = unique_state_path();
+        fs::create_dir_all(&state_path).unwrap();
+        let state_file = Path::new(&state_path).join("state.json");
+        let mut previous = FirewallState::default();
+        let src_id = previous.add_group("src", "10.1.0.0/24").unwrap();
+        let dst_id = previous.add_group("dst", "10.2.0.0/24").unwrap();
+        previous
+            .apply_add_rule(src_id, dst_id, 6, 1, None, 0)
+            .unwrap();
+        fs::write(&state_file, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+        fs::write(Path::new(&state_path).join("state.wal"), b"").unwrap();
+
+        let mut next = previous.clone();
+        next.add_group("uncommitted", "10.3.0.0/24").unwrap();
+        let error = persist_state_file_atomically_with_hook(
+            &state_file,
+            &serde_json::to_vec_pretty(&next).unwrap(),
+            |phase| match phase {
+                AtomicStateWritePhase::AfterFileSync => {
+                    Err("forced crash with compacted WAL".to_string())
+                }
+                AtomicStateWritePhase::AfterRename => Ok(()),
+            },
+        )
+        .expect_err("pre-rename failure must preserve compacted baseline");
+
+        assert!(error.contains("forced crash with compacted WAL"));
+        let recovered = crate::wal::load_with_wal(&state_path);
+        assert!(recovered.groups.contains_key("src"));
+        assert!(recovered.groups.contains_key("dst"));
+        assert!(!recovered.groups.contains_key("uncommitted"));
+        assert_eq!(recovered.rules.len(), 1);
+        assert_no_atomic_state_temp_files(&state_path);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn atomic_state_file_success_and_post_rename_failure_are_never_torn() {
+        for (label, fail_after_rename) in [("success", false), ("post-rename", true)] {
+            let state_path = format!("{}-{}", unique_state_path(), label);
+            fs::create_dir_all(&state_path).unwrap();
+            let state_file = Path::new(&state_path).join("state.json");
+            fs::write(&state_file, b"{\"groups\":{}}").unwrap();
+            let mut next = FirewallState::default();
+            next.add_group("published", "192.0.2.0/24").unwrap();
+            let next_bytes = serde_json::to_vec_pretty(&next).unwrap();
+
+            let result = persist_state_file_atomically_with_hook(
+                &state_file,
+                &next_bytes,
+                |phase| {
+                    if fail_after_rename && phase == AtomicStateWritePhase::AfterRename {
+                        Err("forced crash after rename".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+
+            if fail_after_rename {
+                assert!(result
+                    .expect_err("post-rename boundary must report uncertain durability")
+                    .contains("forced crash after rename"));
+            } else {
+                result.expect("atomic publication should succeed");
+            }
+            assert_eq!(fs::read(&state_file).unwrap(), next_bytes);
+            let decoded: FirewallState =
+                serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
+            assert!(decoded.groups.contains_key("published"));
+            assert_no_atomic_state_temp_files(&state_path);
+            let _ = fs::remove_dir_all(&state_path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_state_file_state_manager_replaces_target_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let state_path = unique_state_path();
+        let manager = StateManager::new(&state_path);
+        manager.set_tap_id(41).unwrap();
+        let state_file = Path::new(&state_path).join("state.json");
+        let first_inode = fs::metadata(&state_file).unwrap().ino();
+
+        manager.set_tap_id(42).unwrap();
+        let second_inode = fs::metadata(&state_file).unwrap().ino();
+
+        assert_ne!(
+            first_inode, second_inode,
+            "StateManager must replace state.json instead of truncating it in place"
+        );
+        assert_eq!(manager.get_tap_id().unwrap(), 42);
+        assert_no_atomic_state_temp_files(&state_path);
+        let _ = fs::remove_dir_all(&state_path);
     }
 
     #[test]
