@@ -1,7 +1,7 @@
 # REVIEW-TXN-031/034 Delete Failure Recovery Implementation Plan
 
-**Status:** Tasks 1-3 complete; exact RED/GREEN hosted evidence captured;
-Task 4 documentation closure in progress
+**Status:** complete; exact RED/GREEN and documentation-head hosted evidence
+captured
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
@@ -443,7 +443,7 @@ git diff --check
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit and push closure**
+- [x] **Step 5: Commit and push closure**
 
 ```bash
 git add docs/superpowers/specs/2026-08-13-review-txn-031-034-delete-failure-recovery-design.md \
@@ -455,11 +455,16 @@ git commit -m "docs: close delete failure recovery"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 6: Verify final exact-head state**
+- [x] **Step 6: Verify final exact-head state**
 
 Require the documentation HEAD Build to pass its selected fast/static lanes,
 then verify a clean worktree and divergence `0 0`. Do not relabel the hosted
 run as privileged datapath evidence.
+
+Closure commit `2a7f58a` / Build
+[31699371226](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31699371226)
+passed every selected docs/fast/static lane. This is hosted contract evidence,
+not privileged datapath evidence.
 
 ---
 
