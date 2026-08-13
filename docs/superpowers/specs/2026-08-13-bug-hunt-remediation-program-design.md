@@ -205,6 +205,8 @@ This program is complete only when:
 - the REVIEW register, architecture contracts and batch documents agree on
   severity, status and product scope.
 
-The immediate next design is the bounded `REVIEW-ACL-075/076` TC parser safety
-batch. No production code for that batch is authorized by this program index
-alone; its own written design and RED plan remain mandatory.
+The immediate next batch is the bounded `REVIEW-ACL-075/076` TC parser safety
+work. Its independent
+[design](2026-08-13-acl-075-076-tc-parser-safety-design.md) and
+[RED/GREEN implementation plan](../plans/2026-08-13-acl-075-076-tc-parser-safety.md)
+are now recorded. No RED test or production implementation has landed yet.

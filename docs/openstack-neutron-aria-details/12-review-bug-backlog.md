@@ -1145,6 +1145,16 @@ Risk follow-up remains separate from active bug fixing:
     convert conditional, withdrawn, merged, or defensive-debt rows into active
     production defects.
 
+    The first production batch now has a separate reviewed boundary in
+    [`2026-08-13-acl-075-076-tc-parser-safety-design.md`](../superpowers/specs/2026-08-13-acl-075-076-tc-parser-safety-design.md)
+    and an executable
+    [RED/GREEN plan](../superpowers/plans/2026-08-13-acl-075-076-tc-parser-safety.md).
+    It retains direct-parse fast paths, separates skb wire length from linear
+    header bytes, caps fallback pulling at 256 bytes, accepts up to eight
+    supported IPv6 extension headers, and fails closed only after a supported
+    IP packet remains outside that bounded parser envelope. No RED or
+    production code has landed, and target-kernel evidence remains pending.
+
 Verification and closure follow-up:
 
 - `REVIEW-ACL-012`: fixed by the clean-container entrypoint transaction and
