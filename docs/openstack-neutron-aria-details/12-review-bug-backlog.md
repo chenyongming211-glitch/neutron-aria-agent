@@ -1138,6 +1138,13 @@ Risk follow-up remains separate from active bug fixing:
     remaining rows narrowed to verified impact. Batch by severity; the P1 set
     must be reviewed against the RC before production activation.
 
+    The approved remediation boundary, architecture-contract mapping, evidence
+    rules, and fixed batch order are recorded in
+    [`2026-08-13-bug-hunt-remediation-program-design.md`](../superpowers/specs/2026-08-13-bug-hunt-remediation-program-design.md).
+    The register remains the status authority; the program document does not
+    convert conditional, withdrawn, merged, or defensive-debt rows into active
+    production defects.
+
 Verification and closure follow-up:
 
 - `REVIEW-ACL-012`: fixed by the clean-container entrypoint transaction and
