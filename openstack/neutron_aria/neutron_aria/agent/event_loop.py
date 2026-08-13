@@ -216,6 +216,7 @@ class SnapshotSynchronizer(object):
         phase_started = time.time()
         self.recover_pending_state()
         pending_recovery_ms = _elapsed_ms(phase_started)
+        previously_projected_port_ids = set(self.projected_port_ids)
 
         phase_started = time.time()
         ports = self._list_ports()
@@ -455,6 +456,10 @@ class SnapshotSynchronizer(object):
             scope="full_host",
             ports=ports,
         )
+        for removed_port_id in sorted(
+            previously_projected_port_ids - self.projected_port_ids
+        ):
+            self._remove_reported_port_status(removed_port_id)
 
         phase_started = time.time()
         heartbeat = self.report_status()
@@ -643,6 +648,7 @@ class SnapshotSynchronizer(object):
             )
             self.state_store.commit_delete(port_id)
             self.runtime_status.remove_port_status(port_id)
+            self._remove_reported_port_status(port_id)
         except Exception as exc:
             self.runtime_status.mark_degraded(
                 "pending_delete_unresolved",
@@ -657,6 +663,20 @@ class SnapshotSynchronizer(object):
             len(self.projected_port_ids),
         )
         return response
+
+    def _remove_reported_port_status(self, port_id):
+        method = getattr(self.status_reporter, "remove_port_status", None)
+        if method is None:
+            return
+        try:
+            method(port_id)
+        except Exception as exc:
+            LOG.warning(
+                "port_status_delete_failed host=%s port_id=%s error=%s",
+                self.host,
+                port_id,
+                exc,
+            )
 
     def recover_pending_state(self):
         recovered = []

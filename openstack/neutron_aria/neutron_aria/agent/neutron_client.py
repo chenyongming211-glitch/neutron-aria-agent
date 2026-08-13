@@ -2,6 +2,8 @@ from __future__ import absolute_import
 
 import os
 
+from neutron_aria.db.aria_acl.query import encode_port_status_id
+
 
 class PortSourceUnavailable(Exception):
     pass
@@ -132,6 +134,21 @@ class AriaAclRestClient(object):
             return post(self.COLLECTIONS["aria_acl_port_statuses"], body=body)
         except TypeError:
             return post(self.COLLECTIONS["aria_acl_port_statuses"], body)
+
+    def delete_aria_acl_port_status(self, port_id, host):
+        delete = getattr(self.neutron_client, "delete", None)
+        if delete is None:
+            raise NeutronClientFactoryError(
+                "neutronclient does not expose generic DELETE for "
+                "/aria-acl-port-statuses"
+            )
+        status_id = encode_port_status_id(port_id, host)
+        return delete(
+            "%s/%s" % (
+                self.COLLECTIONS["aria_acl_port_statuses"],
+                status_id,
+            )
+        )
 
     def _list(self, collection):
         values = []

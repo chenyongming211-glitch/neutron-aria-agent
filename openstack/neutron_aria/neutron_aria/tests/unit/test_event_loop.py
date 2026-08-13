@@ -712,6 +712,7 @@ class AcceptedSlowPendingThenConvergedLocalClient(FakeLocalClient):
 class FakeStatusReporter(object):
     def __init__(self):
         self.statuses = []
+        self.removed_port_statuses = []
 
     def report(self, runtime_status):
         payload = runtime_status.heartbeat_payload()
@@ -721,6 +722,9 @@ class FakeStatusReporter(object):
             "host": payload["host"],
             "configurations": payload,
         }
+
+    def remove_port_status(self, port_id):
+        self.removed_port_statuses.append(port_id)
 
 
 class FailingStatusReporter(object):
@@ -1005,6 +1009,31 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertTrue(result["status"]["ready"])
         self.assertEqual([], result["status"]["last_port_statuses"])
         self.assertEqual(set(), sync.projected_port_ids)
+
+    def test_full_resync_removes_status_for_port_no_longer_on_host(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "device_owner": "compute:nova",
+            "binding:host_id": "compute-1",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        reporter = FakeStatusReporter()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            port_source,
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+            status_reporter=reporter,
+        )
+        sync.full_resync()
+        port_source.ports = []
+
+        sync.full_resync()
+
+        self.assertEqual([port_id], reporter.removed_port_statuses)
 
     def test_full_resync_reuses_generation_for_same_desired_state(self):
         port_source = StaticPortSource([{

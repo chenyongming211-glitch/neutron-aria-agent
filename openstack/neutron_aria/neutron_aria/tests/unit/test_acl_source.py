@@ -15,6 +15,7 @@ from neutron_aria.agent.config import AgentConfig
 from neutron_aria.agent.neutron_client import AriaAclRestClient
 from neutron_aria.agent.neutron_client import NeutronClientFactoryError
 from neutron_aria.agent.neutron_client import build_port_source
+from neutron_aria.db.aria_acl.query import encode_port_status_id
 
 
 class AclSourceTestCase(unittest.TestCase):
@@ -521,6 +522,30 @@ class AclSourceTestCase(unittest.TestCase):
         self.assertEqual(
             "port-1",
             result["aria_acl_port_statuses"][0]["port_id"],
+        )
+
+    def test_aria_acl_rest_client_deletes_exact_host_port_status(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.paths = []
+
+            def delete(self, path):
+                self.paths.append(path)
+                return {"ok": True}
+
+        client = FakeNeutronClient()
+        result = AriaAclRestClient(client).delete_aria_acl_port_status(
+            "port-1",
+            host="compute-1",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            "/aria-acl-port-statuses/%s" % encode_port_status_id(
+                "port-1",
+                "compute-1",
+            ),
+            client.paths[0],
         )
 
     def test_unknown_source_fails_fast(self):

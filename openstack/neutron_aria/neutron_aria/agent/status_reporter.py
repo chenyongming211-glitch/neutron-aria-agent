@@ -218,14 +218,52 @@ class AriaAclPortStatusReporter(object):
         self.aria_acl_api = aria_acl_api
         self.context = context
         self.host = host
+        self.pending_deleted_port_ids = set()
 
     def report(self, runtime_status):
+        deleted = self._flush_pending_deletes()
         reported = []
         for status in runtime_status.last_port_statuses:
             payload = self._port_status_payload(runtime_status, status)
             self._report_one(payload)
             reported.append(payload)
-        return {"reported_port_statuses": len(reported), "port_statuses": reported}
+        return {
+            "reported_port_statuses": len(reported),
+            "deleted_port_statuses": deleted,
+            "port_statuses": reported,
+        }
+
+    def remove_port_status(self, port_id):
+        self.pending_deleted_port_ids.add(port_id)
+        self._delete_one(port_id)
+        self.pending_deleted_port_ids.discard(port_id)
+
+    def _flush_pending_deletes(self):
+        deleted = 0
+        for port_id in sorted(self.pending_deleted_port_ids):
+            self._delete_one(port_id)
+            self.pending_deleted_port_ids.discard(port_id)
+            deleted += 1
+        return deleted
+
+    def _delete_one(self, port_id):
+        method = getattr(
+            self.aria_acl_api,
+            "delete_aria_acl_port_status",
+            None,
+        )
+        if method is None:
+            raise StatusReportError(
+                "aria_acl API does not expose delete_aria_acl_port_status"
+            )
+        try:
+            return method(
+                self.context,
+                port_id,
+                host=self.host,
+            )
+        except TypeError:
+            return method(port_id, host=self.host)
 
     def _port_status_payload(self, runtime_status, status):
         source = dict(status)
@@ -311,6 +349,14 @@ class CompositeStatusReporter(object):
         if len(results) == 1:
             return results[0]
         return {"results": results}
+
+    def remove_port_status(self, port_id):
+        results = []
+        for reporter in self.reporters:
+            method = getattr(reporter, "remove_port_status", None)
+            if method is not None:
+                results.append(method(port_id))
+        return results
 
 
 def report_state_topic(topics):

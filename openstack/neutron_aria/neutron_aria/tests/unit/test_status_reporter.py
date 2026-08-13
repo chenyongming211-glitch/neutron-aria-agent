@@ -31,10 +31,15 @@ class FailingReportStateApi(object):
 class FakeAriaAclApi(object):
     def __init__(self):
         self.statuses = []
+        self.deleted_statuses = []
 
     def report_aria_acl_port_status(self, context, body):
         self.statuses.append((context, body))
         return body
+
+    def delete_aria_acl_port_status(self, context, port_id, host=None):
+        self.deleted_statuses.append((context, port_id, host))
+        return {}
 
 
 class StatusReporterTestCase(unittest.TestCase):
@@ -477,6 +482,41 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertNotIn("desired_hash", payload)
         self.assertNotIn("managed_domains", payload)
         self.assertNotIn("domains", payload)
+
+    def test_port_status_reporter_retries_exact_host_delete(self):
+        class FailOnceAriaAclApi(FakeAriaAclApi):
+            def __init__(self):
+                FakeAriaAclApi.__init__(self)
+                self.attempts = 0
+
+            def delete_aria_acl_port_status(self, context, port_id, host=None):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("status database unavailable")
+                return FakeAriaAclApi.delete_aria_acl_port_status(
+                    self,
+                    context,
+                    port_id,
+                    host=host,
+                )
+
+        api = FailOnceAriaAclApi()
+        reporter = AriaAclPortStatusReporter(
+            api,
+            context="ctx",
+            host="compute-1",
+        )
+
+        with self.assertRaises(RuntimeError):
+            reporter.remove_port_status("port-1")
+        result = reporter.report(AgentRuntimeStatus("compute-1"))
+
+        self.assertEqual(2, api.attempts)
+        self.assertEqual(
+            [("ctx", "port-1", "compute-1")],
+            api.deleted_statuses,
+        )
+        self.assertEqual(1, result["deleted_port_statuses"])
 
     def test_composite_reporter_preserves_heartbeat_and_port_status(self):
         runtime_status = AgentRuntimeStatus("compute-1")
