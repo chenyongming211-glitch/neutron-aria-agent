@@ -12065,6 +12065,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn neutron_delete_failure_status_is_phase_aware_and_never_ready_enforce() {
+        let previous = committed_runtime(65);
+        let port = previous.ports["committed-port"].clone();
+
+        let before = build_blocked_delete_runtime(
+            &previous,
+            &port,
+            65,
+            "delete_after_intent_failed",
+            "forced after-intent failure",
+            "unchanged",
+        );
+        let after = build_blocked_delete_runtime(
+            &previous,
+            &port,
+            65,
+            "delete_detach_failed",
+            "forced detach failure",
+            "bypass",
+        );
+
+        for (runtime, action) in [(&before, "unchanged"), (&after, "bypass")] {
+            assert!(runtime.ports.contains_key(&port.port_id));
+            assert_eq!(runtime.pending_generation, Some(65));
+            assert_eq!(runtime.desired_hash, None);
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            let status = runtime.port_statuses.get(&port.port_id).unwrap();
+            assert_ne!(status.status, "ready");
+            let acl = status
+                .domains
+                .iter()
+                .find(|domain| domain.domain == "acl")
+                .expect("blocked delete status must include ACL evidence");
+            assert_ne!(acl.status, "ready");
+            assert_eq!(acl.effective_action.as_deref(), Some(action));
+            assert_ne!(acl.effective_action.as_deref(), Some("enforce"));
+        }
+    }
+
+    #[tokio::test]
+    async fn neutron_delete_blocked_checkpoint_failure_keeps_truthful_ram_and_intent() {
+        let root = temp_root("delete-blocked-checkpoint-failed");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(66);
+        let port = previous.ports["committed-port"].clone();
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        state
+            .wal
+            .append_delete_intent(
+                port.port_id.clone(),
+                66,
+                vec!["attach".to_string(), "acl".to_string()],
+                port.clone(),
+            )
+            .unwrap();
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = previous.clone();
+        }
+        let backup = root.join("delete-blocked-checkpoint-state-backup");
+        let mut replacement =
+            WalParentReplacement::install(&state.registry.base_state_path, &backup);
+
+        let error = publish_blocked_delete_failure(
+            &state,
+            &previous,
+            &port,
+            66,
+            "delete_detach_failed",
+            "forced detach failure".to_string(),
+            "bypass",
+        )
+        .await;
+        replacement.restore();
+
+        assert!(error.contains("forced detach failure"));
+        assert!(error.contains("delete_blocked_checkpoint_failed:"));
+        {
+            let runtime = state.runtime.read().await;
+            assert!(runtime.ports.contains_key(&port.port_id));
+            assert_eq!(runtime.pending_generation, Some(66));
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "delete_blocked_checkpoint_failed");
+            let status = runtime.port_statuses.get(&port.port_id).unwrap();
+            assert_ne!(status.status, "ready");
+            let acl = status
+                .domains
+                .iter()
+                .find(|domain| domain.domain == "acl")
+                .expect("blocked delete status must include ACL evidence");
+            assert_eq!(acl.effective_action.as_deref(), Some("bypass"));
+        }
+        let replay = state.wal.replay();
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.kind.as_str()),
+            Some("delete")
+        );
+        assert!(replay.state.ports.contains_key(&port.port_id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn neutron_delete_commit_failure_retains_forward_recovery_intent() {
         let root = temp_root("delete-commit-failed");

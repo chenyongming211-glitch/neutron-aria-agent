@@ -1936,6 +1936,150 @@ mod tests {
     }
 
     #[test]
+    fn replay_blocked_snapshot_checkpoint_preserves_delete_intent() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(12);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        wal.append_delete_intent(
+            "p1".to_string(),
+            12,
+            vec!["attach".to_string(), "acl".to_string()],
+            managed("p1", "tap-p1"),
+        )
+        .unwrap();
+
+        let mut blocked = baseline.clone();
+        blocked.pending_generation = Some(12);
+        blocked.desired_hash = None;
+        blocked.authority_state = "blocked_recovery_required".to_string();
+        blocked.port_statuses.get_mut("p1").unwrap().status = "blocked".to_string();
+        blocked.port_statuses.get_mut("p1").unwrap().reason =
+            Some("delete_detach_failed".to_string());
+        wal.append_snapshot_commit(blocked).unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!(0, replay.failures);
+        assert_eq!(Some(12), replay.state.pending_generation);
+        assert_eq!(
+            Some("blocked"),
+            replay
+                .state
+                .port_statuses
+                .get("p1")
+                .map(|status| status.status.as_str())
+        );
+        let intent = replay
+            .pending_intent
+            .expect("blocked status checkpoint must not resolve delete intent");
+        assert_eq!("delete", intent.kind);
+        assert_eq!(12, intent.generation);
+        assert_eq!(vec!["p1".to_string()], intent.port_ids);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_mismatched_delete_commit_preserves_delete_intent() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(13);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        wal.append_delete_intent(
+            "p1".to_string(),
+            13,
+            vec!["attach".to_string(), "acl".to_string()],
+            managed("p1", "tap-p1"),
+        )
+        .unwrap();
+
+        let mut mismatched = baseline.clone();
+        mismatched.accepted_generation = 14;
+        mismatched.ports.remove("p1");
+        mismatched.port_statuses.remove("p1");
+        mismatched.pending_generation = None;
+        mismatched.desired_hash = mismatched.applied_desired_hash.clone();
+        wal.append_delete_commit(mismatched).unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!(1, replay.failures);
+        assert!(replay.state.ports.contains_key("p1"));
+        assert_eq!(
+            Some("delete"),
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.kind.as_str())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_invalid_commit_hash_preserves_delete_intent() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(14);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        wal.append_delete_intent(
+            "p1".to_string(),
+            14,
+            vec!["attach".to_string(), "acl".to_string()],
+            managed("p1", "tap-p1"),
+        )
+        .unwrap();
+
+        let mut invalid = baseline.clone();
+        invalid.status_hash = Some("0".repeat(64));
+        let invalid_commit =
+            serde_json::to_value(NeutronWalEntry::SnapshotCommit { state: invalid }).unwrap();
+        append_wal_value(&root, &invalid_commit);
+
+        let replay = wal.replay();
+
+        assert_eq!(1, replay.failures);
+        assert!(replay.state.ports.contains_key("p1"));
+        assert_eq!(
+            Some("delete"),
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.kind.as_str())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_matching_delete_commit_closes_exact_intent() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(15);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        wal.append_delete_intent(
+            "p1".to_string(),
+            15,
+            vec!["attach".to_string(), "acl".to_string()],
+            managed("p1", "tap-p1"),
+        )
+        .unwrap();
+
+        let mut committed = baseline;
+        committed.ports.remove("p1");
+        committed.port_statuses.remove("p1");
+        committed.pending_generation = None;
+        committed.desired_hash = committed.applied_desired_hash.clone();
+        wal.append_delete_commit(committed).unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!(0, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        assert!(!replay.state.ports.contains_key("p1"));
+        assert!(!replay.state.port_statuses.contains_key("p1"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn replay_snapshot_intent_without_commit_preserves_previous_commit() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
