@@ -58,6 +58,8 @@ if grep -Fq 'awk '\''NF {print $1; exit}'\''' "${CASE_SCRIPT}"; then
 fi
 grep -q 'uuid_re' "${CASE_SCRIPT}" || \
     fail "resource ID parser must recognize UUIDs in legacy create messages"
+grep -Fq '"${PYTHON_BIN}" "${GUEST_EXEC_FILE}" "${VM_IP}" "$1"' "${CASE_SCRIPT}" || \
+    fail "guest execution must use the selected Python interpreter"
 
 binding_line="$(grep -n 'delete_owned_type binding' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
 rule_line="$(grep -n 'delete_owned_type rule' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"

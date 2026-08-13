@@ -277,7 +277,7 @@ finalize() {
 }
 
 guest_exec() {
-    "${GUEST_EXEC_FILE}" "${VM_IP}" "$1"
+    "${PYTHON_BIN}" "${GUEST_EXEC_FILE}" "${VM_IP}" "$1"
 }
 
 nonce_value() {
