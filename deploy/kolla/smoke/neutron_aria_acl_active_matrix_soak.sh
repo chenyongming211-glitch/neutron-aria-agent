@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-}"
 ENV_FILE="${2:-}"
+CURRENT_CYCLE=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { printf '[acl-active-matrix] %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -80,7 +81,8 @@ event() {
 checkpoint() {
     local phase="$1" node_alias="${2:-}" case_id="${3:-}" last_result="${4:-}"
     PHASE="${phase}" NODE_ALIAS="${node_alias}" CASE_ID_VALUE="${case_id}" \
-        LAST_RESULT="${last_result}" "${PYTHON_BIN}" - "${WORK_DIR}/checkpoint.json" <<'PY'
+        LAST_RESULT="${last_result}" CYCLE_VALUE="${CURRENT_CYCLE}" \
+        "${PYTHON_BIN}" - "${WORK_DIR}/checkpoint.json" <<'PY'
 from __future__ import print_function
 import json
 import os
@@ -93,6 +95,7 @@ payload = {
     "node_alias": os.environ["NODE_ALIAS"],
     "case_id": os.environ["CASE_ID_VALUE"],
     "last_result": os.environ["LAST_RESULT"],
+    "cycle": int(os.environ["CYCLE_VALUE"]),
 }
 with open(path + ".tmp", "w") as handle:
     json.dump(payload, handle, sort_keys=True)
@@ -417,39 +420,50 @@ EOF
 
 run_matrix() {
     local direction protocol stateful selector min_port max_port nonmatch
-    local alias server port_id ip host ifname case_id case_dir start_tick
-    while IFS=$'\t' read -r direction protocol stateful selector min_port max_port nonmatch; do
-        while IFS=$'\t' read -r alias server port_id ip host ifname; do
-            if [ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]; then
-                event deadline pass "before_next_case"
-                return 0
-            fi
-            case_id="${alias}-${direction}-${protocol}-${stateful}-${selector}-${min_port}-${max_port}"
-            case_dir="${WORK_DIR}/cases/${case_id}"
-            mkdir -p "${case_dir}"
-            checkpoint case_running "${alias}" "${case_id}" start
-            start_tick="$(date +%s)"
-            if ! timeout "${CASE_TIMEOUT}" env \
-                CASE_ID="${case_id}" VM_IP="${ip}" PORT_ID="${port_id}" IFNAME="${ifname}" \
-                EXPECTED_HOST="${host}" DIRECTION="${direction}" PROTOCOL="${protocol}" \
-                STATEFUL="${stateful}" SELECTOR_KIND="${selector}" \
-                MATCH_PORT_MIN="${min_port}" MATCH_PORT_MAX="${max_port}" NONMATCH_PORT="${nonmatch}" \
-                EGRESS_TARGET_IP="${EGRESS_TARGET_IP}" GUEST_EXEC_FILE="${GUEST_EXEC}" \
-                CIRROS_PASSWORD_FILE="${GUEST_PASSWORD_FILE}" WORK_DIR="${case_dir}" \
-                NONCE_ECHO="${NONCE_ECHO}" bash "${CASE_RUNNER}" run \
-                >"${case_dir}/stdout.log" 2>&1; then
-                checkpoint case_failed "${alias}" "${case_id}" fail
-                event case fail "${case_id}"
-                return 1
-            fi
-            checkpoint case_complete "${alias}" "${case_id}" pass
-            event case pass "${case_id}"
-            while [ "$(( $(date +%s) - start_tick ))" -lt "${SCHEDULER_INTERVAL}" ]; do
-                event skipped_active_tick pass "${case_id}"
-                sleep 1
-            done
-        done <"${WORK_DIR}/vms.tsv"
-    done < <(matrix_rows)
+    local alias server port_id ip host ifname case_id case_dir start_tick elapsed crossed tick
+    while [ "$(date +%s)" -lt "${DEADLINE_EPOCH}" ]; do
+        CURRENT_CYCLE=$((CURRENT_CYCLE + 1))
+        checkpoint cycle_start "" "" pass
+        while IFS=$'\t' read -r direction protocol stateful selector min_port max_port nonmatch; do
+            while IFS=$'\t' read -r alias server port_id ip host ifname; do
+                if [ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]; then
+                    event deadline pass "before_next_case"
+                    return 0
+                fi
+                case_id="cycle${CURRENT_CYCLE}-${alias}-${direction}-${protocol}-${stateful}-${selector}-${min_port}-${max_port}"
+                case_dir="${WORK_DIR}/cases/${case_id}"
+                mkdir -p "${case_dir}"
+                checkpoint case_running "${alias}" "${case_id}" start
+                start_tick="$(date +%s)"
+                if ! timeout "${CASE_TIMEOUT}" env \
+                    CASE_ID="${case_id}" VM_IP="${ip}" PORT_ID="${port_id}" IFNAME="${ifname}" \
+                    EXPECTED_HOST="${host}" DIRECTION="${direction}" PROTOCOL="${protocol}" \
+                    STATEFUL="${stateful}" SELECTOR_KIND="${selector}" \
+                    MATCH_PORT_MIN="${min_port}" MATCH_PORT_MAX="${max_port}" NONMATCH_PORT="${nonmatch}" \
+                    EGRESS_TARGET_IP="${EGRESS_TARGET_IP}" GUEST_EXEC_FILE="${GUEST_EXEC}" \
+                    CIRROS_PASSWORD_FILE="${GUEST_PASSWORD_FILE}" WORK_DIR="${case_dir}" \
+                    NONCE_ECHO="${NONCE_ECHO}" bash "${CASE_RUNNER}" run \
+                    >"${case_dir}/stdout.log" 2>&1; then
+                    checkpoint case_failed "${alias}" "${case_id}" fail
+                    event case fail "${case_id}"
+                    return 1
+                fi
+                checkpoint case_complete "${alias}" "${case_id}" pass
+                event case pass "${case_id}"
+                elapsed=$(( $(date +%s) - start_tick ))
+                crossed=$(( elapsed / SCHEDULER_INTERVAL ))
+                tick=0
+                while [ "${tick}" -lt "${crossed}" ]; do
+                    event skipped_active_tick pass "${case_id}"
+                    tick=$((tick + 1))
+                done
+                if [ "${elapsed}" -lt "${SCHEDULER_INTERVAL}" ]; then
+                    sleep "$((SCHEDULER_INTERVAL - elapsed))"
+                fi
+            done <"${WORK_DIR}/vms.tsv"
+        done < <(matrix_rows)
+        event cycle_complete pass "cycle=${CURRENT_CYCLE}"
+    done
 }
 
 run_gate() {

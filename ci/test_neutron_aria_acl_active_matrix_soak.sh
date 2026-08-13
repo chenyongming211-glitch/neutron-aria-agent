@@ -19,6 +19,7 @@ for marker in \
     Type=simple \
     scheduler.lock \
     checkpoint.json \
+    CYCLE_VALUE \
     skipped_active_tick \
     65535 \
     'single:1' \
@@ -28,6 +29,8 @@ for marker in \
 done
 grep -q 'preflight)' "${SOAK}" || fail "missing non-mutating preflight action"
 grep -q 'item.get("Field")' "${SOAK}" || fail "missing legacy neutron JSON adapter"
+grep -q 'while \[ "$(date +%s)" -lt "${DEADLINE_EPOCH}" \]' "${SOAK}" || \
+    fail "matrix must repeat until the absolute deadline"
 
 launch_line="$(grep -n 'systemd-run' "${SOAK}" | head -1 | cut -d: -f1)"
 [ -n "${launch_line}" ] || fail "systemd launcher is missing"
