@@ -228,7 +228,6 @@ fn matching_delete_commit_valid(
     baseline: &NeutronWalState,
 ) -> Result<bool, String> {
     Ok(intent.kind == "delete"
-        && state.status_hash.is_some()
         && state.status_hash_valid()?
         && state.accepted_generation == intent.generation
         && state.accepted_generation == baseline.accepted_generation
