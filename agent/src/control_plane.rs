@@ -518,6 +518,24 @@ fn classify_preexisting_runtime_gate(
     )
 }
 
+fn preexisting_projection_validation_state<'a>(
+    state: &'a FirewallState,
+    projection_mode: GroupProjectionMode,
+    tc_runtime_complete: bool,
+    gate_disposition: RuntimeGateDisposition,
+) -> std::borrow::Cow<'a, FirewallState> {
+    if projection_mode == GroupProjectionMode::StandaloneCompatibility
+        && !tc_runtime_complete
+        && gate_disposition == RuntimeGateDisposition::ManagedQuiesced
+    {
+        let mut validation_state = state.clone();
+        validation_state.conntrack_enabled = false;
+        validation_state.acl_enabled = false;
+        return std::borrow::Cow::Owned(validation_state);
+    }
+    std::borrow::Cow::Borrowed(state)
+}
+
 fn managed_acl_registration_lifecycle(
     mode: ManagedAttachMode,
     projection_drift: Option<ProjectionDrift>,
@@ -4097,9 +4115,15 @@ impl ControlPlane {
             }
         };
 
+        let projection_validation_state = preexisting_projection_validation_state(
+            state,
+            projection_mode,
+            tc_runtime_complete,
+            gate_disposition,
+        );
         let projection_drift = match projection_mode {
             GroupProjectionMode::StandaloneCompatibility => {
-                validate_pinned_runtime_state(runtime, state)
+                validate_pinned_runtime_state(runtime, &projection_validation_state)
                     .map_or_else(ProjectionDrift::Fatal, |()| ProjectionDrift::Clean)
             }
             GroupProjectionMode::Managed => validate_managed_pinned_runtime_state(runtime, state),
@@ -8918,6 +8942,45 @@ mod tests {
             true,
         )
         .is_err());
+    }
+
+    #[test]
+    fn quiesced_incomplete_tc_projection_validation_changes_only_gate_expectations() {
+        let mut state = FirewallState::default();
+        state.tap_id = 42;
+        state.monitoring_enabled = true;
+        state.qos_enabled = false;
+        state.mirror_enabled = false;
+        state.tcprt_enabled = true;
+        state.ssl_enabled = true;
+
+        let validation_state = preexisting_projection_validation_state(
+            &state,
+            GroupProjectionMode::StandaloneCompatibility,
+            false,
+            RuntimeGateDisposition::ManagedQuiesced,
+        );
+
+        assert!(!validation_state.conntrack_enabled);
+        assert!(!validation_state.acl_enabled);
+        assert_eq!(validation_state.tap_id, state.tap_id);
+        assert_eq!(validation_state.monitoring_enabled, state.monitoring_enabled);
+        assert_eq!(validation_state.qos_enabled, state.qos_enabled);
+        assert_eq!(validation_state.mirror_enabled, state.mirror_enabled);
+        assert_eq!(validation_state.tcprt_enabled, state.tcprt_enabled);
+        assert_eq!(validation_state.ssl_enabled, state.ssl_enabled);
+        assert!(state.conntrack_enabled);
+        assert!(state.acl_enabled);
+
+        assert!(matches!(
+            preexisting_projection_validation_state(
+                &state,
+                GroupProjectionMode::StandaloneCompatibility,
+                true,
+                RuntimeGateDisposition::Desired,
+            ),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
