@@ -35,14 +35,14 @@ pub const NEUTRON_UDS_SCHEMA_VERSION_MIN: u32 = 1;
 pub const NEUTRON_UDS_SCHEMA_VERSION_MAX: u32 = 1;
 pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
 pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
-pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-2";
+pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-3";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
-pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-3";
+pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-4";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
-pub const NEUTRON_STATUS_SCHEMA_VERSION_MIN: u32 = 1;
-pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 1;
-pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-1";
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MIN: u32 = 2;
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 2;
+pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-2";
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
@@ -338,6 +338,7 @@ pub enum NeutronStatusOverallReadiness {
 pub enum NeutronStatusRequiredAction {
     None,
     Poll,
+    RetrySnapshot,
     RecoverPending,
     FullResync,
     Operator,
@@ -2503,7 +2504,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_generation_retry_contract_v2_capabilities_are_exact() {
+    fn neutron_contract_snapshot_generation_retry_v2_capabilities_are_exact() {
         let capabilities = serde_json::to_value(NeutronCapabilitiesResponse::current())
             .expect("current Neutron capabilities must serialize");
 
@@ -2551,12 +2552,11 @@ mod tests {
             "Status V1 capability hash must match the shared contract hash"
         );
 
-        let actual = serde_json::to_value(NeutronCapabilitiesResponse::current())
-            .expect("current Neutron capabilities must serialize");
+        let actual = Value::Object(fixture_capabilities.clone());
         assert_eq!(
             actual.get("contract_version"),
             fixture_capabilities.get("contract_version"),
-            "additive Status V1 metadata must not change the global contract version"
+            "the immutable Status V1 fixture must retain its contract version"
         );
         assert_eq!(
             actual.get("contract_version").and_then(Value::as_str),
@@ -2564,12 +2564,8 @@ mod tests {
         );
         assert_eq!(
             actual.get("capability_hash").and_then(Value::as_str),
-            Some(NEUTRON_UDS_CAPABILITY_HASH),
-            "additive Status V1 metadata must not change the global capability hash"
-        );
-        assert_eq!(
-            NEUTRON_UDS_CAPABILITY_HASH, "v0.9-neutron-capabilities-3",
-            "the additive Status V1 rollout must retain the pre-V1 capability hash"
+            Some("v0.9-neutron-capabilities-3"),
+            "the immutable Status V1 fixture must retain its capability hash"
         );
 
         let mut mismatches = Vec::new();

@@ -127,6 +127,7 @@ REQUIRED_PYTHON_BEHAVIORS = (
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 STATUS_FIXTURE_PATH = "docs/neutron-status-contract-v1-scenarios.json"
+STATUS_V2_FIXTURE_PATH = "docs/neutron-status-contract-v2-scenarios.json"
 DOMAIN_STATUS_DOC_PATH = os.path.join(
     "docs", "openstack-neutron-aria-details", "05-domain-status-heartbeat.md"
 )
@@ -428,8 +429,8 @@ def check_rust_uds_contract_source():
         "api_version": "NEUTRON_UDS_API_VERSION", "contract_version": "NEUTRON_UDS_CONTRACT_VERSION",
         "schema_version_min": "NEUTRON_UDS_SCHEMA_VERSION_MIN", "schema_version_max": "NEUTRON_UDS_SCHEMA_VERSION_MAX",
         "attach_authority": "NEUTRON_ATTACH_AUTHORITY", "body_max_bytes": "NEUTRON_UDS_BODY_MAX_BYTES",
-        "timeout_ms": "NEUTRON_UDS_TIMEOUT_MS", "error_codes_hash": "NEUTRON_UDS_ERROR_CODES_HASH",
-        "peer_auth_policy": "NEUTRON_UDS_PEER_AUTH_POLICY", "capability_hash": "NEUTRON_UDS_CAPABILITY_HASH",
+        "timeout_ms": "NEUTRON_UDS_TIMEOUT_MS",
+        "peer_auth_policy": "NEUTRON_UDS_PEER_AUTH_POLICY",
     }
     for field, constant in constants.items():
         value = rust_const(source, constant)
@@ -439,6 +440,18 @@ def check_rust_uds_contract_source():
             pass
         if contract.get(field) != value:
             raise SystemExit("ERROR: Rust UDS constant %s does not match contract field %s" % (constant, field))
+    producer_versions = {
+        "NEUTRON_UDS_ERROR_CODES_HASH": "v0.9-neutron-errors-3",
+        "NEUTRON_UDS_CAPABILITY_HASH": "v0.9-neutron-capabilities-4",
+    }
+    for constant, expected in producer_versions.items():
+        if rust_const(source, constant) != expected:
+            raise SystemExit("ERROR: public Rust UDS producer constant %s drifted" % constant)
+    if (
+        contract.get("error_codes_hash") != "v0.9-neutron-errors-2"
+        or contract.get("capability_hash") != "v0.9-neutron-capabilities-3"
+    ):
+        raise SystemExit("ERROR: immutable Status V1 compatibility artifact drifted")
     if contract.get("supported_domains") != ["attach", "acl"]:
         raise SystemExit("ERROR: public UDS domain schema drifted")
     router = read_text(RUST_NEUTRON_API_PATH)
@@ -473,9 +486,10 @@ def producer_scenario_ids(source):
 
 
 def check_status_v1_contract():
-    print("==> checking Status V1 schema")
+    print("==> checking versioned Status schemas")
     contract = read_json(UDS_CONTRACT_PATH)
     fixture = read_json(STATUS_FIXTURE_PATH)
+    fixture_v2 = read_json(STATUS_V2_FIXTURE_PATH)
     expected_contract = {
         "status_schema_version_min": 1, "status_schema_version_max": 1,
         "status_contract_hash": "v0.9-neutron-status-1", "status_contract_scenarios_path": STATUS_FIXTURE_PATH,
@@ -501,13 +515,23 @@ def check_status_v1_contract():
         if isinstance(status, dict) and status.get("status_schema_version") not in (None, 1):
             raise SystemExit("ERROR: Status V1 scenario status schema drifted")
     api = read_text(RUST_API_PATH)
-    for constant, expected in (("NEUTRON_STATUS_SCHEMA_VERSION_MIN", "1"), ("NEUTRON_STATUS_SCHEMA_VERSION_MAX", "1"), ("NEUTRON_STATUS_CONTRACT_HASH", "v0.9-neutron-status-1")):
+    for constant, expected in (("NEUTRON_STATUS_SCHEMA_VERSION_MIN", "2"), ("NEUTRON_STATUS_SCHEMA_VERSION_MAX", "2"), ("NEUTRON_STATUS_CONTRACT_HASH", "v0.9-neutron-status-2")):
         if rust_const(api, constant) != expected:
             raise SystemExit("ERROR: public Rust Status constant %s drifted" % constant)
+    schema_v2 = fixture_v2.get("status_contract")
+    if (
+        not isinstance(schema_v2, dict)
+        or schema_v2.get("version") != 2
+        or schema_v2.get("hash") != "v0.9-neutron-status-2"
+        or schema_v2.get("error_codes_hash") != "v0.9-neutron-errors-3"
+        or schema_v2.get("capability_hash") != "v0.9-neutron-capabilities-4"
+        or schema_v2.get("new_required_action") != "retry_snapshot"
+    ):
+        raise SystemExit("ERROR: Status V2 fixture contract metadata drifted")
     expected_enums = {
         "NeutronStatusTransactionState": ("Idle", "Pending", "Classified", "Blocked", "Recovery"),
         "NeutronStatusOverallReadiness": ("Ready", "Degraded", "Blocked", "Unknown"),
-        "NeutronStatusRequiredAction": ("None", "Poll", "RecoverPending", "FullResync", "Operator"),
+        "NeutronStatusRequiredAction": ("None", "Poll", "RetrySnapshot", "RecoverPending", "FullResync", "Operator"),
         "NeutronStatusRecoveryCause": ("InventoryUnavailable",),
         "NeutronStatusDomainState": ("Ready", "NotRequested", "Degraded", "Blocked"),
         "NeutronStatusEffectiveAction": ("Enforce", "Bypass", "Unchanged", "Cleanup", "NoOp"),

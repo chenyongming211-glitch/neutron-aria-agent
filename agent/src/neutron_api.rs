@@ -81,6 +81,7 @@ struct SnapshotAdmissionIdentity {
     applied_desired_hash: Option<String>,
     authority_state: String,
     ports: BTreeMap<String, ManagedNeutronPort>,
+    port_statuses: BTreeMap<String, NeutronPortStatus>,
     wal_status: String,
     recovery_cause: Option<String>,
     wal_replay_failures: u64,
@@ -96,6 +97,7 @@ impl SnapshotAdmissionIdentity {
             applied_desired_hash: runtime.applied_desired_hash.clone(),
             authority_state: runtime.authority_state.clone(),
             ports: runtime.ports.clone(),
+            port_statuses: runtime.port_statuses.clone(),
             wal_status: runtime.wal_status.clone(),
             recovery_cause: runtime.recovery_cause.clone(),
             wal_replay_failures: runtime.wal_replay_failures,
@@ -2135,9 +2137,25 @@ fn project_neutron_status_v1(runtime: &NeutronRuntimeState) -> NeutronStatusV1Pr
     }
 }
 
+fn project_neutron_status_v2(
+    runtime: &NeutronRuntimeState,
+    durable_partial_retryable: bool,
+) -> NeutronStatusV1Projection {
+    let mut projection = project_neutron_status_v1(runtime);
+    if durable_partial_retryable {
+        projection.transaction_state = NeutronStatusTransactionState::Blocked;
+        projection.overall_readiness = NeutronStatusOverallReadiness::Blocked;
+        projection.required_action = NeutronStatusRequiredAction::RetrySnapshot;
+        projection.recovery_cause = None;
+    }
+    projection
+}
+
 async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatusV1Response {
     let runtime = state.runtime.read().await;
-    let projection = project_neutron_status_v1(&runtime);
+    let durable_partial_retryable =
+        validate_durable_partial_retry_barrier(state, &runtime).is_ok();
+    let projection = project_neutron_status_v2(&runtime, durable_partial_retryable);
     let managed_ports = runtime.ports.values().cloned().collect();
     let generation = runtime.applied_generation;
     let accepted_generation = runtime.accepted_generation;
@@ -2226,6 +2244,7 @@ struct PreparedSnapshotApply {
     transaction: SnapshotApplyTransaction,
     current_ports: BTreeMap<String, ManagedNeutronPort>,
     runtime_before_apply: NeutronRuntimeState,
+    same_generation_retry: bool,
     lock_wait_ms: u64,
     preflight_ms: u64,
     wal_intent_ms: u64,
@@ -2306,15 +2325,70 @@ async fn submit_neutron_snapshot(
     Json(response).into_response()
 }
 
-fn pending_snapshot_submit_response(
+#[derive(Debug)]
+enum PendingSnapshotDisposition {
+    None,
+    Deduplicated(NeutronSnapshotResponse),
+    RetryablePartial,
+}
+
+fn snapshot_retry_not_safe(details: impl Into<String>) -> SnapshotApplyError {
+    SnapshotApplyError {
+        status: StatusCode::CONFLICT,
+        code: "snapshot_retry_not_safe",
+        details: details.into(),
+    }
+}
+
+fn validate_durable_partial_retry_barrier(
+    state: &NeutronApiState,
+    runtime: &NeutronRuntimeState,
+) -> Result<(), SnapshotApplyError> {
+    if runtime.authority_state != "partial"
+        || runtime.recovery_cause.is_some()
+        || runtime.wal_replay_failures > 0
+        || runtime.pending_generation != Some(runtime.accepted_generation)
+        || !status_v1_has_complete_pending_identity(runtime)
+    {
+        return Err(snapshot_retry_not_safe(
+            "pending snapshot is not a complete ordinary partial transaction",
+        ));
+    }
+
+    let replay = state.wal.replay();
+    if replay.failures > 0 {
+        return Err(snapshot_retry_not_safe(format!(
+            "Neutron WAL replay reported {} failure(s)",
+            replay.failures
+        )));
+    }
+    if replay.pending_intent.is_some() {
+        return Err(snapshot_retry_not_safe(
+            "Neutron WAL contains an unresolved intent",
+        ));
+    }
+
+    let mut durable_state = replay.state;
+    durable_state.status_hash = None;
+    if durable_state != runtime.to_wal_state() {
+        return Err(snapshot_retry_not_safe(
+            "durable Neutron WAL state does not match the live partial state",
+        ));
+    }
+    Ok(())
+}
+
+fn pending_snapshot_submit_disposition(
     runtime: &NeutronRuntimeState,
     snapshot: &NeutronSnapshotRequest,
     requested_hash: &Option<String>,
-) -> Result<Option<NeutronSnapshotResponse>, SnapshotApplyError> {
+) -> Result<PendingSnapshotDisposition, SnapshotApplyError> {
     let Some(pending_generation) = runtime.pending_generation else {
-        return Ok(None);
+        return Ok(PendingSnapshotDisposition::None);
     };
-    if !hashes_match(requested_hash, &runtime.desired_hash) {
+    if snapshot.generation != pending_generation
+        || !hashes_match(requested_hash, &runtime.desired_hash)
+    {
         return Err(SnapshotApplyError {
             status: StatusCode::CONFLICT,
             code: "snapshot_apply_in_progress",
@@ -2324,21 +2398,40 @@ fn pending_snapshot_submit_response(
             ),
         });
     }
+    if runtime.authority_state == "partial" {
+        info!(
+            generation = snapshot.generation,
+            desired_hash = ?requested_hash,
+            pending_generation,
+            retry_disposition = "retryable_partial",
+            "neutron_snapshot_submit_retry_candidate"
+        );
+        return Ok(PendingSnapshotDisposition::RetryablePartial);
+    }
+    if !matches!(runtime.authority_state.as_str(), "applying" | "accepted") {
+        return Err(snapshot_retry_not_safe(format!(
+            "pending generation {} is in non-retryable state {}",
+            pending_generation, runtime.authority_state
+        )));
+    }
     info!(
         generation = snapshot.generation,
         desired_hash = ?requested_hash,
         pending_generation,
+        retry_disposition = "deduplicated",
         "neutron_snapshot_submit_deduplicated_pending"
     );
-    Ok(Some(neutron_snapshot_response(
-        snapshot.generation,
-        requested_hash.clone(),
-        runtime.accepted_generation,
-        runtime.applied_generation,
-        "pending",
-        Vec::new(),
-        Vec::new(),
-    )))
+    Ok(PendingSnapshotDisposition::Deduplicated(
+        neutron_snapshot_response(
+            pending_generation,
+            requested_hash.clone(),
+            runtime.accepted_generation,
+            runtime.applied_generation,
+            "pending",
+            Vec::new(),
+            Vec::new(),
+        ),
+    ))
 }
 
 async fn accept_neutron_snapshot_submit(
@@ -2346,12 +2439,12 @@ async fn accept_neutron_snapshot_submit(
     snapshot: &NeutronSnapshotRequest,
     scope: &ApplyScope,
 ) -> Result<SnapshotSubmitDecision, SnapshotApplyError> {
-    state.require_restore_ready()?;
     validate_snapshot_preflight(scope, snapshot)?;
+    state.require_restore_ready()?;
     let requested_hash = snapshot.desired_hash.clone();
-    if let Some(mut response) = {
+    if let PendingSnapshotDisposition::Deduplicated(mut response) = {
         let runtime = state.runtime.read().await;
-        pending_snapshot_submit_response(&runtime, snapshot, &requested_hash)?
+        pending_snapshot_submit_disposition(&runtime, snapshot, &requested_hash)?
     } {
         response.active_instances = state.registry.list().await;
         return Ok(SnapshotSubmitDecision {
@@ -2368,15 +2461,23 @@ async fn accept_neutron_snapshot_submit(
         let observation_guard = state.apply_lock.clone().lock_owned().await;
         lock_wait_ms += elapsed_ms(lock_started);
         let observed_runtime = state.runtime.read().await.clone();
-        if let Some(mut response) =
-            pending_snapshot_submit_response(&observed_runtime, snapshot, &requested_hash)?
-        {
-            drop(observation_guard);
-            response.active_instances = state.registry.list().await;
-            return Ok(SnapshotSubmitDecision {
-                response,
-                prepared: None,
-            });
+        match pending_snapshot_submit_disposition(
+            &observed_runtime,
+            snapshot,
+            &requested_hash,
+        )? {
+            PendingSnapshotDisposition::Deduplicated(mut response) => {
+                drop(observation_guard);
+                response.active_instances = state.registry.list().await;
+                return Ok(SnapshotSubmitDecision {
+                    response,
+                    prepared: None,
+                });
+            }
+            PendingSnapshotDisposition::RetryablePartial => {
+                validate_durable_partial_retry_barrier(state, &observed_runtime)?;
+            }
+            PendingSnapshotDisposition::None => {}
         }
         let observed_identity = SnapshotAdmissionIdentity::capture(&observed_runtime);
         drop(observation_guard);
@@ -2388,6 +2489,16 @@ async fn accept_neutron_snapshot_submit(
         lock_wait_ms += elapsed_ms(lock_started);
         let runtime_before_apply = state.runtime.read().await.clone();
         if SnapshotAdmissionIdentity::capture(&runtime_before_apply) == observed_identity {
+            if matches!(
+                pending_snapshot_submit_disposition(
+                    &runtime_before_apply,
+                    snapshot,
+                    &requested_hash,
+                )?,
+                PendingSnapshotDisposition::RetryablePartial
+            ) {
+                validate_durable_partial_retry_barrier(state, &runtime_before_apply)?;
+            }
             break (apply_guard, local_inventory, runtime_before_apply);
         }
         drop(apply_guard);
@@ -2404,15 +2515,6 @@ async fn accept_neutron_snapshot_submit(
     };
     let preflight_started = Instant::now();
 
-    if let Some(mut response) =
-        pending_snapshot_submit_response(&runtime_before_apply, snapshot, &requested_hash)?
-    {
-        response.active_instances = state.registry.list().await;
-        return Ok(SnapshotSubmitDecision {
-            response,
-            prepared: None,
-        });
-    }
     if let Some(mut response) = snapshot_early_response_for_scope(
         scope,
         &runtime_before_apply,
@@ -2442,6 +2544,9 @@ async fn accept_neutron_snapshot_submit(
     }
 
     let current_ports = runtime_before_apply.ports.clone();
+    let same_generation_retry = runtime_before_apply.authority_state == "partial"
+        && runtime_before_apply.pending_generation == Some(snapshot.generation)
+        && hashes_match(&runtime_before_apply.desired_hash, &requested_hash);
     let transaction = build_snapshot_apply_transaction(
         &current_ports,
         snapshot,
@@ -2512,6 +2617,7 @@ async fn accept_neutron_snapshot_submit(
             transaction,
             current_ports,
             runtime_before_apply,
+            same_generation_retry,
             lock_wait_ms,
             preflight_ms,
             wal_intent_ms,
@@ -2736,6 +2842,7 @@ async fn apply_neutron_snapshot_for_scope(
         transaction,
         current_ports,
         runtime_before_apply,
+        same_generation_retry,
         lock_wait_ms,
         preflight_ms,
         wal_intent_ms,
@@ -2748,6 +2855,7 @@ async fn apply_neutron_snapshot_for_scope(
         scope = scope_name,
         scope_port_id = ?scope_port_id,
         snapshot_ports = snapshot.ports.len(),
+        same_generation_retry,
         lock_wait_ms,
         "neutron_snapshot_apply_start"
     );
@@ -3617,6 +3725,14 @@ fn validate_snapshot_preflight(
 ) -> Result<(), SnapshotApplyError> {
     if !snapshot_schema_supported(snapshot.schema_version) {
         return Err(snapshot_schema_apply_error(snapshot.schema_version));
+    }
+    if snapshot.generation == 0 {
+        return Err(SnapshotApplyError {
+            status: StatusCode::BAD_REQUEST,
+            code: "INVALID_SNAPSHOT_GENERATION",
+            details: "snapshot generation zero is reserved; submitted generations must start at one"
+                .to_string(),
+        });
     }
     validate_snapshot_scope(scope, snapshot).map_err(snapshot_scope_apply_error)
 }
@@ -11081,6 +11197,7 @@ mod tests {
             "committed-live-mismatch",
             "replay-failure",
             "non-partial-authority",
+            "accepted-pending-mismatch",
             "committed-ports-mismatch",
             "committed-statuses-mismatch",
         ] {
@@ -11109,6 +11226,8 @@ mod tests {
             } else {
                 if case == "non-partial-authority" {
                     partial.authority_state = "degraded".to_string();
+                } else if case == "accepted-pending-mismatch" {
+                    partial.accepted_generation = 0;
                 }
                 let durable = partial.clone();
                 state

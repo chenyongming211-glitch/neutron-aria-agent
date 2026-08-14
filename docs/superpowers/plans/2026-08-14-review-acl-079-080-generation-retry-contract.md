@@ -356,7 +356,7 @@ git diff --check
 
 Do not run Cargo locally.
 
-- [ ] **Step 7: Commit and push Rust RED**
+- [x] **Step 7: Commit and push Rust RED**
 
 ```bash
 git add api/src/lib.rs agent/src/neutron_api.rs ci/check_neutron_stage1.py \
@@ -368,6 +368,13 @@ git push origin v0.9-neutron-agent
 Require hosted `rust-behavior` to compile the tests and fail on the intended
 old generation/retry/status behavior. Stop superseded unrelated jobs after the
 precise RED is recorded.
+
+Hosted RED: final test head `c98e5ad`, Build `31778679216`, job
+`rust-behavior` `94699521048`. The new filter compiled and ran eight tests:
+two existing-safe cases passed and six failed only on generation-zero
+preflight ordering, cross-generation hash-only deduplication, absent durable
+partial re-entry/WAL barrier and the missing Status V2 projection. The
+superseded full build was cancelled after this precise RED was captured.
 
 ---
 
@@ -381,7 +388,7 @@ precise RED is recorded.
 - Modify: `ci/check_neutron_stage1.py`
 - Modify: Rust tests from Task 3
 
-- [ ] **Step 1: Version the public producer contract**
+- [x] **Step 1: Version the public producer contract**
 
 - Set Status schema min/max/current to 2 and status hash to status-2.
 - Add `RetrySnapshot` to `NeutronStatusRequiredAction`.
@@ -389,13 +396,13 @@ precise RED is recorded.
 - Keep request schema version 1 and V1 fixture/constants unchanged in docs and
   Python compatibility code.
 
-- [ ] **Step 2: Reject generation zero in shared preflight**
+- [x] **Step 2: Reject generation zero in shared preflight**
 
 Make shared validation run before restore readiness and any admission side
 effect in the exact order schema -> positive generation -> scope. Return the
 stable 400 error without touching WAL, inventory, runtime or datapath.
 
-- [ ] **Step 3: Replace hash-only pending admission with a typed decision**
+- [x] **Step 3: Replace hash-only pending admission with a typed decision**
 
 Represent at least:
 
@@ -412,7 +419,7 @@ generation in the response. Different generation/hash returns
 `snapshot_apply_in_progress`. Unsafe exact identity returns
 `snapshot_retry_not_safe`.
 
-- [ ] **Step 4: Revalidate durable partial under the apply lock**
+- [x] **Step 4: Revalidate durable partial under the apply lock**
 
 Freshly replay WAL and require zero failures, no pending intent and exact
 committed/live equality after normalizing only `status_hash`. Compare the full
@@ -420,7 +427,7 @@ generation/hash/authority/ports/status/recovery identity. Recheck after OVS
 discovery through the existing admission identity loop. Any drift fails before
 a retry intent append.
 
-- [ ] **Step 5: Reuse the concrete apply transaction for exact G/H**
+- [x] **Step 5: Reuse the concrete apply transaction for exact G/H**
 
 Let the eligible partial continue through existing planning, intent fsync,
 runtime apply and commit publication with the same generation. Preserve
@@ -428,14 +435,14 @@ idempotent desired-state behavior and existing compensation. Add structured
 retry disposition/result fields to existing logs without logging request
 bodies or adding a metric family.
 
-- [ ] **Step 6: Emit the V2 retry action without widening row authority**
+- [x] **Step 6: Emit the V2 retry action without widening row authority**
 
 Project `RetrySnapshot` only for complete ordinary partial identity with no
 known WAL replay failure. Keep pending-generation internal error rows out of
 public applied rows. Preserve all current inventory, recovery, poll,
 full-resync and operator branches.
 
-- [ ] **Step 7: Run non-Cargo validation**
+- [x] **Step 7: Run non-Cargo validation**
 
 Run:
 
@@ -451,6 +458,11 @@ git diff --check
 
 Inspect exhaustive enum matches and complete response literals with `rg`; do
 not run Cargo locally.
+
+Local non-Cargo GREEN: the three focused Python modules ran 231 tests, the CI
+gate/warning-hygiene unit modules ran 10 tests, blocked-term and Python syntax
+checks passed, and `git diff --check` was clean. No local Cargo command was
+run.
 
 - [ ] **Step 8: Commit and push Rust GREEN**
 
