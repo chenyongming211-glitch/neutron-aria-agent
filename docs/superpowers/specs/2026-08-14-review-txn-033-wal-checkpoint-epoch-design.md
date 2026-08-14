@@ -1,6 +1,6 @@
 # REVIEW-TXN-033 WAL Checkpoint Epoch Design
 
-**Status:** approved design; implementation not started
+**Status:** approved design; implementation plan ready, production not started
 
 **Date:** 2026-08-14
 
@@ -202,7 +202,9 @@ matching marker before any acknowledged tail mutation.
 
 Unknown nonzero cursor or marker versions are replay failures and are never
 treated as version 1. They remain visible through the existing WAL replay
-failure metric and health evidence.
+failure metric and health evidence. `WalWriter::open` also rejects an
+unsupported nonzero snapshot cursor before accepting mutations, so a future
+format cannot be silently overwritten by an older writer.
 
 ## 7. Crash And Failure Matrix
 
@@ -322,4 +324,3 @@ Explicit exclusions:
 8. The hosted `wal_checkpoint_` filter executes a nonzero test count.
 9. Exact-head fast contracts, Rust behavior, warning-denied userspace and eBPF
    builds pass before `REVIEW-TXN-033` is marked fixed.
-
