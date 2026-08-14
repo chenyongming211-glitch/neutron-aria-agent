@@ -246,6 +246,24 @@ RED `4336892` exposed all six deterministic delete/create races in hosted fast
 and database contracts. Implementation `db169c9` passed exact-head Build
 [31784634775](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775),
 including fast contracts, real SQLAlchemy database contracts, and clean
-install. The active batch is now step 9: `REVIEW-ACL-078` and
-`REVIEW-OPS-039` remain independent implementation commits in one review
-window. Later batches remain in the fixed order above.
+install. At that closure, the next fixed-order batch was step 9:
+`REVIEW-ACL-078` and `REVIEW-OPS-039` as independent implementation commits in
+one review window. Section 8 records the later user-approved narrowing of the
+execution scope.
+
+## 8. ACL-Only Continuation Boundary
+
+After `REVIEW-ACL-082`, implementation scope was narrowed to the ACL product
+boundary in
+[the ACL-only continuation design](2026-08-14-acl-only-remaining-remediation-design.md).
+The active production batch is now `REVIEW-ACL-085/090/091`, followed by
+`REVIEW-ACL-098/099`. `REVIEW-ACL-086` and the conditional
+`REVIEW-ACL-083/084` plus `REVIEW-TXN-035` remain evidence gates and cannot be
+marked fixed without their required proof.
+
+The former steps containing `REVIEW-ACL-078`, `REVIEW-OPS-039`,
+`REVIEW-ACL-089`, `REVIEW-ACL-093/094`, and `REVIEW-ACL-096/097` remain valid
+backlog records but are outside this ACL-only execution line because their
+product owners are QoS, Mirror, generic trace/drop monitoring, or TCP-RT.
+`REVIEW-ACL-088` also remains separate defensive general-map debt. None of
+these exclusions changes an item to fixed or verification-complete.

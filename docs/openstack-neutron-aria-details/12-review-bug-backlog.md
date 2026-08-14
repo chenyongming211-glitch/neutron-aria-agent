@@ -667,6 +667,17 @@ verification-only, risk-classified, or closed.
 | REVIEW-OPS-039 | P2 | Map-open failures are conflated with empty state | open | Read paths such as `has_qos_rules` (`core/src/qos_ops.rs:24-39`) and `ct_list` (`core/src/ct_ops.rs:22-50`) treat `from_pin`/convert errors as empty; `sync_qos_enabled` (`qos_ops.rs:127`) then silently disables QoS enforcement on a transient map fault. | Distinguish NotFound from other open/convert faults and surface the latter as degraded/error; add fault-injection tests. |
 | REVIEW-OPS-040 | P3 | Invalid iface_pattern silently falls back to ^tap | fixed | `iface_pattern` is compiled exactly once in the pre-runtime startup gate. Invalid input is fatal; `TapRegistry::new` accepts the already compiled `Regex` and contains no `^tap` error fallback. The default remains `^tap` only when the legitimate default configuration selects it, while valid custom matchers are preserved exactly. | RED `fb0f948` proved the registry still required an unchecked string. GREEN `9010f7e` / Build [31763073075](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31763073075) executed the invalid-pattern and real-registry custom-pattern behaviors in the eight-test `startup_config_` filter. |
 
+### 2026-08-14 ACL-Only Execution Boundary
+
+The remaining implementation line is intentionally limited to
+`REVIEW-ACL-085/090/091` and `REVIEW-ACL-098/099`. `REVIEW-ACL-086`,
+`REVIEW-ACL-083/084`, and `REVIEW-TXN-035` remain verification gates. The open
+QoS, Mirror, TCP-RT, generic trace/drop-monitoring, generic map-authority, and
+defensive general-map items remain recorded at their existing status but are
+not developed or counted as delivery work in the ACL-only line. The exact
+boundary and order are recorded in
+`docs/superpowers/specs/2026-08-14-acl-only-remaining-remediation-design.md`.
+
 ## Verification At Time Of Recording
 
 - `python -m unittest discover -s openstack/neutron_aria/neutron_aria/tests/unit -v`: 214 tests passed.
