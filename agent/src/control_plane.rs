@@ -4007,17 +4007,6 @@ impl ControlPlane {
             true,
             self.trace_map_mode(),
         );
-        if let Err(error) = preexisting_tc_acl_runtime_is_healthy(
-            state.conntrack_enabled || state.acl_enabled,
-            false,
-            pin_state.preexisting_live_links,
-            pin_state.preexisting_tc_ingress_link,
-            pin_state.preexisting_tc_egress_link,
-            runtime_instance.tc_acl_link_health(),
-        ) {
-            return PreexistingRuntimeValidation::fatal(error);
-        }
-
         let iface_ctx = match aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex) {
             Ok(iface_ctx) => iface_ctx,
             Err(error) => return PreexistingRuntimeValidation::fatal(error),
@@ -4034,6 +4023,16 @@ impl ControlPlane {
             Ok(actual) => actual,
             Err(error) => return PreexistingRuntimeValidation::fatal(error),
         };
+        if let Err(error) = preexisting_tc_acl_runtime_is_healthy(
+            state.conntrack_enabled || state.acl_enabled,
+            actual.conntrack_enabled == 0 && actual.acl_enabled == 0,
+            pin_state.preexisting_live_links,
+            pin_state.preexisting_tc_ingress_link,
+            pin_state.preexisting_tc_egress_link,
+            runtime_instance.tc_acl_link_health(),
+        ) {
+            return PreexistingRuntimeValidation::fatal(error);
+        }
         let expected = Self::expected_runtime_flags(state);
         let actual_flags = (
             actual.conntrack_enabled,
