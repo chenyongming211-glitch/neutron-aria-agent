@@ -560,17 +560,17 @@ unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo, family:
     let wire_len = ctx.len();
     let mut data = ctx.data();
     let mut data_end = ctx.data_end();
-    if parse_tc_family(data, data_end, wire_len as usize, out, family) {
-        return 0;
-    }
-
     let pull_len = parser::bounded_tc_pull_len(wire_len);
-    if pull_len == 0 || ctx.pull_data(pull_len).is_err() {
+    if pull_len == 0 {
         return DROP_MALFORMED_IP;
     }
-
-    data = ctx.data();
-    data_end = ctx.data_end();
+    if data_end - data < pull_len as usize {
+        if ctx.pull_data(pull_len).is_err() {
+            return DROP_MALFORMED_IP;
+        }
+        data = ctx.data();
+        data_end = ctx.data_end();
+    }
     if parse_tc_family(data, data_end, wire_len as usize, out, family) {
         0
     } else {
