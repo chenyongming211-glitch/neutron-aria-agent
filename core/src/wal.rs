@@ -651,6 +651,8 @@ mod tests {
     use crate::state::FirewallState;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static WAL_CHECKPOINT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn temp_state_path() -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -659,6 +661,155 @@ mod tests {
         let path = format!("/tmp/aria-wal-test-{}", nanos);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn wal_checkpoint_record(checkpoint_id: u64, version: u8) -> String {
+        serde_json::json!({
+            "wal_checkpoint": {
+                "version": version,
+                "checkpoint_id": checkpoint_id,
+            }
+        })
+        .to_string()
+    }
+
+    fn wal_checkpoint_state_json(state: &FirewallState, checkpoint_id: u64) -> String {
+        wal_checkpoint_state_json_with_version(state, checkpoint_id, 1)
+    }
+
+    fn wal_checkpoint_state_json_with_version(
+        state: &FirewallState,
+        checkpoint_id: u64,
+        version: u8,
+    ) -> String {
+        let mut value = serde_json::to_value(state).unwrap();
+        value["wal_replay_cursor"] = serde_json::json!({
+            "version": version,
+            "checkpoint_id": checkpoint_id,
+        });
+        serde_json::to_string_pretty(&value).unwrap()
+    }
+
+    fn wal_checkpoint_rule_update_chain() -> (Vec<WalEntry>, FirewallState) {
+        let entries = vec![
+            WalEntry::AddRule {
+                src_id: 1,
+                dst_id: 2,
+                proto: 6,
+                action: 0,
+                ports: Some("80".to_string()),
+                direction: 0,
+            },
+            WalEntry::AddRule {
+                src_id: 1,
+                dst_id: 2,
+                proto: 6,
+                action: 0,
+                ports: Some("443".to_string()),
+                direction: 0,
+            },
+            WalEntry::AddRule {
+                src_id: 1,
+                dst_id: 2,
+                proto: 6,
+                action: 0,
+                ports: Some("8443".to_string()),
+                direction: 0,
+            },
+        ];
+        let mut checkpoint = FirewallState::default();
+        checkpoint.max_port_policies = 8;
+        for entry in entries.iter().cloned() {
+            assert!(apply_wal_entry(&mut checkpoint, entry));
+        }
+        checkpoint
+            .quarantine_bitmap_cleanup(3, "53:0".to_string())
+            .unwrap();
+        (entries, checkpoint)
+    }
+
+    fn wal_checkpoint_write_lines(state_path: &str, lines: &[String]) {
+        let mut contents = lines.join("\n");
+        if !contents.is_empty() {
+            contents.push('\n');
+        }
+        fs::write(format!("{}/state.wal", state_path), contents).unwrap();
+    }
+
+    fn wal_checkpoint_entry_lines(entries: &[WalEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect()
+    }
+
+    fn wal_checkpoint_assert_allocator_parity(
+        expected: &FirewallState,
+        actual: &FirewallState,
+    ) {
+        let rule_view = |state: &FirewallState| {
+            let mut rules = state
+                .rules
+                .iter()
+                .map(|rule| {
+                    (
+                        rule.src_group_id,
+                        rule.dst_group_id,
+                        rule.proto,
+                        rule.action,
+                        rule.ports.clone(),
+                        rule.bitmap_idx,
+                        rule.direction,
+                    )
+                })
+                .collect::<Vec<_>>();
+            rules.sort();
+            rules
+        };
+        let port_set_view = |state: &FirewallState| {
+            state
+                .port_sets
+                .iter()
+                .map(|(key, port_set)| {
+                    (
+                        key.clone(),
+                        (
+                            port_set.bitmap_idx,
+                            port_set.ports_normalized.clone(),
+                            port_set.ref_count,
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+
+        assert_eq!(rule_view(expected), rule_view(actual), "rule allocator view");
+        assert_eq!(
+            port_set_view(expected),
+            port_set_view(actual),
+            "port-set allocator view"
+        );
+        assert_eq!(
+            expected.free_bitmap_indices, actual.free_bitmap_indices,
+            "free bitmap stack"
+        );
+        assert_eq!(
+            expected.next_bitmap_idx, actual.next_bitmap_idx,
+            "next bitmap index"
+        );
+        assert_eq!(
+            expected.max_port_policies, actual.max_port_policies,
+            "allocator limit"
+        );
+        assert_eq!(
+            expected.pending_bitmap_cleanups, actual.pending_bitmap_cleanups,
+            "pending cleanup quarantine"
+        );
+        assert_eq!(
+            expected.pending_bitmap_cleanup_count(),
+            actual.pending_bitmap_cleanup_count(),
+            "quarantine-visible count"
+        );
     }
 
     #[test]
@@ -988,6 +1139,266 @@ mod tests {
         let loaded = load_with_wal(&state_path);
         assert!(loaded.groups.contains_key("web"));
 
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_retained_prefix_preserves_complete_allocator_parity() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (entries, checkpoint) = wal_checkpoint_rule_update_chain();
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json(&checkpoint, 7),
+        )
+        .unwrap();
+        let mut lines = wal_checkpoint_entry_lines(&entries);
+        lines.push(wal_checkpoint_record(7, 1));
+        wal_checkpoint_write_lines(&state_path, &lines);
+
+        let recovered = load_with_wal(&state_path);
+
+        wal_checkpoint_assert_allocator_parity(&checkpoint, &recovered);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_matching_marker_applies_tail_once() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (entries, checkpoint) = wal_checkpoint_rule_update_chain();
+        let tail = WalEntry::AddRule {
+            src_id: 1,
+            dst_id: 2,
+            proto: 6,
+            action: 0,
+            ports: Some("9443".to_string()),
+            direction: 0,
+        };
+        let mut expected = checkpoint.clone();
+        assert!(apply_wal_entry(&mut expected, tail.clone()));
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json(&checkpoint, 7),
+        )
+        .unwrap();
+        let mut lines = wal_checkpoint_entry_lines(&entries);
+        lines.push(wal_checkpoint_record(7, 1));
+        lines.push(serde_json::to_string(&tail).unwrap());
+        wal_checkpoint_write_lines(&state_path, &lines);
+
+        let recovered = load_with_wal(&state_path);
+
+        wal_checkpoint_assert_allocator_parity(&expected, &recovered);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_unmatched_marker_preserves_legacy_full_replay() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (entries, _) = wal_checkpoint_rule_update_chain();
+        let mut expected = FirewallState::default();
+        for entry in entries.iter().cloned() {
+            assert!(apply_wal_entry(&mut expected, entry));
+        }
+        fs::write(
+            format!("{}/state.json", state_path),
+            serde_json::to_string_pretty(&FirewallState::default()).unwrap(),
+        )
+        .unwrap();
+        let mut lines = wal_checkpoint_entry_lines(&entries);
+        lines.push(wal_checkpoint_record(8, 1));
+        wal_checkpoint_write_lines(&state_path, &lines);
+
+        let recovered = load_with_wal(&state_path);
+
+        wal_checkpoint_assert_allocator_parity(&expected, &recovered);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_discards_covered_prefix_failures_but_keeps_tail_failures() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (_, checkpoint) = wal_checkpoint_rule_update_chain();
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json(&checkpoint, 7),
+        )
+        .unwrap();
+        wal_checkpoint_write_lines(
+            &state_path,
+            &[
+                "{covered-corruption}".to_string(),
+                wal_checkpoint_record(7, 1),
+                "{tail-corruption}".to_string(),
+            ],
+        );
+
+        let _ = load_with_wal(&state_path);
+
+        assert_eq!(last_wal_replay_failures(), 1);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_unsupported_version_is_observable_and_never_matches() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (_, checkpoint) = wal_checkpoint_rule_update_chain();
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json_with_version(&checkpoint, 7, 2),
+        )
+        .unwrap();
+        wal_checkpoint_write_lines(&state_path, &[wal_checkpoint_record(7, 2)]);
+
+        let _ = load_with_wal(&state_path);
+
+        assert!(last_wal_replay_failures() > 0);
+        assert!(WalWriter::open(&state_path).is_err());
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_legacy_snapshot_and_mutations_remain_compatible() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (entries, _) = wal_checkpoint_rule_update_chain();
+        let mut expected = FirewallState::default();
+        for entry in entries.iter().cloned() {
+            assert!(apply_wal_entry(&mut expected, entry));
+        }
+        fs::write(
+            format!("{}/state.json", state_path),
+            serde_json::to_string_pretty(&FirewallState::default()).unwrap(),
+        )
+        .unwrap();
+        wal_checkpoint_write_lines(&state_path, &wal_checkpoint_entry_lines(&entries));
+
+        let recovered = load_with_wal(&state_path);
+
+        wal_checkpoint_assert_allocator_parity(&expected, &recovered);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_successful_compact_installs_header_without_mutation_count() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let (_, checkpoint) = wal_checkpoint_rule_update_chain();
+        let mut wal = WalWriter::open(&state_path).unwrap();
+
+        wal.compact(&serde_json::to_string_pretty(&checkpoint).unwrap())
+            .unwrap();
+
+        assert_eq!(wal.entry_count(), 0);
+        let lines = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();
+        let lines = lines.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let marker: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(marker["wal_checkpoint"]["version"], 1);
+        assert!(marker["wal_checkpoint"]["checkpoint_id"].as_u64().unwrap() > 0);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_empty_post_truncate_wal_repairs_header_before_append() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let state = FirewallState::default();
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json(&state, 9),
+        )
+        .unwrap();
+        fs::write(format!("{}/state.wal", state_path), b"").unwrap();
+        let mut wal = WalWriter::open(&state_path).unwrap();
+
+        wal.append(&WalEntry::AddGroup {
+            name: "tail".to_string(),
+            cidr: "192.0.2.0/24".to_string(),
+        })
+        .unwrap();
+
+        let lines = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();
+        let lines = lines.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        let marker: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(marker["wal_checkpoint"]["checkpoint_id"], 9);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_id_advances_past_failed_attempt_markers() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let state = FirewallState::default();
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json(&state, 9),
+        )
+        .unwrap();
+        wal_checkpoint_write_lines(&state_path, &[wal_checkpoint_record(10, 1)]);
+        let mut wal = WalWriter::open(&state_path).unwrap();
+
+        wal.compact(&serde_json::to_string_pretty(&state).unwrap())
+            .unwrap();
+
+        let contents = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();
+        let marker: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert!(marker["wal_checkpoint"]["checkpoint_id"]
+            .as_u64()
+            .unwrap()
+            > 10);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_id_overflow_never_truncates_or_wraps() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let state = FirewallState::default();
+        fs::write(
+            format!("{}/state.json", state_path),
+            wal_checkpoint_state_json(&state, u64::MAX),
+        )
+        .unwrap();
+        let original = format!("{}\n", wal_checkpoint_record(u64::MAX, 1));
+        fs::write(format!("{}/state.wal", state_path), &original).unwrap();
+        let mut wal = WalWriter::open(&state_path).unwrap();
+
+        let error = wal
+            .compact(&serde_json::to_string_pretty(&state).unwrap())
+            .expect_err("checkpoint IDs must not wrap");
+
+        assert!(error.contains("checkpoint"));
+        assert_eq!(
+            fs::read_to_string(format!("{}/state.wal", state_path)).unwrap(),
+            original
+        );
         let _ = fs::remove_dir_all(&state_path);
     }
 }

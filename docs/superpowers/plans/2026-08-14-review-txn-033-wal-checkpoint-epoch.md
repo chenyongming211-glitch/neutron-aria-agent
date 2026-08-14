@@ -61,7 +61,7 @@ state-file primitive, GitHub Actions warning-denied Rust/eBPF builds.
 ["test", "--locked", "-p", "aria-core", "wal_checkpoint_"],
 ```
 
-- [ ] **Step 1: Add deterministic checkpoint fixtures**
+- [x] **Step 1: Add deterministic checkpoint fixtures**
 
 In the `core/src/wal.rs` test module add helpers that use the existing
 `temp_state_path`, ordinary `WalEntry` serialization, and raw version-1 marker
@@ -130,7 +130,7 @@ Add an allocator comparison helper that asserts exact equality for:
 - `next_bitmap_idx`, `max_port_policies`;
 - `pending_bitmap_cleanups` and quarantine-visible count.
 
-- [ ] **Step 2: Add the retained-prefix parity RED**
+- [x] **Step 2: Add the retained-prefix parity RED**
 
 Write the checkpoint state with ID 7. Write the three ordinary mutation lines
 followed by `Checkpoint(7)` to `state.wal`, then call `load_with_wal` and assert
@@ -143,7 +143,7 @@ Name the test:
 fn wal_checkpoint_retained_prefix_preserves_complete_allocator_parity()
 ```
 
-- [ ] **Step 3: Add tail, legacy and failure-counter RED behaviors**
+- [x] **Step 3: Add tail, legacy and failure-counter RED behaviors**
 
 Add separately named `wal_checkpoint_` tests for:
 
@@ -156,7 +156,7 @@ Add separately named `wal_checkpoint_` tests for:
    treated as version 1;
 5. a legacy snapshot and mutation-only WAL preserve current replay behavior.
 
-- [ ] **Step 4: Add successful-compact and interrupted-header RED behaviors**
+- [x] **Step 4: Add successful-compact and interrupted-header RED behaviors**
 
 Using only existing `WalWriter` APIs:
 
@@ -170,12 +170,12 @@ Using only existing `WalWriter` APIs:
 - seed `u64::MAX` in the snapshot/marker and assert compact returns an overflow
   error without truncating existing bytes.
 
-- [ ] **Step 5: Wire the nonzero hosted behavior filter**
+- [x] **Step 5: Wire the nonzero hosted behavior filter**
 
 Add the exact `wal_checkpoint_` Cargo filter to `RUST_TESTS` in
 `ci/check_neutron_stage1.py`. Do not add a test-name parser or source regex.
 
-- [ ] **Step 6: Run non-compiling local checks only**
+- [x] **Step 6: Run non-compiling local checks only**
 
 Run:
 
