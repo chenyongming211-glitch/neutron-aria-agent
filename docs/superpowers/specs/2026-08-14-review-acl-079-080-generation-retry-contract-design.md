@@ -1,6 +1,6 @@
 # REVIEW-ACL-079/080 Generation And Same-Generation Retry Contract Design
 
-**Status:** approved; Python RED behavior evidence recorded
+**Status:** approved; Python-first V1/V2 consumer implemented, hosted GREEN pending
 
 **Date:** 2026-08-14
 

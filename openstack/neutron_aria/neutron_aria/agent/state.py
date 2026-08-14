@@ -7,10 +7,16 @@ import json
 import os
 import time
 
+try:
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _STRING_TYPES = (str,)
+
 
 STATE_SCHEMA_VERSION = 1
 DEFAULT_STATE_DIR = "/var/lib/neutron-aria-agent/state"
 DEFAULT_STATE_FILENAME = "snapshot-state.json"
+SNAPSHOT_REQUEST_MAX_BYTES = 1048576
 
 
 def _now():
@@ -70,6 +76,9 @@ def _state_defaults():
         "pending_scope": None,
         "pending_affected_port_ids": None,
         "pending_since": None,
+        "pending_request": None,
+        "pending_retry_count": 0,
+        "pending_last_retry_at": None,
         "last_snapshot_ports": 0,
         "last_managed_ports": 0,
         "last_committed_at": None,
@@ -178,6 +187,12 @@ class SnapshotStateStore(object):
             minimum_generation,
             force_new_generation=force_new_generation,
         )
+        request = self._build_pending_request(
+            snapshot,
+            generation,
+            desired_hash,
+            {"type": "full_host"},
+        )
         self._require_pending_snapshot_match(desired_hash)
         reused_pending = bool(
             not force_new_generation and
@@ -194,6 +209,7 @@ class SnapshotStateStore(object):
             self._state["pending_projected_port_ids"]
         )
         self._state["pending_since"] = _now()
+        self._set_pending_request(request, reused_pending)
         self._state["updated_at"] = _now()
         self._write()
         return {
@@ -207,6 +223,12 @@ class SnapshotStateStore(object):
         if generation <= 0:
             generation = 1
         desired_hash = desired_hash or desired_snapshot_hash(snapshot)
+        request = self._build_pending_request(
+            snapshot,
+            generation,
+            desired_hash,
+            {"type": "full_host"},
+        )
         self._require_pending_snapshot_match(desired_hash)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
@@ -224,6 +246,7 @@ class SnapshotStateStore(object):
             self._state["pending_projected_port_ids"]
         )
         self._state["pending_since"] = _now()
+        self._set_pending_request(request, reused_pending)
         self._state["updated_at"] = _now()
         self._write()
         return {
@@ -257,6 +280,15 @@ class SnapshotStateStore(object):
             snapshot,
             self._state.get("last_classified_projected_port_ids") or [],
         )
+        affected_port_ids = _affected_port_ids(snapshot)
+        if len(affected_port_ids) != 1:
+            raise ValueError("scoped pending request requires exactly one port")
+        request = self._build_pending_request(
+            snapshot,
+            generation,
+            desired_hash,
+            {"type": "port", "port_id": affected_port_ids[0]},
+        )
         self._require_pending_snapshot_match(desired_hash)
         self._state["pending_generation"] = generation
         self._state["pending_desired_hash"] = desired_hash
@@ -266,8 +298,9 @@ class SnapshotStateStore(object):
         )
         self._state["pending_projected_port_ids"] = projected_port_ids
         self._state["pending_scope"] = "port"
-        self._state["pending_affected_port_ids"] = _affected_port_ids(snapshot)
+        self._state["pending_affected_port_ids"] = affected_port_ids
         self._state["pending_since"] = _now()
+        self._set_pending_request(request, reused_pending)
         self._state["updated_at"] = _now()
         self._write()
         return {
@@ -293,6 +326,65 @@ class SnapshotStateStore(object):
             pending["generation"]
         )
 
+    def _build_pending_request(
+        self,
+        snapshot,
+        generation,
+        desired_hash,
+        scope,
+    ):
+        body = copy.deepcopy(snapshot)
+        body["generation"] = generation
+        body["desired_hash"] = desired_hash
+        if len(_json_bytes(body)) > SNAPSHOT_REQUEST_MAX_BYTES:
+            raise ValueError("snapshot request body exceeds durable limit")
+        return {"scope": copy.deepcopy(scope), "body": body}
+
+    def _set_pending_request(self, request, reused_pending):
+        if reused_pending and self._validated_pending_request() is not None:
+            return
+        self._state["pending_request"] = copy.deepcopy(request)
+        self._state["pending_retry_count"] = 0
+        self._state["pending_last_retry_at"] = None
+
+    def _validated_pending_request(self):
+        request = self._state.get("pending_request")
+        if not isinstance(request, dict):
+            return None
+        scope = request.get("scope")
+        body = request.get("body")
+        if not isinstance(scope, dict) or not isinstance(body, dict):
+            return None
+        scope_type = scope.get("type")
+        if scope_type not in ("full_host", "port"):
+            return None
+        if scope_type == "full_host":
+            if set(scope) != set(("type",)):
+                return None
+        else:
+            port_id = scope.get("port_id")
+            ports = body.get("ports")
+            if (
+                set(scope) != set(("type", "port_id")) or
+                not isinstance(port_id, _STRING_TYPES) or
+                not port_id.strip() or
+                not isinstance(ports, list) or
+                len(ports) != 1 or
+                not isinstance(ports[0], dict) or
+                ports[0].get("port_id") != port_id
+            ):
+                return None
+        generation = _int_value(self._state.get("pending_generation"))
+        desired_hash = self._state.get("pending_desired_hash")
+        if (
+            _int_value(body.get("generation")) != generation or
+            body.get("desired_hash") != desired_hash or
+            desired_snapshot_hash(body) != desired_hash or
+            len(_json_bytes(body)) > SNAPSHOT_REQUEST_MAX_BYTES
+        ):
+            return None
+        return copy.deepcopy(request)
+
     def _pending_matches(self, generation, desired_hash):
         return bool(
             _int_value(self._state.get("pending_generation")) == generation and
@@ -307,6 +399,9 @@ class SnapshotStateStore(object):
         self._state["pending_scope"] = None
         self._state["pending_affected_port_ids"] = None
         self._state["pending_since"] = None
+        self._state["pending_request"] = None
+        self._state["pending_retry_count"] = 0
+        self._state["pending_last_retry_at"] = None
 
     def _clear_pending_if_matches(self, generation, desired_hash):
         if not self._pending_matches(generation, desired_hash):
@@ -591,6 +686,7 @@ class SnapshotStateStore(object):
         desired_hash = self._state.get("pending_desired_hash")
         if not generation or not desired_hash:
             return None
+        request = self._validated_pending_request()
         return {
             "generation": generation,
             "desired_hash": desired_hash,
@@ -603,7 +699,28 @@ class SnapshotStateStore(object):
                 self._state.get("pending_affected_port_ids")
             ),
             "pending_since": self._state.get("pending_since"),
+            "request": request,
+            "retryable": request is not None,
+            "retry_count": _int_value(
+                self._state.get("pending_retry_count")
+            ),
+            "last_retry_at": self._state.get("pending_last_retry_at"),
         }
+
+    def record_snapshot_retry(self, generation, desired_hash):
+        generation = _int_value(generation)
+        if (
+            not self._pending_matches(generation, desired_hash) or
+            self._validated_pending_request() is None
+        ):
+            raise RuntimeError("pending snapshot is not retryable")
+        self._state["pending_retry_count"] = (
+            _int_value(self._state.get("pending_retry_count")) + 1
+        )
+        self._state["pending_last_retry_at"] = _now()
+        self._state["updated_at"] = _now()
+        self._write()
+        return self.pending_snapshot()
 
     def pending_delete(self):
         port_id = self._state.get("pending_delete_port_id")

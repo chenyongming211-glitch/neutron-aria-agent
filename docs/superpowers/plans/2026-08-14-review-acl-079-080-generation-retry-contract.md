@@ -143,7 +143,7 @@ metadata, oversize validation occurring after pending conflict, and the event
 loop treating `retry_snapshot` as blocked. There were no fixture syntax or
 module import failures after using the repository package path.
 
-- [ ] **Step 6: Commit and push Python RED**
+- [x] **Step 6: Commit and push Python RED**
 
 ```bash
 git add docs/neutron-status-contract-v2-scenarios.json \
@@ -158,6 +158,10 @@ git push origin v0.9-neutron-agent
 
 Hosted `fast-contracts` must fail on the intended Python behaviors. Do not add
 Rust RED until this failure is captured.
+
+Hosted RED: commit `93f77ac`, Build `31777521743`, job `fast-contracts`
+`94695986527`. The job ran 614 tests and failed only on the 12 intended new
+V2/request/retry behaviors; Rust jobs were skipped behind this RED boundary.
 
 ---
 
@@ -189,7 +193,7 @@ _STATUS_CONTRACTS = {
 Capability and error hashes must be accepted only in matching known contract
 profiles, not as independent mix-and-match sets.
 
-- [ ] **Step 1: Implement strict dual negotiation and V2 decoding**
+- [x] **Step 1: Implement strict dual negotiation and V2 decoding**
 
 - Preserve the V1 decoder and closed triples unchanged.
 - Add the V2 blocked/retry triple and exact hash/profile.
@@ -199,7 +203,7 @@ profiles, not as independent mix-and-match sets.
   `authority_state` string.
 - Reject crossed profile fields and latch the write gate exactly as today.
 
-- [ ] **Step 2: Persist bounded pending request evidence**
+- [x] **Step 2: Persist bounded pending request evidence**
 
 - Store a deep-copied request after assigning its generation and desired hash.
 - Normalize scope to full host or exact scoped path ID.
@@ -209,7 +213,7 @@ profiles, not as independent mix-and-match sets.
 - Clear all request/retry fields only with the matching pending commit/clear.
 - Preserve Python 2.7 compatible JSON and atomic fsync/replace behavior.
 
-- [ ] **Step 3: Implement typed bounded retry orchestration**
+- [x] **Step 3: Implement typed bounded retry orchestration**
 
 - Teach `_remote_pending_action` to return `retry_snapshot` only from decoded
   V2 control.
@@ -221,7 +225,7 @@ profiles, not as independent mix-and-match sets.
   retain operator-required state at generation zero as specified.
 - Reuse existing scheduler/backoff; no immediate retry loop.
 
-- [ ] **Step 4: Run focused and broad Python GREEN locally**
+- [x] **Step 4: Run focused and broad Python GREEN locally**
 
 Run:
 

@@ -8223,14 +8223,32 @@ class StatusContractV2RetryOrchestrationRedTestCase(unittest.TestCase):
         self.assertEqual(prepared["desired_hash"], action["remote_desired_hash"])
 
     def test_v2_changed_desired_state_recovers_only_positive_baseline(self):
-        sync = self._sync()
-        positive = self._partial("positive-baseline-durable-partial")
-        first = self._partial("first-generation-durable-partial")
+        positive_store = InMemorySnapshotStateStore()
+        positive_prepared = positive_store.prepare_snapshot_at_generation(
+            {"host": "compute-1", "ports": []},
+            5,
+        )
+        positive = self._partial(
+            "positive-baseline-durable-partial",
+            positive_prepared["desired_hash"],
+        )
+        first_store = InMemorySnapshotStateStore()
+        first_prepared = first_store.prepare_snapshot(
+            {"host": "compute-1", "ports": []}
+        )
+        first = self._partial(
+            "first-generation-durable-partial",
+            first_prepared["desired_hash"],
+        )
 
-        positive_action = sync._remote_pending_action(
+        positive_action = self._sync(
+            state_store=positive_store,
+        )._remote_pending_action(
             {}, positive, "newer-desired-hash",
         )
-        first_action = sync._remote_pending_action(
+        first_action = self._sync(
+            state_store=first_store,
+        )._remote_pending_action(
             {}, first, "newer-desired-hash",
         )
 
@@ -8294,7 +8312,7 @@ class StatusContractV2RetryOrchestrationRedTestCase(unittest.TestCase):
                 ports=[port],
             )
 
-            with self.assertRaises(LocalApiTimeoutError):
+            with self.assertRaises(LocalApiError):
                 sync.full_resync()
 
             self.assertEqual(1, len(client.snapshots))
@@ -8305,6 +8323,121 @@ class StatusContractV2RetryOrchestrationRedTestCase(unittest.TestCase):
             )
         finally:
             shutil.rmtree(state_dir)
+
+    def test_v2_first_generation_partial_retries_exact_full_request_to_ready(self):
+        class RetryThenReadyClient(FakeLocalClient):
+            def __init__(self, partial_status):
+                FakeLocalClient.__init__(self)
+                self.partial_status = partial_status
+
+            def status(self):
+                if not self.snapshots:
+                    return copy.deepcopy(self.partial_status)
+                status = status_v2_scenario(
+                    "same-generation-retry-ready"
+                )["status"]
+                status["desired_hash"] = self.snapshots[-1]["desired_hash"]
+                status["applied_desired_hash"] = self.snapshots[-1][
+                    "desired_hash"
+                ]
+                return status
+
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot({
+                "host": "compute-1",
+                "ports": [],
+            })
+            partial = self._partial(
+                "first-generation-durable-partial",
+                prepared["desired_hash"],
+            )
+            client = RetryThenReadyClient(partial)
+            sync = self._sync(
+                state_store=SnapshotStateStore(state_dir),
+                client=client,
+            )
+
+            result = sync.full_resync()
+
+            self.assertEqual(1, len(client.snapshots))
+            self.assertEqual(prepared["generation"], client.snapshots[0]["generation"])
+            self.assertEqual(prepared["desired_hash"], client.snapshots[0]["desired_hash"])
+            self.assertEqual(None, SnapshotStateStore(state_dir).pending_snapshot())
+            self.assertTrue(result["status"]["ready"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_v2_scoped_partial_retries_exact_scoped_route(self):
+        class ScopedRetryClient(FakeLocalClient):
+            def __init__(self):
+                FakeLocalClient.__init__(self)
+                self.partial_status = None
+
+            def status(self):
+                if self.partial_status is not None and not self.port_snapshots:
+                    return copy.deepcopy(self.partial_status)
+                return FakeLocalClient.status(self)
+
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        neutron_port = {
+            "id": port_id,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "compute-1",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }
+        client = ScopedRetryClient()
+        state_store = InMemorySnapshotStateStore()
+        sync = self._sync(
+            state_store=state_store,
+            client=client,
+            ports=[neutron_port],
+        )
+        baseline = sync.full_resync()
+        neutron_port["revision_number"] = 8
+        preview = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="compute-1",
+            revision_number=8,
+        )
+        prepared = state_store.prepare_scoped_snapshot(
+            preview["snapshot"],
+            minimum_generation=baseline["snapshot"]["generation"],
+        )
+        partial = copy.deepcopy(client.status())
+        partial.update({
+            "status_schema_version": 2,
+            "status_contract_hash": "v0.9-neutron-status-2",
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "retry_snapshot",
+            "recovery_cause": None,
+            "last_classified_generation": baseline["snapshot"]["generation"],
+            "accepted_generation": prepared["generation"],
+            "pending_generation": prepared["generation"],
+            "desired_hash": prepared["desired_hash"],
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "partial",
+        })
+        client.partial_status = partial
+
+        result = sync.apply_port_scoped_snapshot(
+            port_id,
+            binding_host="compute-1",
+            revision_number=8,
+        )
+
+        self.assertTrue(result["submitted"])
+        self.assertEqual(1, len(client.port_snapshots))
+        submitted = client.port_snapshots[0]
+        self.assertEqual(port_id, submitted["port_id"])
+        self.assertEqual(prepared["generation"], submitted["snapshot"]["generation"])
+        self.assertEqual(prepared["desired_hash"], submitted["snapshot"]["desired_hash"])
 
 
 if __name__ == "__main__":

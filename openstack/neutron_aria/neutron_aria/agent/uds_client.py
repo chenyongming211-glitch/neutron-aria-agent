@@ -24,11 +24,43 @@ NEUTRON_CAPABILITY_HASH = "v0.9-neutron-capabilities-3"
 NEUTRON_ATTACH_AUTHORITY = "neutron_snapshot"
 NEUTRON_STATUS_SCHEMA_VERSION = 1
 NEUTRON_STATUS_CONTRACT_HASH = "v0.9-neutron-status-1"
+NEUTRON_ERROR_CODES_HASH_V2 = "v0.9-neutron-errors-3"
+NEUTRON_CAPABILITY_HASH_V2 = "v0.9-neutron-capabilities-4"
+NEUTRON_STATUS_SCHEMA_VERSION_V2 = 2
+NEUTRON_STATUS_CONTRACT_HASH_V2 = "v0.9-neutron-status-2"
 DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 
 
 STATUS_CONTRACT_V1 = "v1"
+STATUS_CONTRACT_V2 = "v2"
 STATUS_CONTRACT_LEGACY_V0 = "legacy_v0"
+
+_STATUS_CONTRACTS = {
+    (
+        NEUTRON_STATUS_SCHEMA_VERSION,
+        NEUTRON_STATUS_SCHEMA_VERSION,
+        NEUTRON_STATUS_CONTRACT_HASH,
+    ): STATUS_CONTRACT_V1,
+    (
+        NEUTRON_STATUS_SCHEMA_VERSION_V2,
+        NEUTRON_STATUS_SCHEMA_VERSION_V2,
+        NEUTRON_STATUS_CONTRACT_HASH_V2,
+    ): STATUS_CONTRACT_V2,
+}
+_STATUS_CONTRACT_PROFILES = {
+    STATUS_CONTRACT_V1: (
+        NEUTRON_ERROR_CODES_HASH,
+        NEUTRON_CAPABILITY_HASH,
+    ),
+    STATUS_CONTRACT_V2: (
+        NEUTRON_ERROR_CODES_HASH_V2,
+        NEUTRON_CAPABILITY_HASH_V2,
+    ),
+    STATUS_CONTRACT_LEGACY_V0: (
+        NEUTRON_ERROR_CODES_HASH,
+        NEUTRON_CAPABILITY_HASH,
+    ),
+}
 
 _STATUS_CONTRACT_CAPABILITY_FIELDS = (
     "status_schema_version_min",
@@ -49,6 +81,11 @@ _STATUS_V1_TRIPLES = frozenset((
     ("blocked", "blocked", "operator"),
     ("recovery", "degraded", "full_resync"),
 ))
+_STATUS_V2_TRIPLES = frozenset(
+    tuple(_STATUS_V1_TRIPLES) + (
+        ("blocked", "blocked", "retry_snapshot"),
+    )
+)
 _STATUS_V1_RECOVERY_CAUSES = frozenset((None, "inventory_unavailable"))
 _STATUS_V1_DOMAIN_STATES = frozenset((
     "ready", "not_requested", "degraded", "blocked",
@@ -203,11 +240,8 @@ def _negotiate_status_contract(body):
         "status_contract_hash",
         nonempty=True,
     )
-    if (
-        schema_min != NEUTRON_STATUS_SCHEMA_VERSION or
-        schema_max != NEUTRON_STATUS_SCHEMA_VERSION or
-        contract_hash != NEUTRON_STATUS_CONTRACT_HASH
-    ):
+    mode = _STATUS_CONTRACTS.get((schema_min, schema_max, contract_hash))
+    if mode is None:
         raise LocalApiContractError(
             "unsupported status contract %s-%s %r" % (
                 schema_min,
@@ -215,7 +249,7 @@ def _negotiate_status_contract(body):
                 contract_hash,
             )
         )
-    return STATUS_CONTRACT_V1
+    return mode
 
 
 def _status_declared_mode(body):
@@ -226,7 +260,28 @@ def _status_declared_mode(body):
         return STATUS_CONTRACT_LEGACY_V0
     if not all(present):
         raise LocalApiContractError("partial status contract response declaration")
-    return STATUS_CONTRACT_V1
+    schema_version = _strict_int(
+        body["status_schema_version"],
+        "status_schema_version",
+    )
+    contract_hash = _strict_string(
+        body["status_contract_hash"],
+        "status_contract_hash",
+        nonempty=True,
+    )
+    mode = _STATUS_CONTRACTS.get((
+        schema_version,
+        schema_version,
+        contract_hash,
+    ))
+    if mode is None:
+        raise LocalApiContractError(
+            "unsupported status response contract %s %r" % (
+                schema_version,
+                contract_hash,
+            )
+        )
+    return mode
 
 
 def _status_common_scalars(body, v1):
@@ -576,7 +631,13 @@ def _validate_classified_rows(values, expected_readiness=None):
         raise LocalApiContractError("degraded classification lacks degraded evidence")
 
 
-def _decode_status_v1(body):
+def _decode_status_versioned(
+    body,
+    expected_schema_version,
+    expected_contract_hash,
+    allowed_triples,
+    allow_retry_snapshot=False,
+):
     if not isinstance(body, dict):
         raise LocalApiContractError("status response must be an object")
     schema_version = _strict_int(
@@ -588,8 +649,8 @@ def _decode_status_v1(body):
         nonempty=True,
     )
     if (
-        schema_version != NEUTRON_STATUS_SCHEMA_VERSION or
-        contract_hash != NEUTRON_STATUS_CONTRACT_HASH
+        schema_version != expected_schema_version or
+        contract_hash != expected_contract_hash
     ):
         raise LocalApiContractError(
             "unsupported status response contract %s %r" % (
@@ -614,7 +675,7 @@ def _decode_status_v1(body):
         nonempty=True,
     )
     triple = (transaction_state, readiness, action)
-    if triple not in _STATUS_V1_TRIPLES:
+    if triple not in allowed_triples:
         raise LocalApiContractError("invalid status state/readiness/action %r" % (triple,))
     recovery_cause = _strict_string(
         _required(body, "recovery_cause"),
@@ -667,19 +728,44 @@ def _decode_status_v1(body):
             raise LocalApiContractError("invalid recovery diagnostics")
         _validate_complete_applied(values)
         _validate_classified_rows(values)
-    elif action == "recover_pending":
+    elif action in ("recover_pending", "retry_snapshot"):
+        if action == "retry_snapshot" and not allow_retry_snapshot:
+            raise LocalApiContractError("retry_snapshot requires status V2")
         if recovery_cause not in (None, "inventory_unavailable"):
             raise LocalApiContractError("invalid recovery cause/action pair")
         if values["wal_replay_failures"] != 0:
             raise LocalApiContractError("recoverable status has WAL replay failures")
         _validate_complete_pending(values)
-        _parse_managed_rows(values["managed_ports"])
-        _parse_v1_status_rows(
+        managed = _parse_managed_rows(values["managed_ports"])
+        statuses = _parse_v1_status_rows(
             values["port_statuses"],
             values["applied_generation"],
             values["applied_desired_hash"],
         )
-        if recovery_cause == "inventory_unavailable":
+        if action == "retry_snapshot":
+            if recovery_cause is not None:
+                raise LocalApiContractError(
+                    "snapshot retry cannot carry a recovery cause"
+                )
+            if (
+                values["authority_state"] != "partial" or
+                values["wal_status"] != "committed" or
+                values["accepted_generation"] != values["pending_generation"]
+            ):
+                raise LocalApiContractError(
+                    "snapshot retry requires a durable partial commit"
+                )
+            if applied == 0:
+                if (
+                    values["applied_desired_hash"] is not None or
+                    managed or statuses or values["active_instances"]
+                ):
+                    raise LocalApiContractError(
+                        "generation-0 retry retains applied evidence"
+                    )
+            else:
+                _validate_classified_rows(values)
+        elif recovery_cause == "inventory_unavailable":
             if values["accepted_generation"] != values["pending_generation"]:
                 raise LocalApiContractError("inventory recovery requires committed lineage")
             if applied == 0 and (
@@ -699,6 +785,25 @@ def _decode_status_v1(body):
         # reject the exact state that safely reports the inconsistency.
 
     return dict(body)
+
+
+def _decode_status_v1(body):
+    return _decode_status_versioned(
+        body,
+        NEUTRON_STATUS_SCHEMA_VERSION,
+        NEUTRON_STATUS_CONTRACT_HASH,
+        _STATUS_V1_TRIPLES,
+    )
+
+
+def _decode_status_v2(body):
+    return _decode_status_versioned(
+        body,
+        NEUTRON_STATUS_SCHEMA_VERSION_V2,
+        NEUTRON_STATUS_CONTRACT_HASH_V2,
+        _STATUS_V2_TRIPLES,
+        allow_retry_snapshot=True,
+    )
 
 
 def _legacy_identity_is_applied(values):
@@ -885,6 +990,8 @@ def _decode_status(body, negotiated_mode=None):
         )
     if declared_mode == STATUS_CONTRACT_V1:
         return _decode_status_v1(body)
+    if declared_mode == STATUS_CONTRACT_V2:
+        return _decode_status_v2(body)
     return _decode_legacy_status_v0(body)
 
 
@@ -932,8 +1039,12 @@ class LocalClient(object):
                 "/api/v1/neutron/capabilities",
                 contract_response=True,
             )
-            self._validate_capabilities(body, required_domains or [])
             mode = _negotiate_status_contract(body)
+            self._validate_capabilities(
+                body,
+                required_domains or [],
+                status_contract_mode=mode,
+            )
         except LocalApiContractError:
             self._latch_status_contract_error()
             raise
@@ -965,7 +1076,10 @@ class LocalClient(object):
             raise LocalApiContractError(
                 "invalid status response: %s" % exc
             )
-        if self._status_contract_mode is None and declared_mode == STATUS_CONTRACT_V1:
+        if (
+            self._status_contract_mode is None and
+            declared_mode in (STATUS_CONTRACT_V1, STATUS_CONTRACT_V2)
+        ):
             self._status_contract_write_blocked = True
             self._status_contract_fresh_handshake = False
         elif (
@@ -1106,7 +1220,12 @@ class LocalClient(object):
             except Exception:
                 pass
 
-    def _validate_capabilities(self, body, required_domains):
+    def _validate_capabilities(
+        self,
+        body,
+        required_domains,
+        status_contract_mode=STATUS_CONTRACT_LEGACY_V0,
+    ):
         if not isinstance(body, dict):
             raise LocalApiContractError("capabilities response must be an object")
         if body.get("api_version") != NEUTRON_API_VERSION:
@@ -1150,8 +1269,14 @@ class LocalClient(object):
 
         self._capability_request_timeout(body)
 
+        expected_error_hash, expected_capability_hash = (
+            _STATUS_CONTRACT_PROFILES[status_contract_mode]
+        )
         error_codes_hash = body.get("error_codes_hash")
-        if error_codes_hash is not None and error_codes_hash != NEUTRON_ERROR_CODES_HASH:
+        if (
+            error_codes_hash is not None and
+            error_codes_hash != expected_error_hash
+        ):
             raise LocalApiContractError(
                 "unsupported error_codes_hash %r" % error_codes_hash
             )
@@ -1161,7 +1286,10 @@ class LocalClient(object):
             raise LocalApiContractError("empty peer_auth_policy")
 
         capability_hash = body.get("capability_hash")
-        if capability_hash is not None and capability_hash != NEUTRON_CAPABILITY_HASH:
+        if (
+            capability_hash is not None and
+            capability_hash != expected_capability_hash
+        ):
             raise LocalApiContractError(
                 "unsupported capability_hash %r" % capability_hash
             )

@@ -1751,6 +1751,35 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         with self.assertRaises(LocalApiContractError):
             self._decode(fixture["capabilities"], invalid)
 
+    def test_every_v2_fixture_scenario_decodes_without_pending_readiness(self):
+        fixture = load_status_contract_v2_fixture()
+        for scenario in fixture["scenarios"]:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            _client, decoded = self._decode(
+                fixture["capabilities"],
+                scenario["status"],
+            )
+            with self.subTest(scenario=scenario["id"]):
+                self.assertEqual(
+                    scenario["status"]["required_action"],
+                    decoded["required_action"],
+                )
+                self.assertEqual(
+                    scenario["expected_python"]["mark_ready"],
+                    (
+                        decoded["transaction_state"] == "classified" and
+                        decoded["overall_readiness"] == "ready" and
+                        decoded["required_action"] == "none"
+                    ),
+                )
+                if decoded["pending_generation"] is not None:
+                    self.assertNotEqual("ready", decoded["overall_readiness"])
+                    self.assertTrue(all(
+                        row["generation"] <= decoded["applied_generation"]
+                        for row in decoded["port_statuses"]
+                    ))
+
     def test_v1_profile_rejects_retry_snapshot_token(self):
         scenario = status_scenario("blocked-recoverable-inventory")
         status = copy.deepcopy(scenario["status"])

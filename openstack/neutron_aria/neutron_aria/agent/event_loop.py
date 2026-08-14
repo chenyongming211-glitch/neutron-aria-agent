@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import copy
 import logging
 import time
 
@@ -251,6 +252,11 @@ class SnapshotSynchronizer(object):
             remote_status,
             desired_snapshot_hash(snapshot),
         )
+        if pending_action.get("action") == "retry_snapshot":
+            snapshot = self._retry_snapshot_body(
+                pending_action,
+                expected_scope="full_host",
+            )
         if pending_action.get("action") == "wait":
             prepared = self.state_store.prepare_snapshot_at_generation(
                 snapshot,
@@ -410,6 +416,12 @@ class SnapshotSynchronizer(object):
                     failure_phase="remote_pending_not_converged",
                     attempts=self._accepted_convergence_attempts(),
                 )
+            elif pending_action.get("action") == "retry_snapshot":
+                self.state_store.record_snapshot_retry(
+                    snapshot["generation"],
+                    snapshot["desired_hash"],
+                )
+                submit_mode = "retry_snapshot"
             elif prepared.get("reused_pending"):
                 response = self._maybe_recover_pending_before_submit(
                     snapshot,
@@ -418,7 +430,8 @@ class SnapshotSynchronizer(object):
                 if response is not None:
                     submit_mode = "pending_recovered_before_submit"
             if response is None:
-                submit_mode = "put_snapshot"
+                if submit_mode != "retry_snapshot":
+                    submit_mode = "put_snapshot"
                 phase_started = time.time()
                 response = self.local_client.put_snapshot(snapshot)
                 uds_submit_ms = _elapsed_ms(phase_started)
@@ -1005,6 +1018,12 @@ class SnapshotSynchronizer(object):
             preview["submitted"] = False
             preview["skipped_reason"] = "remote_status_requires_full_resync"
             return preview
+        if pending_action.get("action") == "retry_snapshot":
+            snapshot = self._retry_snapshot_body(
+                pending_action,
+                expected_scope="port",
+                port_id=port_id,
+            )
         generation_floor = self._generation_floor_from_status(remote_status)
 
         phase_started = time.time()
@@ -1032,7 +1051,13 @@ class SnapshotSynchronizer(object):
         submit_mode = "new_snapshot"
         try:
             response = None
-            if prepared.get("reused_pending"):
+            if pending_action.get("action") == "retry_snapshot":
+                self.state_store.record_snapshot_retry(
+                    snapshot["generation"],
+                    snapshot["desired_hash"],
+                )
+                submit_mode = "retry_snapshot"
+            elif prepared.get("reused_pending"):
                 response = self._maybe_recover_pending_before_submit(
                     snapshot,
                     projected_port_ids,
@@ -1040,7 +1065,8 @@ class SnapshotSynchronizer(object):
                 if response is not None:
                     submit_mode = "pending_recovered_before_submit"
             if response is None:
-                submit_mode = "put_port_snapshot"
+                if submit_mode != "retry_snapshot":
+                    submit_mode = "put_port_snapshot"
                 phase_started = time.time()
                 response = self.local_client.put_port_snapshot(
                     port_id,
@@ -1880,9 +1906,7 @@ class SnapshotSynchronizer(object):
             raise LocalApiError("normalized status control is incomplete")
         has_normalized_control = all(normalized_control_presence)
         if has_normalized_control:
-            status_contract = (
-                "v1" if self._is_v1_status(status) else "legacy_v0"
-            )
+            status_contract = self._status_contract_mode(status)
             control = (
                 _status_token(status.get("transaction_state")),
                 _status_token(status.get("overall_readiness")),
@@ -1950,6 +1974,44 @@ class SnapshotSynchronizer(object):
                     else "block"
                 )
                 return common
+            if required_action == "retry_snapshot":
+                pending = self.state_store.pending_snapshot() or {}
+                exact_local_identity = bool(
+                    pending.get("generation") == pending_generation and
+                    pending.get("desired_hash") == remote_hash
+                )
+                if status_contract != "v2" or not exact_local_identity:
+                    common.update({
+                        "action": "block",
+                        "reason": "operator",
+                    })
+                    return common
+                if remote_hash and desired_hash == remote_hash:
+                    if not pending.get("retryable") or not pending.get("request"):
+                        common.update({
+                            "action": "block",
+                            "reason": "operator",
+                        })
+                        return common
+                    common.update({
+                        "action": "retry_snapshot",
+                        "request": copy.deepcopy(pending["request"]),
+                    })
+                    return common
+                try:
+                    applied_generation = int(
+                        status.get("applied_generation") or 0
+                    )
+                except (TypeError, ValueError):
+                    applied_generation = 0
+                if applied_generation > 0:
+                    common["action"] = "recover"
+                else:
+                    common.update({
+                        "action": "block",
+                        "reason": "operator",
+                    })
+                return common
             common["action"] = "block"
             return common
 
@@ -1972,6 +2034,33 @@ class SnapshotSynchronizer(object):
         else:
             common["action"] = "block"
         return common
+
+    def _retry_snapshot_body(
+        self,
+        pending_action,
+        expected_scope,
+        port_id=None,
+    ):
+        request = pending_action.get("request")
+        if not isinstance(request, dict):
+            raise LocalApiError("durable retry request is unavailable")
+        scope = request.get("scope")
+        body = request.get("body")
+        if not isinstance(scope, dict) or not isinstance(body, dict):
+            raise LocalApiError("durable retry request is invalid")
+        if scope.get("type") != expected_scope:
+            raise LocalApiError("durable retry request scope mismatch")
+        if expected_scope == "port" and scope.get("port_id") != port_id:
+            raise LocalApiError("durable retry request port mismatch")
+        if (
+            body.get("generation") != pending_action.get("generation") or
+            body.get("desired_hash") != pending_action.get(
+                "remote_desired_hash"
+            ) or
+            desired_snapshot_hash(body) != body.get("desired_hash")
+        ):
+            raise LocalApiError("durable retry request identity mismatch")
+        return copy.deepcopy(body)
 
     def _pre_submit_action_gate(
         self,
@@ -2710,6 +2799,21 @@ class SnapshotSynchronizer(object):
                 "status_contract_hash" in status
             )
         )
+
+    def _status_contract_mode(self, status):
+        if not isinstance(status, dict):
+            return "legacy_v0"
+        identity = (
+            status.get("status_schema_version"),
+            status.get("status_contract_hash"),
+        )
+        if identity == (1, "v0.9-neutron-status-1"):
+            return "v1"
+        if identity == (2, "v0.9-neutron-status-2"):
+            return "v2"
+        if any(item is not None for item in identity):
+            return "unknown"
+        return "legacy_v0"
 
     def _normalized_domain_set(self, domains, collection_name):
         if not isinstance(domains, list):
