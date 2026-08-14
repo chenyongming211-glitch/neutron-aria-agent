@@ -216,5 +216,9 @@ compatibility follow-up `d8ae123` passed exact-head Build
 `9309fe9` exposed the torn-write boundary and GREEN `37740d4` passed exact-head
 Build
 [31717345713](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31717345713).
-The active next batch is `REVIEW-OPS-038/040` startup configuration safety;
+`REVIEW-OPS-038/040` startup configuration safety is complete: RED `fb0f948`
+exposed both unsafe fallbacks and GREEN `9010f7e` passed eight exact startup
+behaviors plus warning-denied builds in exact-head Build
+[31763073075](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31763073075).
+The active next batch is `REVIEW-ACL-077` Python 2.7 status compatibility;
 later batches remain in the fixed order above.

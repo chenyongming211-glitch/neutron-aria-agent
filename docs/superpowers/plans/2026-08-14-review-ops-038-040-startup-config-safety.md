@@ -70,7 +70,7 @@ pub fn new(
 ) -> Self;
 ```
 
-- [ ] **Step 1: Add deterministic temporary configuration fixtures**
+- [x] **Step 1: Add deterministic temporary configuration fixtures**
 
 Add a `startup_config_path` helper in the `main.rs` test module. It must use
 process ID plus `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` and
@@ -94,7 +94,7 @@ fn startup_config_path(name: &str) -> PathBuf {
 }
 ```
 
-- [ ] **Step 2: Add missing, valid and invalid file behaviors**
+- [x] **Step 2: Add missing, valid and invalid file behaviors**
 
 Add tests named with the `startup_config_` prefix. The assertions must cover
 the exact contract:
@@ -135,7 +135,7 @@ Add malformed TOML and invalid regex tests which extract the `Err` through a
 `match`, assert that it contains the path plus `parse configuration` or
 `iface_pattern`, and assert it does not return defaults.
 
-- [ ] **Step 3: Add deterministic existing-read-failure behavior**
+- [x] **Step 3: Add deterministic existing-read-failure behavior**
 
 Create a directory at the requested configuration path so `read_to_string`
 must fail independently of runner UID. Assert that `load_startup_config`
@@ -159,7 +159,7 @@ fn startup_config_existing_unreadable_path_is_fatal() {
 }
 ```
 
-- [ ] **Step 4: Make the registry test contract require a compiled matcher**
+- [x] **Step 4: Make the registry test contract require a compiled matcher**
 
 Change the test helper to pass `Regex::new("^(lo|tap)").unwrap()` and add:
 
@@ -181,9 +181,9 @@ fn startup_config_registry_uses_prevalidated_pattern_without_default_fallback() 
 The helper `test_registry_with_pattern(root, Regex)` must construct the real
 registry; `test_registry(root)` delegates to it with `^(lo|tap)`.
 
-- [ ] **Step 5: Add the required hosted behavior filter**
+- [x] **Step 5: Add the required hosted behavior filter**
 
-Add this independent entry to `RUST_BEHAVIOR_TESTS` in
+Add this independent entry to `RUST_TESTS` in
 `ci/check_neutron_stage1.py`:
 
 ```python
@@ -193,7 +193,7 @@ Add this independent entry to `RUST_BEHAVIOR_TESTS` in
 Keep the existing `startup_mode` filter. The lane's existing nonzero-count
 contract must reject a filter that discovers no tests.
 
-- [ ] **Step 6: Run allowed RED preflight checks**
+- [x] **Step 6: Run allowed RED preflight checks**
 
 Run:
 
@@ -205,7 +205,7 @@ git diff --check
 
 Expected: all Python/static checks pass. Do not run Cargo locally.
 
-- [ ] **Step 7: Commit and push RED**
+- [x] **Step 7: Commit and push RED**
 
 ```bash
 git add agent/src/main.rs agent/src/tap_registry.rs ci/check_neutron_stage1.py
@@ -232,7 +232,7 @@ RED evidence is captured.
 - Produces `TapRegistry::new(..., Regex, ...) -> Self` with no fallback.
 - Consumes the tests and hosted filter from Task 1.
 
-- [ ] **Step 1: Add the concrete startup configuration type and loader**
+- [x] **Step 1: Add the concrete startup configuration type and loader**
 
 Import `regex::Regex` and implement this boundary in `agent/src/main.rs`:
 
@@ -285,7 +285,7 @@ fn load_startup_config(path: &Path) -> Result<StartupConfig, String> {
 
 Delete the old `load_config` function and its `PathBuf`-specific signature.
 
-- [ ] **Step 2: Move the gate to the start of `main`**
+- [x] **Step 2: Move the gate to the start of `main`**
 
 Immediately after `Args::parse`, replace the infallible load with:
 
@@ -305,7 +305,7 @@ let StartupConfig {
 This must remain before fragment settings, listener validation, tracing,
 eBPF resolution, directory creation, manager construction and socket binding.
 
-- [ ] **Step 3: Remove registry fallback by construction**
+- [x] **Step 3: Remove registry fallback by construction**
 
 Change `TapRegistry::new` to accept `iface_pattern: Regex` and assign it
 directly:
@@ -337,7 +337,7 @@ helpers in `tap_registry.rs` and `neutron_api.rs` to construct explicit valid
 `Regex` values. No unchecked string-to-regex conversion remains in the
 registry.
 
-- [ ] **Step 4: Run allowed GREEN preflight checks**
+- [x] **Step 4: Run allowed GREEN preflight checks**
 
 Run:
 
@@ -349,7 +349,7 @@ git diff --check
 
 Expected: all pass. Do not run Cargo locally.
 
-- [ ] **Step 5: Commit and push GREEN**
+- [x] **Step 5: Commit and push GREEN**
 
 ```bash
 git add agent/src/main.rs agent/src/tap_registry.rs agent/src/neutron_api.rs
@@ -375,7 +375,7 @@ warning-denied eBPF/userspace/agent builds.
 - Consumes exact RED/GREEN commit IDs and Build URLs from Tasks 1 and 2.
 - Advances the fixed sequence to `REVIEW-ACL-077` only after GREEN.
 
-- [ ] **Step 1: Record the final startup contract**
+- [x] **Step 1: Record the final startup contract**
 
 Update the design status and this plan with exact evidence. State explicitly:
 
@@ -389,18 +389,18 @@ valid compiled matcher -> passed unchanged to TapRegistry
 Do not claim privileged attach execution; this batch proves the pre-runtime
 failure boundary through Rust behavior and hosted build evidence.
 
-- [ ] **Step 2: Close only the verified findings**
+- [x] **Step 2: Close only the verified findings**
 
 Mark `REVIEW-OPS-038` and `REVIEW-OPS-040` fixed with exact commits and Builds.
 Update the ordinary-open-P1 count by removing OPS-038. Preserve all conditional
 and target-kernel-pending statuses.
 
-- [ ] **Step 3: Advance the fixed-order program**
+- [x] **Step 3: Advance the fixed-order program**
 
 Change the active next batch to `REVIEW-ACL-077` Python 2.7 status
 compatibility. Do not pull `REVIEW-TXN-033` forward.
 
-- [ ] **Step 4: Run documentation verification**
+- [x] **Step 4: Run documentation verification**
 
 ```bash
 python3 ci/check_blocked_terms.py
@@ -410,7 +410,7 @@ git diff --check
 
 Expected: all checks pass.
 
-- [ ] **Step 5: Commit, push and verify the documentation HEAD**
+- [x] **Step 5: Commit, push and verify the documentation HEAD**
 
 ```bash
 git add docs/openstack-neutron-aria-details/12-review-bug-backlog.md \
@@ -423,6 +423,21 @@ git push origin v0.9-neutron-agent
 
 Require the selected exact-head fast/static Build to pass, then verify the
 worktree is clean and local/remote divergence is `0 0`.
+
+## Execution Evidence
+
+- Design: `b72f6fa`; exact-head Build
+  [31762599416](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31762599416).
+- Plan: `a95ad12`; exact-head Build
+  [31762830028](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31762830028).
+- RED: `fb0f948`; Build
+  [31762886875](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31762886875)
+  failed on the deliberately absent startup gate and compiled-regex registry
+  interface, then was cancelled after evidence capture.
+- GREEN: `9010f7e`; exact-head Build
+  [31763073075](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31763073075)
+  executed eight `startup_config_` behaviors and passed fast contracts plus
+  warning-denied eBPF/userspace/agent builds.
 
 ## Plan Self-Review
 

@@ -1,6 +1,6 @@
 # REVIEW-OPS-038/040 Startup Configuration Safety Design
 
-**Status:** approved design; implementation pending RED evidence
+**Status:** source implementation and exact-head hosted CI complete
 
 **Date:** 2026-08-14
 
@@ -160,6 +160,17 @@ nonzero execution for:
 The existing `startup_mode` behaviors remain in the lane. Tests use public
 startup/registry behavior and filesystem inputs; no Python source parser or
 private function-shape checker is added.
+
+RED commit `fb0f948` failed in Build
+[31762886875](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31762886875)
+with `E0425` for the absent startup gate and `E0308` because the old registry
+still required an unchecked string; the remaining long build was cancelled
+after that exact evidence was captured. GREEN commit `9010f7e` passed eight
+nonzero `startup_config_` behaviors plus warning-denied eBPF, userspace and
+agent builds in exact-head Build
+[31763073075](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31763073075).
+No privileged attach execution is claimed or required for this pre-runtime
+failure boundary.
 
 ## 8. Failure And Compatibility Semantics
 
