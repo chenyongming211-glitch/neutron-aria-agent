@@ -274,8 +274,20 @@ impl WalWriter {
         let checkpoint_id = self.current_checkpoint_id.ok_or_else(|| {
             "checkpoint header required without a current checkpoint ID".to_string()
         })?;
-        self.append_checkpoint_buffered(checkpoint_id)?;
-        self.sync()?;
+        let result = (|| {
+            self.append_checkpoint_buffered(checkpoint_id)?;
+            self.sync()
+        })();
+        if let Err(error) = &result {
+            warn!(
+                checkpoint_id,
+                checkpoint_version = WAL_REPLAY_CURSOR_VERSION,
+                header_required = true,
+                error = %error,
+                "failed to publish required WAL checkpoint header"
+            );
+        }
+        result?;
         self.header_required = false;
         Ok(())
     }
@@ -326,6 +338,7 @@ impl WalWriter {
     /// Accepts pre-serialized JSON to avoid borrow conflicts when wal and state
     /// are fields of the same struct.
     pub fn compact(&mut self, state_json: &str) -> Result<(), String> {
+        let covered_mutations = self.entry_count;
         let checkpoint_id = self.next_checkpoint_id.ok_or_else(|| {
             "WAL checkpoint ID space exhausted; refusing to truncate WAL".to_string()
         })?;
@@ -366,6 +379,13 @@ impl WalWriter {
         self.ensure_checkpoint_header()?;
         self.entry_count = 0;
         self.last_compact_time = Instant::now();
+        info!(
+            checkpoint_id,
+            checkpoint_version = WAL_REPLAY_CURSOR_VERSION,
+            covered_mutations,
+            header_required = self.header_required,
+            "compacted standalone state with WAL checkpoint"
+        );
 
         Ok(())
     }
@@ -774,6 +794,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
         let reader = BufReader::new(file);
         let mut replayed = 0u64;
         let mut failed = u64::from(cursor_failed);
+        let mut prefix_discarded = false;
         for (line_num, line_result) in reader.lines().enumerate() {
             match line_result {
                 Ok(line) => {
@@ -806,6 +827,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
                                 state = checkpoint_state.clone();
                                 replayed = 0;
                                 failed = 0;
+                                prefix_discarded = true;
                             }
                         }
                         Err(e) => {
@@ -822,8 +844,15 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
             }
         }
         LAST_WAL_REPLAY_FAILURES.store(failed, Ordering::Relaxed);
-        if replayed > 0 {
-            info!(path = %wal_path, replayed, "replayed WAL entries");
+        if replayed > 0 || prefix_discarded {
+            info!(
+                path = %wal_path,
+                checkpoint_id = snapshot_checkpoint_id.unwrap_or(0),
+                checkpoint_version = state.wal_replay_cursor.version,
+                tail_replayed = replayed,
+                prefix_discarded,
+                "replayed standalone WAL tail"
+            );
         }
         if failed > 0 {
             warn!(path = %wal_path, failed, "WAL replay completed with failures");

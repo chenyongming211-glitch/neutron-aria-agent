@@ -391,6 +391,13 @@ Checkpoint records never increment it. A failed compact may conservatively
 retain the prior atomic count and trigger an earlier retry, but it must never
 report zero while a mutation tail remains uncheckpointed.
 
+- [x] **Step 4a: Preserve the approved checkpoint observability**
+
+Emit the existing structured compact/replay log with checkpoint ID/version,
+covered mutation count, selected tail count and prefix-discarded state. A
+failed required-header repair includes `header_required=true`. Do not add a
+metric family or log policy bodies.
+
 - [x] **Step 5: Run non-Cargo local validation**
 
 Run:
