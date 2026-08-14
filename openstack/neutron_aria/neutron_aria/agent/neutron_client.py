@@ -47,11 +47,17 @@ class NeutronPortSource(object):
             batch, has_next = self._extract_ports_and_next(result)
             ports.extend(batch)
 
-            if not has_next or not batch:
+            if not has_next:
                 break
+            if not batch:
+                raise PortSourceUnavailable(
+                    "neutron port response has a next page but no pagination marker"
+                )
             next_marker = batch[-1].get("id")
             if not next_marker:
-                break
+                raise PortSourceUnavailable(
+                    "neutron port response has a next page but no pagination marker"
+                )
             if next_marker in seen_markers:
                 raise PortSourceUnavailable(
                     "neutron port response repeated pagination marker %s"
@@ -103,6 +109,7 @@ class AriaAclRestClient(object):
         "aria_acl_bindings": "/aria-acl-bindings",
         "aria_acl_port_statuses": "/aria-acl-port-statuses",
     }
+    ARIA_ACL_STATUS_CALL_STYLE = "payload"
 
     def __init__(self, neutron_client, page_size=None):
         self.neutron_client = neutron_client
@@ -130,10 +137,7 @@ class AriaAclRestClient(object):
                 "neutronclient does not expose generic POST for /aria-acl-port-statuses"
             )
         body = {"aria_acl_port_status": port_status}
-        try:
-            return post(self.COLLECTIONS["aria_acl_port_statuses"], body=body)
-        except TypeError:
-            return post(self.COLLECTIONS["aria_acl_port_statuses"], body)
+        return post(self.COLLECTIONS["aria_acl_port_statuses"], body=body)
 
     def delete_aria_acl_port_status(self, port_id, host):
         delete = getattr(self.neutron_client, "delete", None)

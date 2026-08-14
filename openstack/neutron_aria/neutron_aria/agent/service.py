@@ -264,18 +264,10 @@ class AgentService(object):
             decisions=batch_dict["decisions"],
         )
         if delete_errors:
-            self.synchronizer.runtime_status.mark_degraded(
-                DELETE_PORT_DEGRADED_REASON,
-                "; ".join(delete_errors),
+            return self._resync_after_delete_failure(
+                batch_dict,
+                delete_errors,
             )
-            heartbeat = self.synchronizer.report_status()
-            return {
-                "snapshot": None,
-                "response": None,
-                "status": self.synchronizer.runtime_status.to_dict(),
-                "heartbeat": heartbeat,
-                "events": batch_dict,
-            }
 
         port_updates_requiring_resync = {}
         single_port_incremental_allowed = self._single_port_incremental_allowed(batch)
@@ -289,18 +281,11 @@ class AgentService(object):
                         reason=decision.get("delete_reason") or "migration_source_cleanup",
                     )
                 except Exception as exc:
-                    self.synchronizer.runtime_status.mark_degraded(
-                        DELETE_PORT_DEGRADED_REASON,
-                        "%s:%s" % (port_id, exc),
+                    decision["delete_error"] = str(exc)
+                    return self._resync_after_delete_failure(
+                        batch_dict,
+                        ["%s:%s" % (port_id, exc)],
                     )
-                    heartbeat = self.synchronizer.report_status()
-                    return {
-                        "snapshot": None,
-                        "response": None,
-                        "status": self.synchronizer.runtime_status.to_dict(),
-                        "heartbeat": heartbeat,
-                        "events": batch_dict,
-                    }
                 continue
             if decision.get("action") == ACTION_IGNORE:
                 continue
@@ -444,6 +429,18 @@ class AgentService(object):
         result["incremental_attempted"] = True
         result["status"] = self.synchronizer.runtime_status.to_dict()
         result["heartbeat"] = self.synchronizer.report_status()
+        return result
+
+    def _resync_after_delete_failure(self, batch_dict, delete_errors):
+        batch_dict["delete_errors"] = list(delete_errors)
+        self._record_event_observability(batch_dict["decisions"])
+        self.synchronizer.runtime_status.mark_degraded(
+            DELETE_PORT_DEGRADED_REASON,
+            "; ".join(delete_errors),
+        )
+        result = self.synchronizer.safe_full_resync()
+        result["events"] = batch_dict
+        result["resync_attempted"] = True
         return result
 
     def _delete_known_ports(self, port_ids, decisions=None):

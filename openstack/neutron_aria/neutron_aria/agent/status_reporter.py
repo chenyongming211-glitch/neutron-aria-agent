@@ -6,6 +6,8 @@ from neutron_aria.agent.status import ARIA_AGENT_TYPE
 
 ARIA_AGENT_BINARY = "neutron-aria-agent"
 ARIA_AGENT_TOPIC = "N/A"
+ARIA_ACL_STATUS_CALL_CONTEXT = "context"
+ARIA_ACL_STATUS_CALL_PAYLOAD = "payload"
 HEARTBEAT_SCHEMA_VERSION = 2
 HEARTBEAT_SAMPLE_LIMIT = 3
 HEARTBEAT_DETAIL_SUMMARY_ONLY = "summary_only"
@@ -218,6 +220,19 @@ class AriaAclPortStatusReporter(object):
         self.aria_acl_api = aria_acl_api
         self.context = context
         self.host = host
+        self.api_call_style = getattr(
+            aria_acl_api,
+            "ARIA_ACL_STATUS_CALL_STYLE",
+            ARIA_ACL_STATUS_CALL_CONTEXT,
+        )
+        if self.api_call_style not in (
+            ARIA_ACL_STATUS_CALL_CONTEXT,
+            ARIA_ACL_STATUS_CALL_PAYLOAD,
+        ):
+            raise StatusReportError(
+                "unsupported aria_acl status call style %s"
+                % self.api_call_style
+            )
         self.pending_deleted_port_ids = set()
 
     def report(self, runtime_status):
@@ -256,14 +271,13 @@ class AriaAclPortStatusReporter(object):
             raise StatusReportError(
                 "aria_acl API does not expose delete_aria_acl_port_status"
             )
-        try:
-            return method(
-                self.context,
-                port_id,
-                host=self.host,
-            )
-        except TypeError:
-            return method(port_id, host=self.host)
+        if self.api_call_style == ARIA_ACL_STATUS_CALL_PAYLOAD:
+            return method(port_id, self.host)
+        return method(
+            self.context,
+            port_id,
+            host=self.host,
+        )
 
     def _port_status_payload(self, runtime_status, status):
         source = dict(status)
@@ -309,10 +323,9 @@ class AriaAclPortStatusReporter(object):
         method = getattr(self.aria_acl_api, "report_aria_acl_port_status", None)
         if method is None:
             raise StatusReportError("aria_acl API does not expose report_aria_acl_port_status")
-        try:
-            return method(self.context, body)
-        except TypeError:
+        if self.api_call_style == ARIA_ACL_STATUS_CALL_PAYLOAD:
             return method(payload)
+        return method(self.context, body)
 
 
 class CompositeStatusReporter(object):
