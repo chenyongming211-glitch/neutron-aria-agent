@@ -38,7 +38,7 @@ existing clean-install container lane.
 - [x] Extend the installed-egg Python 2.7 smoke to assert that `json.loads`
   returns a `unicode` `acl` key and that hydration preserves `{"acl": 42}`.
 - [x] Run the focused Python 3 unit test locally.
-- [ ] Commit and push RED. Record the expected Python 2.7 clean-install failure.
+- [x] Commit and push RED. Record the expected Python 2.7 clean-install failure.
 
 ### Task 2: Implement The Compatibility Boundary
 
@@ -46,10 +46,10 @@ existing clean-install container lane.
 
 - Modify: `openstack/neutron_aria/neutron_aria/agent/status.py`
 
-- [ ] Define `_STRING_TYPES` using `basestring` with a Python 3 `str` fallback.
-- [ ] Replace the bare `str` predicate in `_generation_by_domain` with
+- [x] Define `_STRING_TYPES` using `basestring` with a Python 3 `str` fallback.
+- [x] Replace the bare `str` predicate in `_generation_by_domain` with
   `_STRING_TYPES` without changing any other normalization behavior.
-- [ ] Run the focused unit test and the relevant fast Python contracts locally.
+- [x] Run the focused unit test and the relevant fast Python contracts locally.
 - [ ] Commit and push GREEN.
 
 ### Task 3: Hosted Verification And Closure

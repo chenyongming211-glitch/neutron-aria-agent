@@ -6,6 +6,12 @@ import time
 ARIA_AGENT_TYPE = "Aria ACL agent"
 
 
+try:
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _STRING_TYPES = (str,)
+
+
 class AgentRuntimeStatus(object):
     def __init__(self, host, agent_type=ARIA_AGENT_TYPE):
         self.host = host
@@ -281,7 +287,7 @@ class AgentRuntimeStatus(object):
     def _generation_by_domain(self, generations):
         result = {}
         for domain, generation in dict(generations or {}).items():
-            if not isinstance(domain, str) or not domain:
+            if not isinstance(domain, _STRING_TYPES) or not domain:
                 continue
             result[domain] = self._int_or_default(generation, 0)
         return result
