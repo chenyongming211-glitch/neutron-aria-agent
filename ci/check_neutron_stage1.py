@@ -342,8 +342,8 @@ def check_uds_contract_artifact():
         "supports_port_delete": True,
         "body_max_bytes": uds.NEUTRON_BODY_MAX_BYTES,
         "timeout_ms": uds.NEUTRON_TIMEOUT_MS,
-        "error_codes_hash": uds.NEUTRON_ERROR_CODES_HASH,
-        "capability_hash": uds.NEUTRON_CAPABILITY_HASH,
+        "error_codes_hash": uds.NEUTRON_ERROR_CODES_HASH_V2,
+        "capability_hash": uds.NEUTRON_CAPABILITY_HASH_V2,
     }
     for name, value in expected.items():
         if contract.get(name) != value:
