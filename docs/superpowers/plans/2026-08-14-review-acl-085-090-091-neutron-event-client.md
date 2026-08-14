@@ -325,7 +325,7 @@ the immediate-resync contract, pagination failure semantics, and exactly-once
 write behavior. Keep every excluded non-ACL item at its prior status. Change
 the ACL-only design active batch to `REVIEW-ACL-098/099`.
 
-- [ ] **Step 4: Commit, push, and require final documentation-head CI**
+- [x] **Step 4: Commit, push, and require final documentation-head CI**
 
 ```bash
 git add docs
