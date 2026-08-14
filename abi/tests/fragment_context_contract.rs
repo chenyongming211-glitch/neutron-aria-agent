@@ -4,7 +4,8 @@ use aria_ebpf_abi::{
     fragment_resolve_decision, fragment_tracking_required, FragmentConfig,
     FragmentContextDisposition, FragmentContextKey4, FragmentContextValue, FragmentCtCreatePoint,
     FragmentEpochValue, FragmentInstallDecision, FragmentKind, FragmentResolveDecision,
-    PipelineCtx, DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_CONTEXT_EXPIRED,
+    set_fragment_resolve_drop_ids, PipelineCtx, TraceEvent, TraceEventV6, TraceStreamEvent,
+    DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_CONTEXT_EXPIRED,
     DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
     DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
     FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP, FRAGMENT_CONTEXT_VERSION,
@@ -12,7 +13,9 @@ use aria_ebpf_abi::{
     FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
     FRAGMENT_METRIC_TRACKING_DISABLED, FRAGMENT_RUNTIME_MODE_MANAGED,
     FRAGMENT_RUNTIME_MODE_STANDALONE, IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP,
-    TAP_ID_UNASSIGNED,
+    TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
+    TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_FRAGMENT, TRACE_RESULT_DROP_QOS,
+    TRACE_RESULT_PASS,
 };
 
 const SECOND: u64 = 1_000_000_000;
@@ -553,4 +556,30 @@ fn assert_pipeline_ctx_reset_for_tc_packet(direction: u8, pkt_len: u32) {
 fn fragment_tc_packet_reset_clears_every_pipeline_field_for_both_directions() {
     assert_pipeline_ctx_reset_for_tc_packet(DIR_INGRESS, 64);
     assert_pipeline_ctx_reset_for_tc_packet(DIR_EGRESS, 9_001);
+}
+
+#[test]
+fn fragment_drop_trace_result_is_additive_without_layout_change() {
+    assert_eq!(TRACE_RESULT_PASS, 0);
+    assert_eq!(TRACE_RESULT_DROP_ACL, 1);
+    assert_eq!(TRACE_RESULT_DROP_ACL_PORT, 2);
+    assert_eq!(TRACE_RESULT_DROP_ACL_DEFAULT, 3);
+    assert_eq!(TRACE_RESULT_DROP_QOS, 4);
+    assert_eq!(TRACE_RESULT_DROP_FRAGMENT, 5);
+    assert_eq!(core::mem::size_of::<TraceEvent>(), 40);
+    assert_eq!(core::mem::size_of::<TraceEventV6>(), 64);
+    assert_eq!(core::mem::size_of::<TraceStreamEvent>(), 88);
+}
+
+#[test]
+fn fragment_resolve_drop_attribution_replaces_poisoned_group_ids() {
+    let mut pipeline = unsafe { core::mem::zeroed::<PipelineCtx>() };
+    pipeline.src_id = u32::MAX;
+    pipeline.dst_id = u32::MAX;
+
+    set_fragment_resolve_drop_ids(&mut pipeline, Some(17), None);
+    assert_eq!((pipeline.src_id, pipeline.dst_id), (17, 0));
+
+    set_fragment_resolve_drop_ids(&mut pipeline, None, Some(29));
+    assert_eq!((pipeline.src_id, pipeline.dst_id), (0, 29));
 }

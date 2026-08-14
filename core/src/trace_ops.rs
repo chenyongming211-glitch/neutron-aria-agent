@@ -290,3 +290,15 @@ pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
 
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::result_name;
+    use aria_ebpf_abi::userspace::TRACE_RESULT_DROP_FRAGMENT;
+
+    #[test]
+    fn fragment_observability_names_fragment_drop_separately_from_acl() {
+        assert_eq!(result_name(TRACE_RESULT_DROP_FRAGMENT), "drop:fragment");
+        assert_ne!(result_name(TRACE_RESULT_DROP_FRAGMENT), "drop:acl");
+    }
+}
