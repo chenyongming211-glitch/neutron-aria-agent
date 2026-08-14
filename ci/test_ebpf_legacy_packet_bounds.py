@@ -107,6 +107,17 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             2,
         )
 
+    def test_tc_parser_has_one_verifier_visible_parse_path(self):
+        body = function_body(self.lib_source, "parse_tc_packet")
+        self.assertEqual(
+            body.count("parse_tc_family("),
+            1,
+            "kernel 4.18 exceeds its verifier instruction-state limit when the "
+            "eight-header parser is expanded on both direct and retry paths",
+        )
+        self.assertIn("data_end - data < pull_len as usize", body)
+        self.assertEqual(body.count("ctx.pull_data(pull_len)"), 1)
+
     def test_ct_key_scratch_is_not_persistent_inventory(self):
         for name in ("CT_KEY4_SCRATCH", "CT_KEY6_SCRATCH"):
             self.assertNotIn(
