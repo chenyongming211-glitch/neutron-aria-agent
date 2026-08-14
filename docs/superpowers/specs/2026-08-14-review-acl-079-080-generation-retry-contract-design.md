@@ -281,6 +281,16 @@ This triple is emitted only for a structurally complete ordinary
 `authority_state=partial` identity with zero known WAL replay failures. It is
 not ready and cannot advance Python's classified or feature-ready tracks.
 
+Status V2 deliberately does not expose pending-generation port rows as
+classified evidence. Its public `port_statuses` retain the V1 row rule:
+`generation <= applied_generation`, with the applied hash required at the
+current applied generation. Internal error rows at pending generation G remain
+durable runtime/WAL diagnostics but do not become public readiness evidence.
+The typed transaction action plus exact pending G/H authorizes retry; Python
+does not infer retry permission from a failed port row. This also keeps the V1
+row parser reusable and prevents a pending row from being mistaken for an
+applied policy after restart.
+
 Existing decisions are preserved:
 
 | Runtime evidence | V2 action |
