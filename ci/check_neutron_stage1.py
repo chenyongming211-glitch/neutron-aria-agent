@@ -47,6 +47,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_preflight"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_early_response"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_port_route"],
+    ["test", "--locked", "-p", "aria-agent", "snapshot_generation_retry_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot"],
     ["test", "--locked", "-p", "aria-agent", "neutron_pending_recovery"],
     ["test", "--locked", "-p", "aria-agent", "domain_authority"],

@@ -10495,6 +10495,61 @@ mod tests {
         assert_eq!(error.code, "UDS_SCHEMA_MISMATCH");
     }
 
+    #[tokio::test]
+    async fn snapshot_generation_retry_zero_rejected_before_restore_and_wal() {
+        let root = temp_root("generation-zero-preflight");
+        let state = test_neutron_state(&root);
+        state.restore_ready.store(false, Ordering::Release);
+        let before = SnapshotAdmissionIdentity::capture(&state.runtime.read().await);
+        let wal_path = state
+            .registry
+            .base_state_path
+            .join("neutron-snapshot.wal");
+        assert!(!wal_path.exists());
+
+        let full = put_neutron_snapshot(
+            State(state.clone()),
+            Json(NeutronSnapshotRequest {
+                schema_version: None,
+                generation: 0,
+                desired_hash: Some("hash-zero-full".to_string()),
+                host: None,
+                ports: Vec::new(),
+            }),
+        )
+        .await
+        .into_response();
+        let (full_status, full_body) = response_json_value(full).await;
+        let scoped = put_neutron_port_snapshot(
+            State(state.clone()),
+            Path("target-port".to_string()),
+            Json(NeutronSnapshotRequest {
+                schema_version: None,
+                generation: 0,
+                desired_hash: Some("hash-zero-scoped".to_string()),
+                host: None,
+                ports: vec![port("target-port", "tap-target", true)],
+            }),
+        )
+        .await
+        .into_response();
+        let (scoped_status, scoped_body) = response_json_value(scoped).await;
+
+        for (status, body) in [(full_status, full_body), (scoped_status, scoped_body)] {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body.get("error").and_then(Value::as_str),
+                Some("INVALID_SNAPSHOT_GENERATION")
+            );
+        }
+        assert_eq!(
+            SnapshotAdmissionIdentity::capture(&state.runtime.read().await),
+            before
+        );
+        assert!(!wal_path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn neutron_snapshot_early_response_scoped_stale_generation() {
         let runtime = NeutronRuntimeState {
@@ -10801,7 +10856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutron_snapshot_submit_returns_pending_for_same_hash_inflight() {
+    async fn snapshot_generation_retry_cross_generation_same_hash_conflicts() {
         let root = temp_root("submit-pending-same-hash");
         let state = test_neutron_state(&root);
         {
@@ -10821,16 +10876,322 @@ mod tests {
             ports: vec![port("target-port", "tap-target", true)],
         };
 
+        let error = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect_err("same hash with a different generation must conflict");
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "snapshot_apply_in_progress");
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.pending_generation, Some(110));
+        assert_eq!(runtime.desired_hash.as_deref(), Some("hash-110"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_retry_exact_active_identity_deduplicates() {
+        let root = temp_root("submit-pending-exact-identity");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 110;
+            runtime.applied_generation = 109;
+            runtime.pending_generation = Some(110);
+            runtime.desired_hash = Some("hash-110".to_string());
+            runtime.applied_desired_hash = Some("hash-109".to_string());
+            runtime.authority_state = "applying".to_string();
+        }
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 110,
+            desired_hash: Some("hash-110".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
         let decision = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
             .await
-            .expect("same hash pending should deduplicate");
+            .expect("exact active transaction identity should deduplicate");
 
         assert!(decision.prepared.is_none());
         assert_eq!(decision.response.status, "pending");
+        assert_eq!(decision.response.generation, 110);
         assert_eq!(decision.response.accepted_generation, 110);
-        assert_eq!(decision.response.applied_generation, 109);
+        assert_eq!(state.runtime.read().await.pending_generation, Some(110));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_retry_same_generation_different_hash_conflicts() {
+        let root = temp_root("submit-pending-same-generation-different-hash");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 110;
+            runtime.applied_generation = 109;
+            runtime.pending_generation = Some(110);
+            runtime.desired_hash = Some("hash-110".to_string());
+            runtime.applied_desired_hash = Some("hash-109".to_string());
+            runtime.authority_state = "applying".to_string();
+        }
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 110,
+            desired_hash: Some("different-hash".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let error = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect_err("same generation with a different hash must conflict");
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "snapshot_apply_in_progress");
+        assert_eq!(state.runtime.read().await.pending_generation, Some(110));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn retryable_partial_runtime(generation: u64, desired_hash: &str) -> NeutronRuntimeState {
+        NeutronRuntimeState {
+            accepted_generation: generation,
+            applied_generation: 0,
+            pending_generation: Some(generation),
+            desired_hash: Some(desired_hash.to_string()),
+            applied_desired_hash: None,
+            authority_state: "partial".to_string(),
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        }
+    }
+
+    async fn apply_durable_partial_retry_with_results(
+        state: &NeutronApiState,
+        snapshot: NeutronSnapshotRequest,
+        ignored: Vec<NeutronPortApplyResult>,
+    ) -> NeutronSnapshotResponse {
+        let decision = accept_neutron_snapshot_submit(state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect("exact durable partial identity should be retryable");
+        assert_eq!(decision.response.generation, snapshot.generation);
+        assert_eq!(decision.response.desired_hash, snapshot.desired_hash);
+        assert_eq!(
+            state
+                .wal
+                .replay()
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.generation),
+            Some(snapshot.generation)
+        );
+        let mut prepared = decision
+            .prepared
+            .expect("durable partial must prepare one same-generation apply");
+        prepared.transaction = build_snapshot_transaction_from_plan(
+            ApplyScope::FullHost,
+            &snapshot,
+            SnapshotPlan {
+                attach: Vec::new(),
+                update: Vec::new(),
+                detach: Vec::new(),
+                ignored,
+                inventory_error: None,
+            },
+        )
+        .expect("test retry plan should remain within full-host scope");
+        apply_neutron_snapshot_for_scope(
+            state.clone(),
+            snapshot,
+            ApplyScope::FullHost,
+            prepared,
+        )
+        .await
+        .expect("same-generation retry result should be durably committed")
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_retry_durable_partial_reenters_exact_identity() {
+        let root = temp_root("durable-partial-retry");
+        let state = test_neutron_state(&root);
+        let partial = retryable_partial_runtime(1, "hash-1");
+        state
+            .wal
+            .append_snapshot_commit(partial.to_wal_state())
+            .expect("ordinary partial commit should be durable");
+        *state.runtime.write().await = partial;
+        let snapshot = inventory_snapshot(1, Vec::new());
+
+        let response =
+            apply_durable_partial_retry_with_results(&state, snapshot, Vec::new()).await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.generation, 1);
         let runtime = state.runtime.read().await;
-        assert_eq!(runtime.pending_generation, Some(110));
+        assert_eq!(runtime.accepted_generation, 1);
+        assert_eq!(runtime.applied_generation, 1);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "ready");
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_retry_repeated_failure_stays_partial_at_same_generation() {
+        let root = temp_root("durable-partial-retry-fails-again");
+        let state = test_neutron_state(&root);
+        let partial = retryable_partial_runtime(1, "hash-1");
+        state
+            .wal
+            .append_snapshot_commit(partial.to_wal_state())
+            .expect("ordinary partial commit should be durable");
+        *state.runtime.write().await = partial;
+        let snapshot = inventory_snapshot(1, Vec::new());
+        let response = apply_durable_partial_retry_with_results(
+            &state,
+            snapshot,
+            vec![NeutronPortApplyResult {
+                port_id: "transient-port".to_string(),
+                ifname: "tap-transient".to_string(),
+                action: "update".to_string(),
+                status: "error".to_string(),
+                reason: Some("transient_failure".to_string()),
+            }],
+        )
+        .await;
+
+        assert_eq!(response.status, "partial");
+        assert_eq!(response.generation, 1);
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 1);
+        assert_eq!(runtime.applied_generation, 0);
+        assert_eq!(runtime.pending_generation, Some(1));
+        assert_eq!(runtime.authority_state, "partial");
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_retry_unsafe_wal_states_never_append_retry_intent() {
+        for case in [
+            "unresolved-intent",
+            "committed-live-mismatch",
+            "replay-failure",
+            "non-partial-authority",
+            "committed-ports-mismatch",
+            "committed-statuses-mismatch",
+        ] {
+            let root = temp_root(case);
+            let state = test_neutron_state(&root);
+            let mut partial = retryable_partial_runtime(1, "hash-1");
+            if case == "unresolved-intent" {
+                state
+                    .wal
+                    .append_snapshot_intent(
+                        1,
+                        Some("hash-1".to_string()),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    )
+                    .expect("unresolved intent fixture should be durable");
+            } else if case == "committed-live-mismatch" {
+                state
+                    .wal
+                    .append_snapshot_commit(
+                        retryable_partial_runtime(1, "different-hash").to_wal_state(),
+                    )
+                    .expect("mismatched commit fixture should be durable");
+            } else {
+                if case == "non-partial-authority" {
+                    partial.authority_state = "degraded".to_string();
+                }
+                let durable = partial.clone();
+                state
+                    .wal
+                    .append_snapshot_commit(durable.to_wal_state())
+                    .expect("unsafe committed fixture should be durable");
+                if case == "replay-failure" {
+                    let wal_path = state
+                        .registry
+                        .base_state_path
+                        .join("neutron-snapshot.wal");
+                    let mut wal = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(wal_path)
+                        .expect("WAL should be appendable for corruption fixture");
+                    use std::io::Write as _;
+                    wal.write_all(b"{malformed-retry-tail\n")
+                        .expect("corrupt WAL tail should be durable");
+                    wal.flush().expect("corrupt WAL tail should be visible");
+                } else if case == "committed-ports-mismatch" {
+                    partial.ports.insert(
+                        "unexpected-port".to_string(),
+                        managed("unexpected-port", "tap-unexpected"),
+                    );
+                } else if case == "committed-statuses-mismatch" {
+                    partial.port_statuses.insert(
+                        "unexpected-port".to_string(),
+                        ready_status("unexpected-port", "tap-unexpected", 1),
+                    );
+                }
+            }
+            *state.runtime.write().await = partial.clone();
+            let before = SnapshotAdmissionIdentity::capture(&partial);
+            let before_statuses = partial.port_statuses.clone();
+
+            let error = accept_neutron_snapshot_submit(
+                &state,
+                &inventory_snapshot(1, Vec::new()),
+                &ApplyScope::FullHost,
+            )
+            .await
+            .expect_err("unsafe WAL state must reject a same-generation retry");
+
+            assert_eq!(error.status, StatusCode::CONFLICT, "{case}");
+            assert_eq!(error.code, "snapshot_retry_not_safe", "{case}");
+            assert_eq!(
+                SnapshotAdmissionIdentity::capture(&state.runtime.read().await),
+                before,
+                "{case}"
+            );
+            assert_eq!(
+                state.runtime.read().await.port_statuses,
+                before_statuses,
+                "{case}"
+            );
+            let replay = state.wal.replay();
+            if case == "unresolved-intent" {
+                assert!(replay.pending_intent.is_some());
+            } else {
+                assert!(replay.pending_intent.is_none());
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_retry_status_v2_marks_first_partial_retryable() {
+        let root = temp_root("status-v2-first-partial");
+        let state = test_neutron_state(&root);
+        *state.runtime.write().await = retryable_partial_runtime(1, "hash-1");
+
+        let response = get_neutron_status(State(state)).await.into_response();
+        let (status, body) = response_json_value(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status_schema_version"], 2);
+        assert_eq!(body["status_contract_hash"], "v0.9-neutron-status-2");
+        assert_eq!(body["transaction_state"], "blocked");
+        assert_eq!(body["overall_readiness"], "blocked");
+        assert_eq!(body["required_action"], "retry_snapshot");
+        assert_eq!(body["applied_generation"], 0);
+        assert_eq!(body["pending_generation"], 1);
+        assert!(body["port_statuses"]
+            .as_array()
+            .expect("Status V2 port rows must be an array")
+            .iter()
+            .all(|row| row["generation"].as_u64().unwrap_or(u64::MAX) <= 0));
         let _ = std::fs::remove_dir_all(root);
     }
 

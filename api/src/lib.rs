@@ -2503,6 +2503,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_generation_retry_contract_v2_capabilities_are_exact() {
+        let capabilities = serde_json::to_value(NeutronCapabilitiesResponse::current())
+            .expect("current Neutron capabilities must serialize");
+
+        assert_eq!(capabilities["status_schema_version_min"], 2);
+        assert_eq!(capabilities["status_schema_version_max"], 2);
+        assert_eq!(
+            capabilities["status_contract_hash"],
+            "v0.9-neutron-status-2"
+        );
+        assert_eq!(
+            capabilities["error_codes_hash"],
+            "v0.9-neutron-errors-3"
+        );
+        assert_eq!(
+            capabilities["capability_hash"],
+            "v0.9-neutron-capabilities-4"
+        );
+    }
+
+    #[test]
     fn neutron_contract_status_v1_capabilities_serialize_shared_metadata() {
         let fixture = shared_status_v1_scenarios();
         let declared_contract = fixture

@@ -240,7 +240,7 @@ git diff --check
 
 Do not run Cargo locally.
 
-- [ ] **Step 5: Commit, push and require Python-first GREEN**
+- [x] **Step 5: Commit, push and require Python-first GREEN**
 
 ```bash
 git add openstack/neutron_aria/neutron_aria/agent/uds_client.py \
@@ -257,6 +257,11 @@ git push origin v0.9-neutron-agent
 
 Require exact-head `fast-contracts` and clean-install success while Rust still
 emits V1. This is the rollout compatibility barrier before producer changes.
+
+Python-first GREEN: commit `d9ffcc9`, Build `31777937039`. Exact-head
+`fast-contracts` job `94697224906`, clean-install job `94697224873`, and DB
+contracts job `94697224885` all passed; Rust jobs were correctly skipped for
+the Python-only producer-compatible change.
 
 ---
 
@@ -280,7 +285,7 @@ emits V1. This is the rollout compatibility barrier before producer changes.
 ["test", "--locked", "-p", "aria-agent", "snapshot_generation_retry_"],
 ```
 
-- [ ] **Step 1: Add generation-zero preflight RED tests**
+- [x] **Step 1: Add generation-zero preflight RED tests**
 
 Prove full-host and scoped routes return HTTP 400
 `INVALID_SNAPSHOT_GENERATION`. Snapshot the runtime and WAL path before the
@@ -288,7 +293,7 @@ call and assert they remain unchanged/absent. Use an inventory hook or test
 state that would fail if admission reaches OVS discovery; do not infer this
 only from source ordering.
 
-- [ ] **Step 2: Add exact pending-identity RED tests**
+- [x] **Step 2: Add exact pending-identity RED tests**
 
 - pending 110/hash-X plus request 111/hash-X must return 409;
 - pending 110/hash-X plus request 110/hash-Y must return 409;
@@ -300,7 +305,7 @@ only from source ordering.
 Replace the current test that positively expects cross-generation hash-only
 deduplication.
 
-- [ ] **Step 3: Add durable-partial barrier RED tests**
+- [x] **Step 3: Add durable-partial barrier RED tests**
 
 Construct a valid partial commit through the ordinary WAL APIs, publish the
 matching runtime and resubmit exact G/H. Assert one prepared apply retains the
@@ -314,7 +319,7 @@ apply lock. Add negative cases for:
 Every negative case returns `snapshot_retry_not_safe`, appends no intent and
 changes no runtime.
 
-- [ ] **Step 4: Add same-generation convergence RED tests**
+- [x] **Step 4: Add same-generation convergence RED tests**
 
 Use an existing deterministic registry/control-plane failure boundary or one
 narrow one-shot fault point to prove:
@@ -328,7 +333,7 @@ narrow one-shot fault point to prove:
 
 Do not add a broad mock transaction framework.
 
-- [ ] **Step 5: Add Status V2 producer RED tests**
+- [x] **Step 5: Add Status V2 producer RED tests**
 
 Serialize public capabilities and status responses and assert:
 
@@ -339,7 +344,7 @@ Serialize public capabilities and status responses and assert:
 - public port rows remain applied-baseline-only;
 - generation 1 partial with applied 0 is retryable, not operator.
 
-- [ ] **Step 6: Run non-Cargo RED checks**
+- [x] **Step 6: Run non-Cargo RED checks**
 
 Run:
 
