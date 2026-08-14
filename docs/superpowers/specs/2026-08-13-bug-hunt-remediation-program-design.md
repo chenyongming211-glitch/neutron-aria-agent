@@ -232,6 +232,10 @@ RED `e661627` exposed allocator and replay-boundary drift; implementation
 `4265ccf` plus observability completion `2cf0d47` passed 10/10 checkpoint
 behaviors and every required warning-denied build in exact-head Build
 [31767131659](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31767131659).
-The active next batch is step 7, `REVIEW-ACL-079/080`; its generation-zero and
-same-generation retry semantics require one shared contract design before RED
-or production changes. Later batches remain in the fixed order above.
+The active batch is step 7, `REVIEW-ACL-079/080`. Its approved long-term
+boundary is the versioned explicit retry contract recorded in
+[the formal design](2026-08-14-review-acl-079-080-generation-retry-contract-design.md):
+reject submitted generation zero before side effects, bind pending identity to
+generation plus desired hash, and let only a fresh-WAL-verified durable partial
+generation use the typed Status V2 same-generation retry path. Later batches
+remain in the fixed order above.
