@@ -90,10 +90,12 @@ proves a concurrent raw-pointer hazard, but production repair waits for target
 eviction/reuse behavior. Missing field evidence is recorded as deferred, never
 as PASS.
 
-`REVIEW-ACL-083`, `REVIEW-ACL-084`, and `REVIEW-TXN-035` receive separate
-behavior probes. A probe that stays GREEN closes or reclassifies the claim; a
-real RED result creates a new narrowly scoped implementation plan. These
-conditional items are not bundled into either production batch.
+`REVIEW-ACL-083`, `REVIEW-ACL-084`, and `REVIEW-TXN-035` received separate
+behavior probes. `REVIEW-ACL-083` produced a real RED sessionless-context
+reproduction and is fixed by fail-fast repository selection plus complete
+in-memory serialization. `REVIEW-ACL-084` stayed GREEN through the public
+plugin and real SQLAlchemy outer-transaction boundary, so its partial-commit
+consequence is closed without changing transaction ownership.
 
 `REVIEW-TXN-035` is now closed by that rule. The combined projection starts
 from an applied generation plus a newer partial/error generation, runs the
@@ -126,7 +128,8 @@ not modify their tests or production paths:
 Batch 1  ACL-085 + ACL-090 + ACL-091  Fixed with exact RED/GREEN CI
 Batch 2  ACL-098 + ACL-099            Fixed with exact RED/GREEN CI
 Gate 3   ACL-086                      target-kernel evidence before code
-Gate 4   ACL-083/084                  prove each remaining conditional claim separately
+Gate 4   ACL-083                      fixed after RED missing-session reproduction
+         ACL-084                      closed by GREEN outer-owner rollback probe
          TXN-035                      closed by GREEN combined restart projection
 ```
 

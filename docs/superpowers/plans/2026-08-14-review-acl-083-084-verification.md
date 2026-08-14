@@ -2,11 +2,10 @@
 
 ## Status
 
-- `REVIEW-ACL-083`: reproduced by a production-style missing-session fault
-  injection; narrow repair in progress.
-- `REVIEW-ACL-084`: transaction-ownership probe added; no production change is
-  authorized unless hosted SQLAlchemy evidence reproduces the claimed partial
-  commit.
+- `REVIEW-ACL-083`: fixed after a production-style missing-session fault
+  injection reproduced the conditional path.
+- `REVIEW-ACL-084`: closed; the hosted transaction-ownership probe proved that
+  the error escapes and the outer owner rolls back atomically.
 - `REVIEW-ACL-086`: excluded; target 4.18 kernel evidence remains pending.
 
 ## ACL-083 Confirmed Boundary
@@ -63,20 +62,30 @@ and requires:
 - no partial address-set state to remain.
 
 Repository and plugin source contain no catch-and-continue path around these
-writes. If the probe remains GREEN, `REVIEW-ACL-084` is closed as an
-unreproduced consequence under the documented ownership model. A hosted RED
-result would instead require a separate repair design; it must not be hidden by
-changing `_write_transaction` in this batch.
+writes. The hosted probe stayed GREEN, so `REVIEW-ACL-084` is closed as an
+unreproduced consequence under the documented ownership model. No production
+transaction behavior was changed.
 
 ## Delivery Steps
 
-1. Preserve the exact hosted RED evidence for the three ACL-083 contracts.
-2. Apply only the repository-selection and in-memory serialization changes.
-3. Run the complete local stdlib plugin suite; do not run local Cargo.
-4. Push the ACL-083 GREEN plus ACL-084 database probe.
-5. Require exact-head `fast-contracts`, `neutron-db-contracts`, clean install,
-   and the repository's normal hosted build gates.
-6. Update the authoritative register only from exact-head results.
+1. [x] Preserve the exact hosted RED evidence for the three ACL-083 contracts.
+2. [x] Apply only the repository-selection and in-memory serialization changes.
+3. [x] Run the complete local stdlib plugin suite; do not run local Cargo.
+4. [x] Push the ACL-083 GREEN plus ACL-084 database probe.
+5. [x] Require exact-head `fast-contracts`, `neutron-db-contracts`, clean
+   install, and the repository's normal hosted build gates.
+6. [x] Update the authoritative register only from exact-head results.
+
+## Hosted Evidence
+
+- RED `b0a4ec4`: Build
+  [31790259424](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31790259424)
+  failed the three intended ACL-083 contracts in `fast-contracts`.
+- GREEN `03954b9`: exact-head Build
+  [31790464825](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31790464825)
+  passed `fast-contracts`, `neutron-db-contracts`, clean install, and all
+  selected hosted gates. The database lane executed the ACL-084 outer-owner
+  rollback probe.
 
 ## Exclusions
 
