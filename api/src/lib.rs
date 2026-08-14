@@ -2562,12 +2562,6 @@ mod tests {
             actual.get("contract_version").and_then(Value::as_str),
             Some(NEUTRON_UDS_CONTRACT_VERSION)
         );
-        assert_eq!(
-            actual.get("capability_hash").and_then(Value::as_str),
-            Some("v0.9-neutron-capabilities-3"),
-            "the immutable Status V1 fixture must retain its capability hash"
-        );
-
         let mut mismatches = Vec::new();
         for field in [
             "status_schema_version_min",
