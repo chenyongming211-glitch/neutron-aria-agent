@@ -42,6 +42,9 @@ fn result_name(result: u8) -> String {
         2 => "drop:port".to_string(),
         3 => "drop:default".to_string(),
         4 => "drop:qos".to_string(),
+        aria_ebpf_abi::userspace::TRACE_RESULT_DROP_FRAGMENT => {
+            "drop:fragment".to_string()
+        }
         _ => format!("result:{}", result),
     }
 }

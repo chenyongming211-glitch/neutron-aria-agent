@@ -439,6 +439,7 @@ pub const TRACE_RESULT_DROP_ACL: u8 = 1;
 pub const TRACE_RESULT_DROP_ACL_PORT: u8 = 2;
 pub const TRACE_RESULT_DROP_ACL_DEFAULT: u8 = 3;
 pub const TRACE_RESULT_DROP_QOS: u8 = 4;
+pub const TRACE_RESULT_DROP_FRAGMENT: u8 = 5;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -607,6 +608,16 @@ impl PipelineCtx {
         self.fragment_epoch_present = 0;
         self._pad3 = [0; 6];
     }
+}
+
+#[inline(always)]
+pub fn set_fragment_resolve_drop_ids(
+    pipeline: &mut PipelineCtx,
+    src_id: Option<u32>,
+    dst_id: Option<u32>,
+) {
+    pipeline.src_id = src_id.unwrap_or(0);
+    pipeline.dst_id = dst_id.unwrap_or(0);
 }
 
 // --- Global firewall config (feature switches) ---
@@ -854,6 +865,7 @@ pub mod userspace {
         FRAGMENT_METRIC_TRACKING_DISABLED, FRAGMENT_RUNTIME_MODE_MANAGED,
         FRAGMENT_RUNTIME_MODE_STANDALONE, KERNEL_DROP_FLAG_HAS_LOCATION,
         KERNEL_DROP_FLAG_HAS_PROTOCOL, KERNEL_DROP_FLAG_HAS_REASON, TAP_ID_UNASSIGNED,
+        TRACE_RESULT_DROP_FRAGMENT,
     };
 }
 

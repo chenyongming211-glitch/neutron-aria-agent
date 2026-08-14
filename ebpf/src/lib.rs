@@ -27,16 +27,17 @@ mod tcprt;
 mod trace;
 
 use common::{
-    acl_banked_tap_id, fragment_ct_create_point, CtKey4, CtKey6, FragmentCtCreatePoint,
-    FragmentInstallDecision, FragmentKind, PipelineCtx, CT_CONTRACT_FAMILY_IPV4,
-    CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS,
-    CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT, CT_CONTRACT_REASON_CT_MISS,
-    CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_INVALID_L4,
-    DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
-    FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON,
-    FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
-    TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
-    TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
+    acl_banked_tap_id, fragment_ct_create_point, set_fragment_resolve_drop_ids, CtKey4, CtKey6,
+    FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
+    CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
+    CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
+    DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON,
+    FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT,
+    FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED,
+    TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT,
+    TRACE_RESULT_DROP_FRAGMENT, TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP,
+    TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
 };
 use conntrack::{CtLookupResult, CtMissReason};
 use maps::{
@@ -178,7 +179,7 @@ unsafe fn try_tc_egress_v4(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
-            phase_fragment_drop_tc(ctx, info, p);
+            phase_fragment_resolve_drop_v4_tc(ctx, info, p);
             return p.action as i32;
         }
     }
@@ -248,7 +249,7 @@ unsafe fn try_tc_egress_v6(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
-            phase_fragment_drop_tc(ctx, info, p);
+            phase_fragment_resolve_drop_v6_tc(ctx, info, p);
             return p.action as i32;
         }
     }
@@ -382,7 +383,7 @@ unsafe fn try_tc_ingress_v4(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
-            phase_fragment_drop_tc(ctx, info, p);
+            phase_fragment_resolve_drop_v4_tc(ctx, info, p);
             return p.action as i32;
         }
     }
@@ -452,7 +453,7 @@ unsafe fn try_tc_ingress_v6(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
-            phase_fragment_drop_tc(ctx, info, p);
+            phase_fragment_resolve_drop_v6_tc(ctx, info, p);
             return p.action as i32;
         }
     }
@@ -710,7 +711,7 @@ unsafe fn phase_fragment_drop_tc(ctx: &TcContext, info: &parser::PacketInfo, p: 
     p.action = TC_ACT_SHOT as u32;
     do_drop(p);
     if (p.flags & FLAG_TRACING) != 0 {
-        do_trace(ctx, info, p, TRACE_TC_DROP, TRACE_RESULT_DROP_ACL);
+        do_trace(ctx, info, p, TRACE_TC_DROP, TRACE_RESULT_DROP_FRAGMENT);
     }
 }
 
@@ -728,6 +729,30 @@ unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 20], u32>, tap_id: u32, ip: [u8; 16]) -
     bytes[4..].copy_from_slice(&ip);
     let key = Key::new(160, bytes);
     map.get(&key).copied()
+}
+
+#[inline(never)]
+unsafe fn phase_fragment_resolve_drop_v4_tc(
+    ctx: &TcContext,
+    info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+) {
+    let src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip);
+    let dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip);
+    set_fragment_resolve_drop_ids(p, src_id, dst_id);
+    phase_fragment_drop_tc(ctx, info, p);
+}
+
+#[inline(never)]
+unsafe fn phase_fragment_resolve_drop_v6_tc(
+    ctx: &TcContext,
+    info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+) {
+    let src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6);
+    let dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6);
+    set_fragment_resolve_drop_ids(p, src_id, dst_id);
+    phase_fragment_drop_tc(ctx, info, p);
 }
 
 // --- Phase functions (each is #[inline(never)] to isolate stack frames) ---
