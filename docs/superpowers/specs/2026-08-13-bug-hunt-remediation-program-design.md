@@ -226,5 +226,9 @@ behaviors plus warning-denied builds in exact-head Build
 used the existing real Python 2.7 clean-install lane for the durable JSON
 round-trip evidence; GREEN `a483737` passed exact-head Build
 [31764984847](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31764984847).
-The active next batch is `REVIEW-TXN-033`; later batches remain in the fixed
-order above.
+The active batch is `REVIEW-TXN-033`. Its approved long-term boundary is the
+versioned checkpoint epoch recorded in
+[the formal design](2026-08-14-review-txn-033-wal-checkpoint-epoch-design.md):
+publish a durable marker, atomically publish the cursor-bearing snapshot,
+truncate only afterwards, and require the matching new-WAL header before
+acknowledging tail mutations. Later batches remain in the fixed order above.
