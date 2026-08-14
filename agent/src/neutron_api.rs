@@ -660,89 +660,20 @@ impl NeutronApiState {
             return;
         }
 
-        let mut next_runtime = {
+        let previous_runtime = {
             let runtime = self.runtime.read().await;
             runtime.clone()
         };
-        let mut degraded = results.iter().any(|result| result.status == "blocked");
-        let mut successfully_claimed_ports = Vec::new();
-        for port in &ports {
-            let Some(result) = results
-                .iter()
-                .find(|result| result.ifname == port.ifname && result.action == "claim_committed")
-            else {
-                continue;
-            };
-            if result.status == "deferred" {
-                if let Some(managed) = next_runtime.ports.get_mut(&port.port_id) {
-                    managed.ifindex = None;
-                    managed.domain_desired_hashes.remove("acl");
-                }
-                next_runtime.port_statuses.insert(
-                    port.port_id.clone(),
-                    runtime_rebuild_port_status(port, generation, desired_hash.clone()),
-                );
-                continue;
-            }
-            next_runtime.port_statuses.insert(
-                port.port_id.clone(),
-                port_runtime_status(
-                    &port.port_id,
-                    &port.ifname,
-                    generation,
-                    desired_hash.clone(),
-                    port.managed_domains.clone(),
-                    if result.status == "ready" {
-                        "ready"
-                    } else {
-                        "blocked"
-                    },
-                    result.reason.clone(),
-                    runtime_domain_statuses_for(
-                        &port.managed_domains,
-                        if result.status == "ready" {
-                            "ready"
-                        } else {
-                            "blocked"
-                        },
-                        result.reason.clone(),
-                    ),
-                ),
-            );
-            if result.status == "ready" {
-                successfully_claimed_ports.push(port.clone());
-            }
-        }
-        for result in results
-            .iter()
-            .filter(|result| result.action == "cleanup_orphan")
-        {
-            if result.status == "blocked" {
-                degraded = true;
-            }
-        }
-
-        let acl_requires_full_resync = invalidate_restarted_acl_runtime(
-            &mut next_runtime,
-            &successfully_claimed_ports,
-        );
-
-        if degraded {
-            next_runtime.authority_state = "runtime_degraded".to_string();
-            next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
-        } else if (acl_requires_full_resync || missing_runtime_requires_full_resync)
-            && next_runtime.pending_generation.is_none()
-        {
-            next_runtime.authority_state =
-                "runtime_reconcile_requires_full_resync".to_string();
-            next_runtime.wal_status =
-                "runtime_reconciled_acl_resync_required".to_string();
-        } else if next_runtime.pending_generation.is_none() {
-            next_runtime.authority_state = "ready".to_string();
-            next_runtime.wal_status = "runtime_reconciled".to_string();
-        } else if next_runtime.wal_status != "intent_recovered" {
-            next_runtime.wal_status = "runtime_reconciled".to_string();
-        }
+        let Some(mut next_runtime) = project_committed_runtime_reconcile(
+            &previous_runtime,
+            &ports,
+            generation,
+            desired_hash,
+            &results,
+            missing_runtime_requires_full_resync,
+        ) else {
+            return;
+        };
 
         if let Err(e) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
             next_runtime.authority_state = "wal_runtime_reconcile_commit_failed".to_string();
@@ -4167,6 +4098,98 @@ fn defer_missing_committed_interfaces(
         }
     }
     deferred
+}
+
+fn project_committed_runtime_reconcile(
+    previous_runtime: &NeutronRuntimeState,
+    ports: &[ManagedNeutronPort],
+    generation: u64,
+    desired_hash: Option<String>,
+    results: &[RuntimeReconcileResult],
+    missing_runtime_requires_full_resync: bool,
+) -> Option<NeutronRuntimeState> {
+    if results.is_empty() {
+        return None;
+    }
+
+    let mut next_runtime = previous_runtime.clone();
+    let mut degraded = results.iter().any(|result| result.status == "blocked");
+    let mut successfully_claimed_ports = Vec::new();
+    for port in ports {
+        let Some(result) = results
+            .iter()
+            .find(|result| result.ifname == port.ifname && result.action == "claim_committed")
+        else {
+            continue;
+        };
+        if result.status == "deferred" {
+            if let Some(managed) = next_runtime.ports.get_mut(&port.port_id) {
+                managed.ifindex = None;
+                managed.domain_desired_hashes.remove("acl");
+            }
+            next_runtime.port_statuses.insert(
+                port.port_id.clone(),
+                runtime_rebuild_port_status(port, generation, desired_hash.clone()),
+            );
+            continue;
+        }
+        next_runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                generation,
+                desired_hash.clone(),
+                port.managed_domains.clone(),
+                if result.status == "ready" {
+                    "ready"
+                } else {
+                    "blocked"
+                },
+                result.reason.clone(),
+                runtime_domain_statuses_for(
+                    &port.managed_domains,
+                    if result.status == "ready" {
+                        "ready"
+                    } else {
+                        "blocked"
+                    },
+                    result.reason.clone(),
+                ),
+            ),
+        );
+        if result.status == "ready" {
+            successfully_claimed_ports.push(port.clone());
+        }
+    }
+    for result in results
+        .iter()
+        .filter(|result| result.action == "cleanup_orphan")
+    {
+        if result.status == "blocked" {
+            degraded = true;
+        }
+    }
+
+    let acl_requires_full_resync =
+        invalidate_restarted_acl_runtime(&mut next_runtime, &successfully_claimed_ports);
+
+    if degraded {
+        next_runtime.authority_state = "runtime_degraded".to_string();
+        next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
+    } else if (acl_requires_full_resync || missing_runtime_requires_full_resync)
+        && next_runtime.pending_generation.is_none()
+    {
+        next_runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+        next_runtime.wal_status = "runtime_reconciled_acl_resync_required".to_string();
+    } else if next_runtime.pending_generation.is_none() {
+        next_runtime.authority_state = "ready".to_string();
+        next_runtime.wal_status = "runtime_reconciled".to_string();
+    } else if next_runtime.wal_status != "intent_recovered" {
+        next_runtime.wal_status = "runtime_reconciled".to_string();
+    }
+
+    Some(next_runtime)
 }
 
 fn runtime_rebuild_port_status(
