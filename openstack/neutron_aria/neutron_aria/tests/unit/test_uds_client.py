@@ -10,9 +10,11 @@ from neutron_aria.agent.uds_client import LocalApiResponseError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalClient
 from neutron_aria.tests.unit.status_contract_scenarios import load_status_contract_fixture
+from neutron_aria.tests.unit.status_contract_scenarios import load_status_contract_v2_fixture
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_cases
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_contract_error_cases
+from neutron_aria.tests.unit.status_contract_scenarios import status_v2_scenario
 
 
 class FakeResponse(object):
@@ -1685,6 +1687,112 @@ class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
         self.assertIsInstance(status_error, LocalApiContractError)
         self.assertIsInstance(write_error, LocalApiContractError)
         self.assertEqual(requests_before, requests_after)
+
+
+class StatusContractV2RetryRedTestCase(unittest.TestCase):
+    def setUp(self):
+        FakeConnection.requests = []
+        FakeConnection.responses = []
+        FakeConnection.timeouts = []
+
+    def _client(self):
+        return LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=1.0,
+            connection_factory=FakeConnection,
+        )
+
+    def _decode(self, capabilities, status):
+        client = self._client()
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", copy.deepcopy(capabilities)),
+            FakeResponse(200, "OK", copy.deepcopy(status)),
+        ])
+        client.capabilities(required_domains=["acl"])
+        return client, client.status()
+
+    def test_exact_v1_and_v2_profiles_are_both_accepted(self):
+        v1 = status_scenario("full-classified-ready")
+        _client, decoded_v1 = self._decode(
+            v1["capabilities"],
+            v1["status"],
+        )
+        self.assertEqual("none", decoded_v1["required_action"])
+
+        fixture = load_status_contract_v2_fixture()
+        partial = status_v2_scenario("first-generation-durable-partial")
+        _client, decoded_v2 = self._decode(
+            fixture["capabilities"],
+            partial["status"],
+        )
+        self.assertEqual("retry_snapshot", decoded_v2["required_action"])
+        self.assertEqual(0, decoded_v2["applied_generation"])
+        self.assertEqual([], decoded_v2["port_statuses"])
+
+    def test_v2_retry_action_is_limited_to_exact_blocked_triple(self):
+        fixture = load_status_contract_v2_fixture()
+        partial = status_v2_scenario("positive-baseline-durable-partial")
+        _client, decoded = self._decode(
+            fixture["capabilities"],
+            partial["status"],
+        )
+        self.assertEqual(
+            ("blocked", "blocked", "retry_snapshot"),
+            (
+                decoded["transaction_state"],
+                decoded["overall_readiness"],
+                decoded["required_action"],
+            ),
+        )
+
+        invalid = copy.deepcopy(partial["status"])
+        invalid["transaction_state"] = "pending"
+        invalid["overall_readiness"] = "unknown"
+        with self.assertRaises(LocalApiContractError):
+            self._decode(fixture["capabilities"], invalid)
+
+    def test_v1_profile_rejects_retry_snapshot_token(self):
+        scenario = status_scenario("blocked-recoverable-inventory")
+        status = copy.deepcopy(scenario["status"])
+        status["recovery_cause"] = None
+        status["required_action"] = "retry_snapshot"
+
+        with self.assertRaises(LocalApiContractError):
+            self._decode(scenario["capabilities"], status)
+
+    def test_crossed_v2_profile_fields_latch_all_writes_closed(self):
+        fixture = load_status_contract_v2_fixture()
+        scenario = status_v2_scenario("first-generation-durable-partial")
+        crossed = copy.deepcopy(fixture["capabilities"])
+        crossed["status_contract_hash"] = "v0.9-neutron-status-1"
+        client = self._client()
+        FakeConnection.responses.append(FakeResponse(200, "OK", crossed))
+
+        with self.assertRaises(LocalApiContractError):
+            client.capabilities(required_domains=["acl"])
+        requests_before = len(FakeConnection.requests)
+        with self.assertRaises(LocalApiContractError):
+            client.put_snapshot({"generation": 1, "ports": []})
+        self.assertEqual(requests_before, len(FakeConnection.requests))
+
+        partial = copy.deepcopy(scenario["status"])
+        partial.pop("status_contract_hash")
+        client = self._client()
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", fixture["capabilities"]),
+            FakeResponse(200, "OK", partial),
+        ])
+        client.capabilities(required_domains=["acl"])
+        with self.assertRaises(LocalApiContractError):
+            client.status()
+
+    def test_v1_fixture_decoding_remains_byte_for_byte_compatible(self):
+        scenario = status_scenario("full-classified-ready")
+        _client, decoded = self._decode(
+            scenario["capabilities"],
+            scenario["status"],
+        )
+        self.assertEqual(scenario["status"], decoded)
 
 
 if __name__ == "__main__":

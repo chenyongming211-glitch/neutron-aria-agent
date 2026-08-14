@@ -22,6 +22,7 @@ from neutron_aria.agent.uds_client import LocalApiTransportError
 from neutron_aria.agent.uds_client import _decode_legacy_status_v0
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_negative_cases
+from neutron_aria.tests.unit.status_contract_scenarios import status_v2_scenario
 
 
 def _terminal_status_for_snapshot(snapshot, authority_state="ready"):
@@ -8180,6 +8181,130 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
         self.assertEqual(feature_ready_before, state_store.feature_ready_history())
         self.assertFalse(sync.runtime_status.ready)
         self.assertEqual([], local_client.mutating_calls)
+
+
+class StatusContractV2RetryOrchestrationRedTestCase(unittest.TestCase):
+    def _sync(self, state_store=None, client=None, ports=None):
+        return SnapshotSynchronizer(
+            "compute-1",
+            StaticPortSource(ports or []),
+            FakeOvsReader(),
+            client or FakeLocalClient(),
+            managed_domains=["acl"],
+            state_store=state_store or InMemorySnapshotStateStore(),
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+    def _partial(self, scenario_id, desired_hash=None):
+        status = status_v2_scenario(scenario_id)["status"]
+        if desired_hash is not None:
+            status["desired_hash"] = desired_hash
+        return status
+
+    def test_v2_exact_pending_identity_requests_same_generation_retry(self):
+        state_store = InMemorySnapshotStateStore()
+        snapshot = {"host": "compute-1", "ports": []}
+        prepared = state_store.prepare_snapshot(snapshot)
+        status = self._partial(
+            "first-generation-durable-partial",
+            prepared["desired_hash"],
+        )
+        sync = self._sync(state_store=state_store)
+
+        action = sync._remote_pending_action(
+            snapshot,
+            status,
+            prepared["desired_hash"],
+        )
+
+        self.assertEqual("retry_snapshot", action["action"])
+        self.assertEqual(prepared["generation"], action["generation"])
+        self.assertEqual(prepared["desired_hash"], action["remote_desired_hash"])
+
+    def test_v2_changed_desired_state_recovers_only_positive_baseline(self):
+        sync = self._sync()
+        positive = self._partial("positive-baseline-durable-partial")
+        first = self._partial("first-generation-durable-partial")
+
+        positive_action = sync._remote_pending_action(
+            {}, positive, "newer-desired-hash",
+        )
+        first_action = sync._remote_pending_action(
+            {}, first, "newer-desired-hash",
+        )
+
+        self.assertEqual("recover", positive_action["action"])
+        self.assertEqual("block", first_action["action"])
+        self.assertEqual("operator", first_action["reason"])
+
+    def test_v2_retry_requires_durable_request_after_restart(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot({"host": "compute-1", "ports": []})
+            restarted = SnapshotStateStore(state_dir)
+            status = self._partial(
+                "first-generation-durable-partial",
+                prepared["desired_hash"],
+            )
+            sync = self._sync(state_store=restarted)
+
+            action = sync._remote_pending_action(
+                {}, status, prepared["desired_hash"],
+            )
+
+            self.assertEqual("retry_snapshot", action["action"])
+            self.assertEqual(
+                prepared["generation"],
+                restarted.pending_snapshot()["request"]["body"]["generation"],
+            )
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_v2_partial_allows_only_one_retry_per_resync_attempt(self):
+        class StillPartialClient(FakeLocalClient):
+            def __init__(self, status):
+                FakeLocalClient.__init__(self)
+                self.partial_status = status
+
+            def status(self):
+                return copy.deepcopy(self.partial_status)
+
+        state_dir = tempfile.mkdtemp()
+        try:
+            port = {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "compute-1",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }
+            probe = self._sync(ports=[port]).full_resync()
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot(probe["snapshot"])
+            status = self._partial(
+                "first-generation-durable-partial",
+                prepared["desired_hash"],
+            )
+            client = StillPartialClient(status)
+            sync = self._sync(
+                state_store=SnapshotStateStore(state_dir),
+                client=client,
+                ports=[port],
+            )
+
+            with self.assertRaises(LocalApiTimeoutError):
+                sync.full_resync()
+
+            self.assertEqual(1, len(client.snapshots))
+            self.assertEqual(prepared["generation"], client.snapshots[0]["generation"])
+            self.assertEqual(
+                1,
+                SnapshotStateStore(state_dir).pending_snapshot()["retry_count"],
+            )
+        finally:
+            shutil.rmtree(state_dir)
 
 
 if __name__ == "__main__":

@@ -75,6 +75,97 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(None, committed.pending_snapshot())
         self.assertEqual(["p1"], committed.last_projected_port_ids())
 
+    def test_pending_full_request_is_durable_with_assigned_identity(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot(self._snapshot("p1"))
+
+        pending = SnapshotStateStore(self.state_dir).pending_snapshot()
+        request = pending["request"]
+
+        self.assertEqual({"type": "full_host"}, request["scope"])
+        self.assertEqual(prepared["generation"], request["body"]["generation"])
+        self.assertEqual(prepared["desired_hash"], request["body"]["desired_hash"])
+        self.assertEqual(
+            pending["desired_hash"],
+            desired_snapshot_hash(request["body"]),
+        )
+        self.assertEqual(0, pending["retry_count"])
+        self.assertEqual(None, pending["last_retry_at"])
+
+    def test_pending_scoped_request_retains_exact_route_after_restart(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_scoped_snapshot(self._snapshot("p1"))
+
+        pending = SnapshotStateStore(self.state_dir).pending_snapshot()
+        request = pending["request"]
+
+        self.assertEqual(
+            {"type": "port", "port_id": "p1"},
+            request["scope"],
+        )
+        self.assertEqual(prepared["generation"], request["body"]["generation"])
+        self.assertEqual(prepared["desired_hash"], request["body"]["desired_hash"])
+
+    def test_oversize_request_does_not_replace_valid_pending_record(self):
+        store = SnapshotStateStore(self.state_dir)
+        store.prepare_snapshot(self._snapshot("p1"))
+        pending_before = copy.deepcopy(store.pending_snapshot())
+        oversized = self._snapshot("p2")
+        oversized["padding"] = "x" * 1048576
+
+        with self.assertRaises(ValueError):
+            store.prepare_snapshot(oversized)
+
+        self.assertEqual(
+            pending_before,
+            SnapshotStateStore(self.state_dir).pending_snapshot(),
+        )
+
+    def test_commit_and_clear_remove_request_and_retry_metadata(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot(self._snapshot("p1"))
+        store.record_snapshot_retry(
+            prepared["generation"],
+            prepared["desired_hash"],
+        )
+        self.assertEqual(1, store.pending_snapshot()["retry_count"])
+
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+        state = SnapshotStateStore(self.state_dir).to_dict()
+        self.assertEqual(None, SnapshotStateStore(self.state_dir).pending_snapshot())
+        self.assertEqual(None, state["pending_request"])
+        self.assertEqual(0, state["pending_retry_count"])
+        self.assertEqual(None, state["pending_last_retry_at"])
+
+        prepared = store.prepare_snapshot(self._snapshot("p2"))
+        store.record_snapshot_retry(
+            prepared["generation"],
+            prepared["desired_hash"],
+        )
+        store.clear_pending_snapshot(reason="operator")
+        state = SnapshotStateStore(self.state_dir).to_dict()
+        self.assertEqual(None, state["pending_request"])
+        self.assertEqual(0, state["pending_retry_count"])
+        self.assertEqual(None, state["pending_last_retry_at"])
+
+    def test_legacy_pending_without_request_is_readable_but_not_retryable(self):
+        store = SnapshotStateStore(self.state_dir)
+        store.prepare_snapshot(self._snapshot("p1"))
+        with open(store.path, "r") as stream:
+            legacy = json.load(stream)
+        legacy.pop("pending_request", None)
+        legacy.pop("pending_retry_count", None)
+        legacy.pop("pending_last_retry_at", None)
+        with open(store.path, "w") as stream:
+            json.dump(legacy, stream)
+
+        restarted = SnapshotStateStore(self.state_dir)
+        pending = restarted.pending_snapshot()
+
+        self.assertEqual(1, pending["generation"])
+        self.assertEqual(None, pending["request"])
+        self.assertFalse(pending["retryable"])
+
     def test_scoped_snapshot_preserves_existing_projected_ports(self):
         store = SnapshotStateStore(self.state_dir)
         prepared = store.prepare_snapshot({

@@ -1,0 +1,182 @@
+{
+  "fixture_schema_version": 1,
+  "status_contract": {
+    "version": 2,
+    "hash": "v0.9-neutron-status-2",
+    "error_codes_hash": "v0.9-neutron-errors-3",
+    "capability_hash": "v0.9-neutron-capabilities-4",
+    "new_required_action": "retry_snapshot"
+  },
+  "capabilities": {
+    "api_version": "v1",
+    "contract_version": "2026-06-v0.9",
+    "schema_version_min": 1,
+    "schema_version_max": 1,
+    "attach_authority": "neutron_snapshot",
+    "supports_full_snapshot": true,
+    "supports_port_scoped_snapshot": true,
+    "supports_port_delete": true,
+    "supported_domains": ["attach", "acl"],
+    "mandatory_domains": [],
+    "body_max_bytes": 1048576,
+    "timeout_ms": 3000,
+    "error_codes_hash": "v0.9-neutron-errors-3",
+    "peer_auth_policy": "filesystem_permissions_then_peercred",
+    "capability_hash": "v0.9-neutron-capabilities-4",
+    "status_schema_version_min": 2,
+    "status_schema_version_max": 2,
+    "status_contract_hash": "v0.9-neutron-status-2"
+  },
+  "scenarios": [
+    {
+      "id": "first-generation-durable-partial",
+      "status": {
+        "status_schema_version": 2,
+        "status_contract_hash": "v0.9-neutron-status-2",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "retry_snapshot",
+        "recovery_cause": null,
+        "last_classified_generation": 0,
+        "generation": 0,
+        "accepted_generation": 1,
+        "applied_generation": 0,
+        "pending_generation": 1,
+        "desired_hash": "hash-pending-1",
+        "applied_desired_hash": null,
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "partial",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_python": {
+        "decision": "retry_snapshot",
+        "mark_ready": false,
+        "generation": 1,
+        "desired_hash": "hash-pending-1"
+      }
+    },
+    {
+      "id": "positive-baseline-durable-partial",
+      "status": {
+        "status_schema_version": 2,
+        "status_contract_hash": "v0.9-neutron-status-2",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "retry_snapshot",
+        "recovery_cause": null,
+        "last_classified_generation": 4,
+        "generation": 4,
+        "accepted_generation": 5,
+        "applied_generation": 4,
+        "pending_generation": 5,
+        "desired_hash": "hash-pending-5",
+        "applied_desired_hash": "hash-applied-4",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "partial",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 4,
+            "desired_hash": "hash-applied-4",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a"]
+      },
+      "expected_python": {
+        "decision": "retry_snapshot",
+        "mark_ready": false,
+        "generation": 5,
+        "desired_hash": "hash-pending-5"
+      }
+    },
+    {
+      "id": "applying-remains-poll",
+      "status": {
+        "status_schema_version": 2,
+        "status_contract_hash": "v0.9-neutron-status-2",
+        "transaction_state": "pending",
+        "overall_readiness": "unknown",
+        "required_action": "poll",
+        "recovery_cause": null,
+        "last_classified_generation": 4,
+        "generation": 4,
+        "accepted_generation": 5,
+        "applied_generation": 4,
+        "pending_generation": 5,
+        "desired_hash": "hash-pending-5",
+        "applied_desired_hash": "hash-applied-4",
+        "wal_status": "intent",
+        "wal_replay_failures": 0,
+        "authority_state": "applying",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_python": {"decision": "poll", "mark_ready": false}
+    },
+    {
+      "id": "unsafe-blocked-remains-recovery",
+      "status": {
+        "status_schema_version": 2,
+        "status_contract_hash": "v0.9-neutron-status-2",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "recover_pending",
+        "recovery_cause": null,
+        "last_classified_generation": 4,
+        "generation": 4,
+        "accepted_generation": 5,
+        "applied_generation": 4,
+        "pending_generation": 5,
+        "desired_hash": "hash-pending-5",
+        "applied_desired_hash": "hash-applied-4",
+        "wal_status": "commit_failed",
+        "wal_replay_failures": 0,
+        "authority_state": "wal_commit_failed",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_python": {"decision": "recover_pending", "mark_ready": false}
+    },
+    {
+      "id": "same-generation-retry-ready",
+      "status": {
+        "status_schema_version": 2,
+        "status_contract_hash": "v0.9-neutron-status-2",
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 1,
+        "generation": 1,
+        "accepted_generation": 1,
+        "applied_generation": 1,
+        "pending_generation": null,
+        "desired_hash": "hash-pending-1",
+        "applied_desired_hash": "hash-pending-1",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_python": {"decision": "feature_ready", "mark_ready": true}
+    }
+  ]
+}

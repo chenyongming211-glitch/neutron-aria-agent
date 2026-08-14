@@ -60,7 +60,7 @@ and eBPF builds.
 - Pending request evidence contains body, route scope, optional scoped port ID,
   retry count and retry timestamp.
 
-- [ ] **Step 1: Add a minimal V2 behavior fixture**
+- [x] **Step 1: Add a minimal V2 behavior fixture**
 
 Create a separate fixture rather than editing the immutable V1 file. Include
 at least:
@@ -76,7 +76,7 @@ at least:
 Fixture expectations must say that retry does not classify or mark ready until
 pending clears.
 
-- [ ] **Step 2: Add strict V1/V2 negotiation RED tests**
+- [x] **Step 2: Add strict V1/V2 negotiation RED tests**
 
 Using public capability/status dictionaries, prove:
 
@@ -90,7 +90,7 @@ Using public capability/status dictionaries, prove:
 Tests must call public `LocalClient.capabilities()` and `status()` or the public
 decoder boundary. They must not inspect constant source text.
 
-- [ ] **Step 3: Add durable pending-request RED tests**
+- [x] **Step 3: Add durable pending-request RED tests**
 
 Exercise `SnapshotStateStore` through its public prepare/load/commit methods:
 
@@ -104,7 +104,7 @@ Exercise `SnapshotStateStore` through its public prepare/load/commit methods:
 - legacy state without request fields remains readable but cannot authorize a
   retry.
 
-- [ ] **Step 4: Add Python V2 retry orchestration RED tests**
+- [x] **Step 4: Add Python V2 retry orchestration RED tests**
 
 Use fake public clients/status payloads to prove:
 
@@ -120,7 +120,7 @@ Use fake public clients/status payloads to prove:
   retains pending for scheduler backoff;
 - V1 recovery behavior is unchanged.
 
-- [ ] **Step 5: Run focused Python RED locally**
+- [x] **Step 5: Run focused Python RED locally**
 
 Run only non-Rust commands:
 
@@ -135,6 +135,13 @@ git diff --check
 Record the exact failing assertions. The expected failures are unsupported V2,
 missing durable request evidence and absent retry orchestration—not import or
 fixture syntax errors.
+
+RED evidence on 2026-08-14 (with
+`PYTHONPATH=openstack/neutron_aria`): 228 tests ran; the 12 intended failures
+were unsupported V2 profile hashes/decoding, absent pending request and retry
+metadata, oversize validation occurring after pending conflict, and the event
+loop treating `retry_snapshot` as blocked. There were no fixture syntax or
+module import failures after using the repository package path.
 
 - [ ] **Step 6: Commit and push Python RED**
 
