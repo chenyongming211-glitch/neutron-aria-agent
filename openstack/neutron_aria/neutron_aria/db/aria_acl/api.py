@@ -328,6 +328,7 @@ class InMemoryAriaAclRepository(object):
         self.policies[policy_id] = current
         return _clone(current)
 
+    @_locked_write
     def delete_policy(self, policy_id):
         self._reject_policy_in_use(policy_id)
         self._delete(self.policies, policy_id, "aria_acl_policy")
@@ -447,6 +448,7 @@ class InMemoryAriaAclRepository(object):
         self.address_sets[address_set_id] = current
         return _clone(current)
 
+    @_locked_write
     def delete_address_set(self, address_set_id):
         self._reject_address_set_in_use(address_set_id)
         self._delete(self.address_sets, address_set_id, "aria_acl_address_set")
@@ -715,7 +717,9 @@ class NeutronDbAriaAclRepository(object):
         self._update("policies", policy_id, self._db_values("policies", current))
         return _clone(current)
 
+    @_neutron_write()
     def delete_policy(self, policy_id):
+        self._lock_write_rows(policy_id=policy_id)
         self._reject_policy_in_use(policy_id)
         self._delete("policies", policy_id, "aria_acl_policy")
 
@@ -846,6 +850,7 @@ class NeutronDbAriaAclRepository(object):
 
     @_neutron_write()
     def delete_address_set(self, address_set_id):
+        self._lock_write_rows(address_set_ids=(address_set_id,))
         self._reject_address_set_in_use(address_set_id)
         with self._write_transaction():
             self.session.execute(
@@ -1093,8 +1098,18 @@ class NeutronDbAriaAclRepository(object):
             ordered.append(("policies", policy_id))
         if object_table and object_id:
             ordered.append((object_table, object_id))
+        bind = self.session.get_bind()
+        sqlite_write_lock = (
+            getattr(getattr(bind, "dialect", None), "name", None) == "sqlite"
+        )
         for table_name, row_id in ordered:
             table = self.tables[table_name]
+            if sqlite_write_lock:
+                query = table.update().where(
+                    table.c.id == row_id
+                ).values(id=row_id)
+                self.session.execute(query)
+                continue
             query = table.select().where(table.c.id == row_id)
             if hasattr(query, "with_for_update"):
                 query = query.with_for_update()
@@ -1513,9 +1528,15 @@ class SqliteAriaAclRepository(object):
         )
         return _clone(current)
 
+    @_sqlite_write()
     def delete_policy(self, policy_id):
         self._reject_policy_in_use(policy_id)
-        self._delete("aria_acl_policies", policy_id, "aria_acl_policy")
+        self._delete(
+            "aria_acl_policies",
+            policy_id,
+            "aria_acl_policy",
+            commit=False,
+        )
 
     @_sqlite_write("rule")
     def create_rule(self, values):
@@ -1639,9 +1660,15 @@ class SqliteAriaAclRepository(object):
         )
         return _clone(current)
 
+    @_sqlite_write()
     def delete_address_set(self, address_set_id):
         self._reject_address_set_in_use(address_set_id)
-        self._delete("aria_acl_address_sets", address_set_id, "aria_acl_address_set")
+        self._delete(
+            "aria_acl_address_sets",
+            address_set_id,
+            "aria_acl_address_set",
+            commit=False,
+        )
 
     @_sqlite_write("binding")
     def create_binding(self, values):
@@ -2073,9 +2100,10 @@ class SqliteAriaAclRepository(object):
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
         return project_fields(json.loads(row[0]), fields)
 
-    def _delete(self, table, object_id, object_type):
+    def _delete(self, table, object_id, object_type, commit=True):
         cursor = self.connection.execute("DELETE FROM %s WHERE id=?" % table, (object_id,))
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
         if cursor.rowcount == 0:
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
 
