@@ -297,6 +297,168 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             engine.dispose()
             os.unlink(path)
 
+    def _run_delete_create_race(self, parent_kind):
+        from neutron_aria.db.aria_acl.api import AriaAclValidationError
+        from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
+
+        checked = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        errors = []
+        errors_lock = threading.Lock()
+
+        class PausedRepository(NeutronDbAriaAclRepository):
+            def _pause(self):
+                checked.set()
+                if not release.wait(5):
+                    raise RuntimeError("delete release timeout")
+
+            def _reject_policy_in_use(self, policy_id):
+                super(PausedRepository, self)._reject_policy_in_use(policy_id)
+                if parent_kind == "policy":
+                    self._pause()
+
+            def _reject_address_set_in_use(self, address_set_id):
+                super(PausedRepository, self)._reject_address_set_in_use(
+                    address_set_id
+                )
+                if parent_kind == "address_set":
+                    self._pause()
+
+        file_descriptor, path = tempfile.mkstemp()
+        os.close(file_descriptor)
+        engine = sa.create_engine(
+            "sqlite:///%s" % path,
+            connect_args={"check_same_thread": False, "timeout": 5},
+        )
+        session_factory = sessionmaker(bind=engine)
+        bootstrap_session = session_factory()
+        bootstrap_context = type(
+            "Context",
+            (object,),
+            {"session": bootstrap_session},
+        )()
+        bootstrap = NeutronDbAriaAclRepository(
+            bootstrap_context,
+            auto_create=True,
+        )
+        bootstrap.create_policy({
+            "id": "policy-1",
+            "project_id": "project-1",
+            "default_action": "allow",
+        })
+        if parent_kind == "address_set":
+            bootstrap.create_address_set({
+                "id": "set-1",
+                "project_id": "project-1",
+                "members": [{"address": "10.0.0.1/32"}],
+            })
+        bootstrap_session.close()
+
+        def delete_parent():
+            session = session_factory()
+            context = type("Context", (object,), {"session": session})()
+            repository = PausedRepository(context, auto_create=False)
+            try:
+                if parent_kind == "policy":
+                    repository.delete_policy("policy-1")
+                else:
+                    repository.delete_address_set("set-1")
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                with errors_lock:
+                    errors.append(("delete", exc))
+            finally:
+                session.close()
+
+        def create_rule():
+            session = session_factory()
+            context = type("Context", (object,), {"session": session})()
+            repository = NeutronDbAriaAclRepository(
+                context,
+                auto_create=False,
+            )
+            values = {
+                "id": "rule-1",
+                "project_id": "project-1",
+                "policy_id": "policy-1",
+                "direction": "ingress",
+                "priority": 10,
+                "action": "allow",
+            }
+            if parent_kind == "address_set":
+                values["src_address_set_id"] = "set-1"
+            try:
+                repository.create_rule(values)
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                with errors_lock:
+                    errors.append(("create", exc))
+            finally:
+                session.close()
+                writer_done.set()
+
+        delete_thread = threading.Thread(target=delete_parent)
+        create_thread = threading.Thread(target=create_rule)
+        try:
+            delete_thread.start()
+            self.assertTrue(checked.wait(5), "delete did not reach reference check")
+            create_thread.start()
+            writer_done.wait(1)
+            release.set()
+            delete_thread.join(5)
+            create_thread.join(5)
+            self.assertFalse(
+                delete_thread.is_alive(),
+                "delete thread did not terminate",
+            )
+            self.assertFalse(
+                create_thread.is_alive(),
+                "create thread did not terminate",
+            )
+
+            verify_session = session_factory()
+            verify_context = type(
+                "Context",
+                (object,),
+                {"session": verify_session},
+            )()
+            verify = NeutronDbAriaAclRepository(
+                verify_context,
+                auto_create=False,
+            )
+            try:
+                if parent_kind == "policy":
+                    parent_exists = bool(verify.list_policies())
+                else:
+                    parent_exists = bool(verify.list_address_sets())
+                children = verify.list_rules()
+                self.assertFalse(
+                    parent_exists is False and bool(children),
+                    "delete/create race left an orphaned rule",
+                )
+                self.assertEqual(
+                    ["create"],
+                    [name for name, _error in errors],
+                )
+                self.assertIsInstance(errors[0][1], AriaAclValidationError)
+            finally:
+                verify_session.close()
+        finally:
+            release.set()
+            delete_thread.join(5)
+            create_thread.join(5)
+            engine.dispose()
+            os.unlink(path)
+
+    def test_policy_delete_serializes_concurrent_rule_create(self):
+        self._run_delete_create_race("policy")
+
+    def test_address_set_delete_serializes_concurrent_rule_create(self):
+        self._run_delete_create_race("address_set")
+
     def test_address_set_delete_failure_restores_members_and_parent(self):
         self.repository.create_address_set({
             "id": "set-rollback",

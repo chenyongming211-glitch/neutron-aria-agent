@@ -766,5 +766,252 @@ class ConcurrentWriteInvariantTestCase(unittest.TestCase):
         self.assertIn("aria_acl_schema_migration_required", str(error))
 
 
+class DeleteAtomicityRaceTestCase(unittest.TestCase):
+    @staticmethod
+    def _seed(repository, parent_kind):
+        repository.create_policy({
+            "id": "policy-1",
+            "project_id": "project-1",
+            "default_action": "allow",
+        })
+        if parent_kind == "address_set":
+            repository.create_address_set({
+                "id": "set-1",
+                "project_id": "project-1",
+                "members": ["10.0.0.1/32"],
+            })
+
+    @staticmethod
+    def _create_rule(repository, parent_kind):
+        values = {
+            "id": "rule-1",
+            "project_id": "project-1",
+            "policy_id": "policy-1",
+            "direction": "ingress",
+            "priority": 10,
+            "action": "allow",
+        }
+        if parent_kind == "address_set":
+            values["src_address_set_id"] = "set-1"
+        repository.create_rule(values)
+
+    def _assert_final_state(self, repository, parent_kind, errors):
+        if parent_kind == "policy":
+            parent_exists = bool(repository.list_policies())
+        else:
+            parent_exists = bool(repository.list_address_sets())
+        children = repository.list_rules()
+        self.assertFalse(
+            parent_exists is False and bool(children),
+            "delete/create race left an orphaned rule",
+        )
+        self.assertEqual(["create"], [name for name, _error in errors])
+        self.assertIsInstance(errors[0][1], AriaAclValidationError)
+
+    def _run_in_memory_race(self, parent_kind):
+        checked = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        errors = []
+        errors_lock = threading.Lock()
+
+        class PausedRepository(InMemoryAriaAclRepository):
+            def _pause(self):
+                checked.set()
+                if not release.wait(5):
+                    raise RuntimeError("delete release timeout")
+
+            def _reject_policy_in_use(self, policy_id):
+                super(PausedRepository, self)._reject_policy_in_use(policy_id)
+                if parent_kind == "policy":
+                    self._pause()
+
+            def _reject_address_set_in_use(self, address_set_id):
+                super(PausedRepository, self)._reject_address_set_in_use(
+                    address_set_id
+                )
+                if parent_kind == "address_set":
+                    self._pause()
+
+        repository = PausedRepository()
+        self._seed(repository, parent_kind)
+
+        def record(name, operation):
+            try:
+                operation()
+            except Exception as exc:
+                with errors_lock:
+                    errors.append((name, exc))
+            finally:
+                if name == "create":
+                    writer_done.set()
+
+        if parent_kind == "policy":
+            delete_operation = lambda: repository.delete_policy("policy-1")
+        else:
+            delete_operation = lambda: repository.delete_address_set("set-1")
+        delete_thread = threading.Thread(
+            target=record,
+            args=("delete", delete_operation),
+        )
+        create_thread = threading.Thread(
+            target=record,
+            args=(
+                "create",
+                lambda: self._create_rule(repository, parent_kind),
+            ),
+        )
+        delete_thread.start()
+        self.assertTrue(checked.wait(5), "delete did not reach reference check")
+        create_thread.start()
+        writer_done.wait(1)
+        release.set()
+        delete_thread.join(5)
+        create_thread.join(5)
+        self.assertFalse(delete_thread.is_alive(), "delete thread did not terminate")
+        self.assertFalse(create_thread.is_alive(), "create thread did not terminate")
+        self._assert_final_state(repository, parent_kind, errors)
+
+    def _run_sqlite_race(self, parent_kind):
+        file_descriptor, path = tempfile.mkstemp()
+        os.close(file_descriptor)
+        checked = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        errors = []
+        errors_lock = threading.Lock()
+
+        class PausedRepository(SqliteAriaAclRepository):
+            def _pause(self):
+                checked.set()
+                if not release.wait(5):
+                    raise RuntimeError("delete release timeout")
+
+            def _reject_policy_in_use(self, policy_id):
+                super(PausedRepository, self)._reject_policy_in_use(policy_id)
+                if parent_kind == "policy":
+                    self._pause()
+
+            def _reject_address_set_in_use(self, address_set_id):
+                super(PausedRepository, self)._reject_address_set_in_use(
+                    address_set_id
+                )
+                if parent_kind == "address_set":
+                    self._pause()
+
+        bootstrap = SqliteAriaAclRepository(path)
+        try:
+            self._seed(bootstrap, parent_kind)
+        finally:
+            bootstrap.close()
+
+        def delete_parent():
+            repository = PausedRepository(path)
+            try:
+                if parent_kind == "policy":
+                    repository.delete_policy("policy-1")
+                else:
+                    repository.delete_address_set("set-1")
+            except Exception as exc:
+                with errors_lock:
+                    errors.append(("delete", exc))
+            finally:
+                repository.close()
+
+        def create_rule():
+            repository = SqliteAriaAclRepository(path)
+            try:
+                self._create_rule(repository, parent_kind)
+            except Exception as exc:
+                with errors_lock:
+                    errors.append(("create", exc))
+            finally:
+                repository.close()
+                writer_done.set()
+
+        delete_thread = threading.Thread(target=delete_parent)
+        create_thread = threading.Thread(target=create_rule)
+        try:
+            delete_thread.start()
+            self.assertTrue(checked.wait(5), "delete did not reach reference check")
+            create_thread.start()
+            writer_done.wait(1)
+            release.set()
+            delete_thread.join(5)
+            create_thread.join(5)
+            self.assertFalse(
+                delete_thread.is_alive(),
+                "delete thread did not terminate",
+            )
+            self.assertFalse(
+                create_thread.is_alive(),
+                "create thread did not terminate",
+            )
+            verify = SqliteAriaAclRepository(path)
+            try:
+                self._assert_final_state(verify, parent_kind, errors)
+            finally:
+                verify.close()
+        finally:
+            release.set()
+            delete_thread.join(5)
+            create_thread.join(5)
+            os.unlink(path)
+
+    def _assert_delete_regressions(self, repository):
+        self._seed(repository, "address_set")
+        self._create_rule(repository, "address_set")
+        policy_before = repository.get_policy("policy-1")
+        address_set_before = repository.get_address_set("set-1")
+
+        with self.assertRaises(AriaAclValidationError):
+            repository.delete_policy("policy-1")
+        with self.assertRaises(AriaAclValidationError):
+            repository.delete_address_set("set-1")
+
+        self.assertEqual(policy_before, repository.get_policy("policy-1"))
+        self.assertEqual(
+            address_set_before,
+            repository.get_address_set("set-1"),
+        )
+        self.assertEqual(
+            ["rule-1"],
+            [row["id"] for row in repository.list_rules()],
+        )
+
+        repository.delete_rule("rule-1")
+        repository.delete_address_set("set-1")
+        repository.delete_policy("policy-1")
+        with self.assertRaises(AriaAclNotFound):
+            repository.get_address_set("set-1")
+        with self.assertRaises(AriaAclNotFound):
+            repository.get_policy("policy-1")
+
+    def test_in_memory_delete_regressions_preserve_public_contract(self):
+        self._assert_delete_regressions(InMemoryAriaAclRepository())
+
+    def test_sqlite_delete_regressions_preserve_public_contract(self):
+        file_descriptor, path = tempfile.mkstemp()
+        os.close(file_descriptor)
+        repository = SqliteAriaAclRepository(path)
+        try:
+            self._assert_delete_regressions(repository)
+        finally:
+            repository.close()
+            os.unlink(path)
+
+    def test_in_memory_policy_delete_serializes_rule_create(self):
+        self._run_in_memory_race("policy")
+
+    def test_in_memory_address_set_delete_serializes_rule_create(self):
+        self._run_in_memory_race("address_set")
+
+    def test_sqlite_policy_delete_serializes_rule_create(self):
+        self._run_sqlite_race("policy")
+
+    def test_sqlite_address_set_delete_serializes_rule_create(self):
+        self._run_sqlite_race("address_set")
+
+
 if __name__ == "__main__":
     unittest.main()
