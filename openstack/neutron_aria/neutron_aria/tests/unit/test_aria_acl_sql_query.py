@@ -573,6 +573,64 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             restored["members"],
         )
 
+    def test_plugin_write_error_escapes_and_outer_owner_rolls_back(self):
+        from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
+
+        class NoopNotifier(object):
+            def notify(self, _context, **_payload):
+                pass
+
+        context = type("Context", (object,), {"session": self.session})()
+        plugin = AriaAclPlugin(notifier=NoopNotifier())
+        member_inserts = [0]
+
+        def fail_second_member_insert(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ):
+            if statement.startswith("INSERT INTO aria_acl_address_set_members"):
+                member_inserts[0] += 1
+                if member_inserts[0] == 2:
+                    raise RuntimeError("injected member insert failure")
+
+        self.session.rollback()
+        event.listen(self.engine, "before_cursor_execute", fail_second_member_insert)
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "injected member insert failure",
+            ):
+                with self.session.begin():
+                    plugin.create_aria_acl_policy(context, {
+                        "aria_acl_policy": {
+                            "id": "policy-before-error",
+                            "project_id": "project-1",
+                        }
+                    })
+                    plugin.create_aria_acl_address_set(context, {
+                        "aria_acl_address_set": {
+                            "id": "set-failed",
+                            "project_id": "project-1",
+                            "members": [
+                                {"address": "10.0.0.0/24"},
+                                {"address": "10.0.1.0/24"},
+                            ],
+                        }
+                    })
+        finally:
+            event.remove(
+                self.engine,
+                "before_cursor_execute",
+                fail_second_member_insert,
+            )
+
+        self.assertEqual([], self.repository.list_policies())
+        self.assertEqual([], self.repository.list_address_sets())
+
 
 if __name__ == "__main__":
     unittest.main()

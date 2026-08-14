@@ -158,7 +158,7 @@ def _format_time(value):
     return value
 
 
-def _locked_write(method):
+def _locked_access(method):
     def locked(self, *args, **kwargs):
         with self._write_lock:
             return method(self, *args, **kwargs)
@@ -274,7 +274,7 @@ class InMemoryAriaAclRepository(object):
                 self.port_statuses = snapshot["port_statuses"]
                 raise
 
-    @_locked_write
+    @_locked_access
     def create_policy(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_policy")
@@ -289,6 +289,7 @@ class InMemoryAriaAclRepository(object):
         self.policies[values["id"]] = values
         return _clone(values)
 
+    @_locked_access
     def list_policies(
         self,
         filters=None,
@@ -303,13 +304,14 @@ class InMemoryAriaAclRepository(object):
         )
         return apply_memory_query(self.policies.values(), query)
 
+    @_locked_access
     def get_policy(self, policy_id, fields=None):
         return project_fields(
             self._get(self.policies, policy_id, "aria_acl_policy"),
             fields,
         )
 
-    @_locked_write
+    @_locked_access
     def update_policy(self, policy_id, values):
         existing = self._get(self.policies, policy_id, "aria_acl_policy")
         reject_immutable_changes(
@@ -328,12 +330,12 @@ class InMemoryAriaAclRepository(object):
         self.policies[policy_id] = current
         return _clone(current)
 
-    @_locked_write
+    @_locked_access
     def delete_policy(self, policy_id):
         self._reject_policy_in_use(policy_id)
         self._delete(self.policies, policy_id, "aria_acl_policy")
 
-    @_locked_write
+    @_locked_access
     def create_rule(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
@@ -345,6 +347,7 @@ class InMemoryAriaAclRepository(object):
         self.rules[values["id"]] = values
         return _clone(values)
 
+    @_locked_access
     def list_rules(
         self,
         filters=None,
@@ -359,13 +362,14 @@ class InMemoryAriaAclRepository(object):
         )
         return apply_memory_query(self.rules.values(), query)
 
+    @_locked_access
     def get_rule(self, rule_id, fields=None):
         return project_fields(
             self._get(self.rules, rule_id, "aria_acl_rule"),
             fields,
         )
 
-    @_locked_write
+    @_locked_access
     def update_rule(self, rule_id, values):
         existing = self._get(self.rules, rule_id, "aria_acl_rule")
         reject_immutable_changes(
@@ -384,10 +388,11 @@ class InMemoryAriaAclRepository(object):
         self.rules[rule_id] = current
         return _clone(current)
 
+    @_locked_access
     def delete_rule(self, rule_id):
         self._delete(self.rules, rule_id, "aria_acl_rule")
 
-    @_locked_write
+    @_locked_access
     def create_address_set(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_address_set")
@@ -401,6 +406,7 @@ class InMemoryAriaAclRepository(object):
         self.address_sets[values["id"]] = values
         return _clone(values)
 
+    @_locked_access
     def list_address_sets(
         self,
         filters=None,
@@ -415,6 +421,7 @@ class InMemoryAriaAclRepository(object):
         )
         return apply_memory_query(self.address_sets.values(), query)
 
+    @_locked_access
     def get_address_set(self, address_set_id, fields=None):
         return project_fields(
             self._get(
@@ -425,7 +432,7 @@ class InMemoryAriaAclRepository(object):
             fields,
         )
 
-    @_locked_write
+    @_locked_access
     def update_address_set(self, address_set_id, values):
         existing = self._get(
             self.address_sets,
@@ -448,12 +455,12 @@ class InMemoryAriaAclRepository(object):
         self.address_sets[address_set_id] = current
         return _clone(current)
 
-    @_locked_write
+    @_locked_access
     def delete_address_set(self, address_set_id):
         self._reject_address_set_in_use(address_set_id)
         self._delete(self.address_sets, address_set_id, "aria_acl_address_set")
 
-    @_locked_write
+    @_locked_access
     def create_binding(self, values):
         values = _normalize_project_id(_clone(values))
         _require(
@@ -469,6 +476,7 @@ class InMemoryAriaAclRepository(object):
         self.bindings[values["id"]] = values
         return _clone(values)
 
+    @_locked_access
     def list_bindings(
         self,
         filters=None,
@@ -483,13 +491,14 @@ class InMemoryAriaAclRepository(object):
         )
         return apply_memory_query(self.bindings.values(), query)
 
+    @_locked_access
     def get_binding(self, binding_id, fields=None):
         return project_fields(
             self._get(self.bindings, binding_id, "aria_acl_binding"),
             fields,
         )
 
-    @_locked_write
+    @_locked_access
     def update_binding(self, binding_id, values):
         existing = self._get(self.bindings, binding_id, "aria_acl_binding")
         reject_immutable_changes(
@@ -512,9 +521,11 @@ class InMemoryAriaAclRepository(object):
         self.bindings[binding_id] = current
         return _clone(current)
 
+    @_locked_access
     def delete_binding(self, binding_id):
         self._delete(self.bindings, binding_id, "aria_acl_binding")
 
+    @_locked_access
     def upsert_port_status(self, values):
         values = _clone(values)
         _require(values, ("port_id", "host"), "aria_acl_port_status")
@@ -523,6 +534,7 @@ class InMemoryAriaAclRepository(object):
         self.port_statuses[key] = values
         return _clone(values)
 
+    @_locked_access
     def get_port_status(self, port_id, host=None):
         if host is not None:
             return _clone(self.port_statuses.get((port_id, host)))
@@ -532,6 +544,7 @@ class InMemoryAriaAclRepository(object):
         ]
         return _clone(statuses)
 
+    @_locked_access
     def list_port_statuses(
         self,
         filters=None,
@@ -557,6 +570,7 @@ class InMemoryAriaAclRepository(object):
             projection=projection,
         )
 
+    @_locked_access
     def delete_port_status(self, port_id, host=None):
         if host is not None:
             key = (port_id, host)
@@ -573,6 +587,7 @@ class InMemoryAriaAclRepository(object):
         for key in keys:
             del self.port_statuses[key]
 
+    @_locked_access
     def get_port_status_resource(self, resource_id):
         if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
@@ -587,12 +602,14 @@ class InMemoryAriaAclRepository(object):
             self.get_port_status(resource_id),
         )
 
+    @_locked_access
     def delete_port_status_resource(self, resource_id):
         if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
             return self.delete_port_status(port_id, host=host)
         return self.delete_port_status(resource_id, host=None)
 
+    @_locked_access
     def to_effective_payload(self):
         return {
             "policies": self.list_policies(),

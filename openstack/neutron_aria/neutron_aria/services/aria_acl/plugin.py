@@ -479,14 +479,16 @@ class AriaAclPlugin(object):
     def _repo(self, context):
         if self.repository is not None:
             return ErrorMappingRepositoryProxy(self.repository)
-        if context is not None and getattr(context, "session", None) is not None:
+        if context is None:
+            return ErrorMappingRepositoryProxy(self._fallback_repository)
+        if getattr(context, "session", None) is not None:
             return ErrorMappingRepositoryProxy(
                 NeutronDbAriaAclRepository(
                     context,
                     auto_create=_env_flag("ARIA_ACL_DB_AUTO_CREATE", default=False),
                 )
             )
-        return ErrorMappingRepositoryProxy(self._fallback_repository)
+        raise RuntimeError("aria_acl_database_session_required")
 
     def _create_acl_bulk(
         self,

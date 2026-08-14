@@ -792,7 +792,10 @@ class AriaAclPluginTestCase(unittest.TestCase):
         )
 
     def test_legacy_port_show_wrapper_projects_before_field_selection(self):
-        plugin = AriaAclPlugin(now=lambda: 0.0)
+        plugin = AriaAclPlugin(
+            repository=InMemoryAriaAclRepository(),
+            now=lambda: 0.0,
+        )
         core = FakeCorePlugin([{
             "id": "port-1",
             "network_id": "network-1",
@@ -1353,7 +1356,10 @@ class AriaAclPluginTestCase(unittest.TestCase):
 
     def test_acl_policy_rule_and_binding_writes_emit_rpc_notifications(self):
         notifier = FakeNotifier()
-        plugin = AriaAclPlugin(notifier=notifier)
+        plugin = AriaAclPlugin(
+            repository=InMemoryAriaAclRepository(),
+            notifier=notifier,
+        )
 
         policy = plugin.create_aria_acl_policy("ctx", {
             "id": "policy-1",
