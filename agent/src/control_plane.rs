@@ -498,6 +498,26 @@ fn preexisting_projection_verification(drift: ProjectionDrift) -> Result<bool, S
     }
 }
 
+fn classify_preexisting_runtime_gate(
+    projection_mode: GroupProjectionMode,
+    actual_conntrack: u8,
+    actual_acl: u8,
+    expected_conntrack: u8,
+    expected_acl: u8,
+    tc_runtime_complete: bool,
+) -> Result<RuntimeGateDisposition, String> {
+    if !tc_runtime_complete && actual_conntrack == 0 && actual_acl == 0 {
+        return Ok(RuntimeGateDisposition::ManagedQuiesced);
+    }
+    classify_runtime_gate_state(
+        projection_mode,
+        actual_conntrack,
+        actual_acl,
+        expected_conntrack,
+        expected_acl,
+    )
+}
+
 fn managed_acl_registration_lifecycle(
     mode: ManagedAttachMode,
     projection_drift: Option<ProjectionDrift>,
@@ -4023,7 +4043,7 @@ impl ControlPlane {
             Ok(actual) => actual,
             Err(error) => return PreexistingRuntimeValidation::fatal(error),
         };
-        if let Err(error) = preexisting_tc_acl_runtime_is_healthy(
+        let tc_runtime_complete = match preexisting_tc_acl_runtime_is_healthy(
             state.conntrack_enabled || state.acl_enabled,
             actual.conntrack_enabled == 0 && actual.acl_enabled == 0,
             pin_state.preexisting_live_links,
@@ -4031,8 +4051,9 @@ impl ControlPlane {
             pin_state.preexisting_tc_egress_link,
             runtime_instance.tc_acl_link_health(),
         ) {
-            return PreexistingRuntimeValidation::fatal(error);
-        }
+            Ok(complete) => complete,
+            Err(error) => return PreexistingRuntimeValidation::fatal(error),
+        };
         let expected = Self::expected_runtime_flags(state);
         let actual_flags = (
             actual.conntrack_enabled,
@@ -4059,12 +4080,13 @@ impl ControlPlane {
             ));
         }
 
-        let gate_disposition = match classify_runtime_gate_state(
+        let gate_disposition = match classify_preexisting_runtime_gate(
             projection_mode,
             actual.conntrack_enabled,
             actual.acl_enabled,
             expected.0,
             expected.2,
+            tc_runtime_complete,
         ) {
             Ok(disposition) => disposition,
             Err(error) => {
@@ -8872,6 +8894,30 @@ mod tests {
             lifecycle.projection_health,
             ManagedProjectionHealth::Unverified
         );
+    }
+
+    #[test]
+    fn incomplete_tc_runtime_accepts_only_an_explicitly_quiesced_gate_for_recovery() {
+        assert_eq!(
+            classify_preexisting_runtime_gate(
+                GroupProjectionMode::StandaloneCompatibility,
+                0,
+                0,
+                1,
+                1,
+                false,
+            ),
+            Ok(RuntimeGateDisposition::ManagedQuiesced)
+        );
+        assert!(classify_preexisting_runtime_gate(
+            GroupProjectionMode::StandaloneCompatibility,
+            0,
+            0,
+            1,
+            1,
+            true,
+        )
+        .is_err());
     }
 
     #[test]
