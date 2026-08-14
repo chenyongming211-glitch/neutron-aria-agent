@@ -11178,7 +11178,12 @@ mod tests {
     async fn snapshot_generation_retry_status_v2_marks_first_partial_retryable() {
         let root = temp_root("status-v2-first-partial");
         let state = test_neutron_state(&root);
-        *state.runtime.write().await = retryable_partial_runtime(1, "hash-1");
+        let partial = retryable_partial_runtime(1, "hash-1");
+        state
+            .wal
+            .append_snapshot_commit(partial.to_wal_state())
+            .expect("Status V2 retry fixture must be a durable partial commit");
+        *state.runtime.write().await = partial;
 
         let response = get_neutron_status(State(state)).await.into_response();
         let (status, body) = response_json_value(response).await;
