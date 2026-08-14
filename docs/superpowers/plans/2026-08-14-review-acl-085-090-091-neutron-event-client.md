@@ -32,7 +32,7 @@
 - Consumes: `AgentService.run_once`, `NeutronPortSource.list_ports_for_host`, `AriaAclRestClient.report_aria_acl_port_status`, and `AriaAclPortStatusReporter` public behavior.
 - Produces: deterministic RED evidence for both delete-failure positions, both unusable pagination-marker forms, and every exception-driven status-write retry.
 
-- [ ] **Step 1: Add delete-failure convergence tests**
+- [x] **Step 1: Add delete-failure convergence tests**
 
 Extend the service fake with a configured set of failing delete IDs. Its
 `delete_port` must record the attempted ID before raising so tests can prove the
@@ -54,7 +54,7 @@ Add a second test for a foreign-host port update whose decision is
 the same batch. Assert the same immediate full-resync and retained event
 observability behavior.
 
-- [ ] **Step 2: Add strict host-port pagination tests**
+- [x] **Step 2: Add strict host-port pagination tests**
 
 In `test_neutron_client.py`, add:
 
@@ -71,7 +71,7 @@ def test_port_source_rejects_empty_page_with_next_link(self):
 Add the equivalent non-empty page whose last port lacks `id`. A terminal empty
 page without a next link must remain valid.
 
-- [ ] **Step 3: Add exactly-once POST and DELETE tests**
+- [x] **Step 3: Add exactly-once POST and DELETE tests**
 
 Add a fake neutronclient `post()` that increments a counter and raises
 `TypeError("response decode failed")` from inside the method. Calling
@@ -83,7 +83,7 @@ Add context-style status API fakes whose report and delete methods accept
 call each method once. Add one payload-style fake with the explicit adapter
 style marker and assert report/delete receive no context argument.
 
-- [ ] **Step 4: Run focused RED tests**
+- [x] **Step 4: Run focused RED tests**
 
 ```bash
 PYTHONPATH=openstack/neutron_aria python3 -m unittest \
@@ -97,7 +97,7 @@ Expected: only the new tests fail. Old code does not resync after either delete
 failure, accepts both incomplete host-port pages, and invokes the TypeError
 fakes twice.
 
-- [ ] **Step 5: Commit and push RED**
+- [x] **Step 5: Commit and push RED**
 
 ```bash
 git add \
@@ -124,7 +124,7 @@ jobs only after the required RED evidence is complete.
 - Consumes: existing `safe_full_resync`, runtime degraded status, event-decision observability, and resync backoff handling.
 - Produces: `_resync_after_delete_failure(batch_dict, delete_errors)` returning the normal resync result with `events` and `resync_attempted=True`.
 
-- [ ] **Step 1: Add one concrete failure-convergence helper**
+- [x] **Step 1: Add one concrete failure-convergence helper**
 
 Add a private helper on `AgentService`:
 
@@ -146,7 +146,7 @@ def _resync_after_delete_failure(self, batch_dict, delete_errors):
 The helper does not synthesize snapshot/status fields. `safe_full_resync()`
 remains their owner.
 
-- [ ] **Step 2: Route both delete-failure positions through the helper**
+- [x] **Step 2: Route both delete-failure positions through the helper**
 
 Replace the early heartbeat-only return after `_delete_known_ports()` errors
 with the helper. In the `ACTION_DELETE_LOCAL` exception branch, attach the
@@ -160,7 +160,7 @@ return self._resync_after_delete_failure(
 )
 ```
 
-- [ ] **Step 3: Run service tests**
+- [x] **Step 3: Run service tests**
 
 ```bash
 PYTHONPATH=openstack/neutron_aria python3 -m unittest \
@@ -181,7 +181,7 @@ Expected: all service tests pass, including both new delete-failure cases.
 - Consumes: `_extract_ports_and_next` and existing `PortSourceUnavailable`.
 - Produces: complete-or-error host-port inventory semantics matching the ACL resource client.
 
-- [ ] **Step 1: Separate terminal completion from invalid continuation**
+- [x] **Step 1: Separate terminal completion from invalid continuation**
 
 Replace the combined `not has_next or not batch` break:
 
@@ -201,7 +201,7 @@ if not next_marker:
 
 Keep repeated-marker and maximum-page checks after this validation.
 
-- [ ] **Step 2: Run client tests**
+- [x] **Step 2: Run client tests**
 
 ```bash
 PYTHONPATH=openstack/neutron_aria python3 -m unittest \
@@ -224,7 +224,7 @@ Expected: all host-port pagination tests pass.
 - Consumes: repository-owned `AriaAclRestClient`, direct context-style plugin APIs, and the existing reporter payload builders.
 - Produces: class marker `ARIA_ACL_STATUS_CALL_STYLE = "payload"` and one stored reporter call style selected before any side effect.
 
-- [ ] **Step 1: Declare the repository-owned adapter contract**
+- [x] **Step 1: Declare the repository-owned adapter contract**
 
 Add this class attribute to `AriaAclRestClient`:
 
@@ -236,7 +236,7 @@ Call the underlying production neutronclient POST once with `body=body` and
 remove its `except TypeError` retry. DELETE already has one canonical call and
 remains unchanged.
 
-- [ ] **Step 2: Resolve reporter style during construction**
+- [x] **Step 2: Resolve reporter style during construction**
 
 Add constants in `status_reporter.py`:
 
@@ -250,7 +250,7 @@ In `AriaAclPortStatusReporter.__init__`, read
 select payload style; direct plugin APIs default to context style. Reject any
 other marker with `StatusReportError` before a report or delete can occur.
 
-- [ ] **Step 3: Remove exception-driven status retries**
+- [x] **Step 3: Remove exception-driven status retries**
 
 Dispatch once from `_report_one` and `_delete_one`:
 
@@ -264,7 +264,7 @@ Use `(port_id, host)` for payload-style delete and
 `(context, port_id, host=host)` for context-style delete. Do not catch
 `TypeError` around either call.
 
-- [ ] **Step 4: Run status/client tests**
+- [x] **Step 4: Run status/client tests**
 
 ```bash
 PYTHONPATH=openstack/neutron_aria python3 -m unittest \
@@ -287,7 +287,7 @@ Expected: all tests pass; response-processing `TypeError` fakes show one call.
 - Consumes: exact RED and GREEN commit/Build/job IDs.
 - Produces: fixed Register rows for `REVIEW-ACL-085/090/091` without changing excluded-item status.
 
-- [ ] **Step 1: Run full allowed Python verification**
+- [x] **Step 1: Run full allowed Python verification**
 
 ```bash
 PYTHONPATH=openstack/neutron_aria python3 -m unittest \
@@ -304,7 +304,7 @@ git diff --check
 
 Expected: every executed test passes and both static commands exit zero.
 
-- [ ] **Step 2: Commit and push GREEN**
+- [x] **Step 2: Commit and push GREEN**
 
 ```bash
 git add \
@@ -318,7 +318,7 @@ git push origin v0.9-neutron-agent
 Require exact-head fast-contracts and clean install. Database contracts may run
 and must pass. Rust jobs should skip because no Rust-relevant file changed.
 
-- [ ] **Step 3: Record exact evidence and advance to fragment attribution**
+- [x] **Step 3: Record exact evidence and advance to fragment attribution**
 
 Mark only `REVIEW-ACL-085/090/091` fixed. Record RED/GREEN commit and job links,
 the immediate-resync contract, pagination failure semantics, and exactly-once

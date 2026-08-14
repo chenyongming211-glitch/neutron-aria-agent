@@ -1,6 +1,6 @@
 # Remaining ACL-Only Remediation Design
 
-**Status:** approved scope; implementation in progress
+**Status:** approved scope; Batch 1 fixed; Batch 2 is the active implementation batch
 
 **Scope:** remaining Neutron ACL control-plane, ACL state-convergence, and ACL
 fragment/conntrack correctness findings only
@@ -115,8 +115,8 @@ not modify their tests or production paths:
 ## 4. Delivery Order
 
 ```text
-Batch 1  ACL-085 + ACL-090 + ACL-091  Neutron ACL event/client correctness
-Batch 2  ACL-098 + ACL-099            ACL fragment attribution
+Batch 1  ACL-085 + ACL-090 + ACL-091  Fixed with exact RED/GREEN CI
+Batch 2  ACL-098 + ACL-099            Active: ACL fragment attribution
 Gate 3   ACL-086                      target-kernel evidence before code
 Gate 4   ACL-083/084 + TXN-035        prove each conditional claim separately
 ```
