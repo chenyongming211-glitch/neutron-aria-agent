@@ -631,6 +631,13 @@ mod tests {
     }
 
     fn test_registry(root: &std::path::Path) -> TapRegistry {
+        test_registry_with_pattern(root, Regex::new("^(lo|tap)").unwrap())
+    }
+
+    fn test_registry_with_pattern(
+        root: &std::path::Path,
+        iface_pattern: Regex,
+    ) -> TapRegistry {
         let ebpf_path = root
             .join("libebpf_firewall.so")
             .to_string_lossy()
@@ -654,10 +661,21 @@ mod tests {
             &ebpf_path,
             &pin_path,
             &state_path,
-            "^(lo|tap)",
+            iface_pattern,
             4096,
             control_plane,
         )
+    }
+
+    #[test]
+    fn startup_config_registry_uses_prevalidated_pattern_without_default_fallback() {
+        let root = temp_root("prevalidated-pattern");
+        let registry =
+            test_registry_with_pattern(&root, Regex::new("^qvo[0-9]+$").unwrap());
+
+        assert!(registry.matches_pattern("qvo12"));
+        assert!(!registry.matches_pattern("tap12"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[derive(Default)]

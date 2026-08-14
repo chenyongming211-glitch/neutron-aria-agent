@@ -1143,6 +1143,29 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn startup_config_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "aria-startup-config-{}-{}-{}",
+            name,
+            std::process::id(),
+            nanos
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    fn startup_config_error(path: &Path) -> String {
+        match load_startup_config(path) {
+            Ok(_) => panic!("invalid startup configuration must not use defaults"),
+            Err(error) => error,
+        }
+    }
+
     fn management_listener_config(listen_addr: &str, allow_non_loopback: bool) -> Config {
         toml::from_str(&format!(
             "listen_addr = {:?}\nallow_unauthenticated_non_loopback = {}\n",
@@ -1241,6 +1264,89 @@ mod tests {
         assert!(config.neutron_socket_enabled());
         assert_eq!(config.neutron_socket_mode, 0o660);
         assert!(!config.neutron_peercred_enforce);
+    }
+
+    #[test]
+    fn startup_config_missing_path_uses_documented_defaults() {
+        let path = startup_config_path("missing");
+        let startup = load_startup_config(&path).unwrap();
+
+        assert_eq!(startup.config.mode, AgentMode::Standalone);
+        assert!(startup.config.effective_auto_attach());
+        assert!(startup.iface_pattern.is_match("tap123"));
+        assert!(!startup.iface_pattern.is_match("qvo123"));
+    }
+
+    #[test]
+    fn startup_config_valid_neutron_mode_and_custom_pattern_are_preserved() {
+        let path = startup_config_path("valid-neutron");
+        std::fs::write(
+            &path,
+            "mode = \"neutron_managed\"\niface_pattern = \"^qvo[0-9]+$\"\n",
+        )
+        .unwrap();
+
+        let startup = load_startup_config(&path).unwrap();
+        assert_eq!(startup.config.mode, AgentMode::NeutronManaged);
+        assert!(!startup.config.effective_auto_attach());
+        assert!(startup.iface_pattern.is_match("qvo12"));
+        assert!(!startup.iface_pattern.is_match("tap12"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_config_valid_standalone_disable_and_custom_pattern_are_preserved() {
+        let path = startup_config_path("valid-standalone");
+        std::fs::write(
+            &path,
+            "mode = \"standalone\"\nauto_attach = false\niface_pattern = \"^br-[a-z]+$\"\n",
+        )
+        .unwrap();
+
+        let startup = load_startup_config(&path).unwrap();
+        assert_eq!(startup.config.mode, AgentMode::Standalone);
+        assert!(!startup.config.effective_auto_attach());
+        assert!(startup.iface_pattern.is_match("br-edge"));
+        assert!(!startup.iface_pattern.is_match("tap12"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_config_malformed_toml_is_fatal() {
+        let path = startup_config_path("malformed");
+        std::fs::write(&path, "mode = [\n").unwrap();
+
+        let error = startup_config_error(&path);
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("parse configuration"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_config_existing_unreadable_path_is_fatal() {
+        let path = startup_config_path("unreadable");
+        std::fs::create_dir(&path).unwrap();
+
+        let error = startup_config_error(&path);
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("read configuration"));
+
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn startup_config_invalid_iface_pattern_is_fatal() {
+        let path = startup_config_path("invalid-pattern");
+        std::fs::write(&path, "iface_pattern = \"[\"\n").unwrap();
+
+        let error = startup_config_error(&path);
+        assert!(error.contains("iface_pattern"));
+        assert!(error.contains("["));
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
