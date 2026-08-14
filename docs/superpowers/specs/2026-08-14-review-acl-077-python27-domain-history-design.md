@@ -1,6 +1,6 @@
 # REVIEW-ACL-077 Python 2.7 Domain History Compatibility Design
 
-**Status:** approved for implementation by the remediation program
+**Status:** source implementation and exact-head hosted CI complete
 
 **Date:** 2026-08-14
 
@@ -79,6 +79,17 @@ The second test must fail against the current implementation. It is real
 runtime evidence, not a source-text checker or a Python 3 approximation of
 Python 2 string types.
 
+RED `929b42a` failed the installed-egg Python 2.7 assertion in Build
+[31764850375](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31764850375).
+The Python 3 fast and database contracts passed; the remaining unrelated Rust
+jobs were cancelled after the intended failure was captured. GREEN `a483737`
+passed exact-head Build
+[31764984847](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31764984847).
+Its clean-install log explicitly emitted
+`clean_python27_unicode_domain_history=ok`, proving that the real Python 2.7
+JSON key survived restoration. Rust jobs were correctly skipped because the
+GREEN production change was Python-only.
+
 ## 5. Failure And Compatibility Semantics
 
 - No valid durable entry may disappear solely because Python 2.7 decoded its
@@ -119,4 +130,3 @@ Explicit exclusions:
 4. Generation normalization remains unchanged.
 5. The focused Python tests and the Python 2.7 clean-install lane pass.
 6. Exact-head hosted Build passes before `REVIEW-ACL-077` is marked fixed.
-

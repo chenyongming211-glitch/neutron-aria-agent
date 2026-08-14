@@ -50,7 +50,7 @@ existing clean-install container lane.
 - [x] Replace the bare `str` predicate in `_generation_by_domain` with
   `_STRING_TYPES` without changing any other normalization behavior.
 - [x] Run the focused unit test and the relevant fast Python contracts locally.
-- [ ] Commit and push GREEN.
+- [x] Commit and push GREEN.
 
 ### Task 3: Hosted Verification And Closure
 
@@ -61,9 +61,9 @@ existing clean-install container lane.
 - Modify: `docs/openstack-neutron-aria-details/12-review-bug-backlog.md`
 - Modify: `docs/superpowers/specs/2026-08-13-bug-hunt-remediation-program-design.md`
 
-- [ ] Verify exact-head `fast-contracts` and `neutron-agent-clean-install` pass.
-- [ ] Confirm the clean-install log executed the real Python 2.7 Unicode JSON
+- [x] Verify exact-head `fast-contracts` and `neutron-agent-clean-install` pass.
+- [x] Confirm the clean-install log executed the real Python 2.7 Unicode JSON
   assertion rather than skipping it.
-- [ ] Record RED and GREEN commit/Build evidence in the design and register.
-- [ ] Mark `REVIEW-ACL-077` fixed only after exact-head GREEN.
-- [ ] Advance the fixed remediation order to `REVIEW-TXN-033`.
+- [x] Record RED and GREEN commit/Build evidence in the design and register.
+- [x] Mark `REVIEW-ACL-077` fixed only after exact-head GREEN.
+- [x] Advance the fixed remediation order to `REVIEW-TXN-033`.

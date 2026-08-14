@@ -220,8 +220,11 @@ Build
 exposed both unsafe fallbacks and GREEN `9010f7e` passed eight exact startup
 behaviors plus warning-denied builds in exact-head Build
 [31763073075](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31763073075).
-The active batch is `REVIEW-ACL-077` Python 2.7 status compatibility. Its
+`REVIEW-ACL-077` Python 2.7 status compatibility is complete. Its
 [design](2026-08-14-review-acl-077-python27-domain-history-design.md) and
 [implementation plan](../plans/2026-08-14-review-acl-077-python27-domain-history.md)
-use the existing real Python 2.7 clean-install lane for the durable JSON
-round-trip evidence. Later batches remain in the fixed order above.
+used the existing real Python 2.7 clean-install lane for the durable JSON
+round-trip evidence; GREEN `a483737` passed exact-head Build
+[31764984847](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31764984847).
+The active next batch is `REVIEW-TXN-033`; later batches remain in the fixed
+order above.
