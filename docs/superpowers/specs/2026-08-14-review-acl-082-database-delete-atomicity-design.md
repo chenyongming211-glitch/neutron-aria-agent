@@ -1,6 +1,6 @@
 # REVIEW-ACL-082 Database Delete Atomicity Design
 
-**Status:** approved design; implementation pending
+**Status:** implemented and hosted-CI verified
 
 **Scope:** `REVIEW-ACL-082` only
 
@@ -221,3 +221,28 @@ This batch does not:
 - change rule, binding, or port-status delete semantics;
 - change datapath publication, agent recovery, or status projection; or
 - claim target-environment or privileged datapath evidence.
+
+## 9. Implementation Evidence
+
+The implementation followed the approved transaction boundary without a
+schema, API, or datapath expansion:
+
+- RED `4336892` added public-behavior races for in-memory, stdlib SQLite, and
+  real SQLAlchemy-on-SQLite repositories. Build
+  [31784518770](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784518770)
+  failed exactly the four expected fast-contract orphan assertions and the two
+  expected Neutron DB contract orphan assertions.
+- GREEN `db169c9` added 32 production lines and removed 4. It holds the
+  in-memory write lock across each delete, uses one `BEGIN IMMEDIATE` for the
+  stdlib SQLite check/delete operation, and completes the Neutron parent-lock
+  protocol inside one outer transaction. SQLAlchemy's SQLite contract backend
+  uses a same-row, same-value update because SQLite ignores `FOR UPDATE`.
+- Exact implementation-head Build
+  [31784634775](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775)
+  passed [fast contracts](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775/job/94717707731),
+  [Neutron DB contracts](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775/job/94717707617),
+  and [clean install](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775/job/94717707597).
+
+No privileged or target datapath evidence applies. The repair changes only
+repository serialization and preserves the existing public errors and
+notification timing.

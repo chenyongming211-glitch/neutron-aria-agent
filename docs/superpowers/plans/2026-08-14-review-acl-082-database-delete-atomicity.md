@@ -30,7 +30,7 @@
 - Consumes: public `delete_policy`, `delete_address_set`, `create_rule`, and `create_binding` repository methods.
 - Produces: deterministic public-behavior tests proving that a delete/check window cannot create a parent-absent/child-present final state.
 
-- [ ] **Step 1: Add reusable race assertions to the repository parity tests**
+- [x] **Step 1: Add reusable race assertions to the repository parity tests**
 
 Add a test helper that pauses the real delete path immediately after the
 reference check. Start the competing public create operation, give it a
@@ -48,7 +48,7 @@ Cover policy/rule and address-set/rule races against one
 `InMemoryAriaAclRepository`. The paused repository subclasses remain test
 fixtures only; do not add a pause hook to production code.
 
-- [ ] **Step 2: Add real stdlib SQLite races**
+- [x] **Step 2: Add real stdlib SQLite races**
 
 For each parent type, create two repository instances in separate threads
 against one temporary database file. The delete-side fixture pauses after
@@ -66,7 +66,7 @@ self.assertIsInstance(errors[0], AriaAclValidationError)
 Use `threading.Event`, bounded waits, `try/finally`, and close every SQLite
 connection in its creating thread.
 
-- [ ] **Step 3: Add SQLAlchemy-on-SQLite races in the DB contract lane**
+- [x] **Step 3: Add SQLAlchemy-on-SQLite races in the DB contract lane**
 
 Extend `AriaAclSqlQueryTestCase` with a helper that creates a file-backed
 SQLite engine using:
@@ -84,7 +84,7 @@ the session. Cover policy/rule and address-set/rule. Assert only the public
 final-state invariant and typed loser error; do not assert helper names or SQL
 source strings.
 
-- [ ] **Step 4: Add non-race regression cases**
+- [x] **Step 4: Add non-race regression cases**
 
 Across the common repository behavior, verify:
 
@@ -118,7 +118,7 @@ For successful deletes, create an unreferenced parent, call its public delete
 method, and assert `get_policy` or `get_address_set` raises `AriaAclNotFound`.
 Existing SQLAlchemy member rollback coverage must remain unchanged.
 
-- [ ] **Step 5: Run focused RED tests**
+- [x] **Step 5: Run focused RED tests**
 
 Run locally without installing new dependencies:
 
@@ -131,7 +131,7 @@ Expected: the newly added in-memory and stdlib SQLite race tests fail because
 the old delete paths leave an orphan; existing regression tests remain green.
 The SQLAlchemy class remains skipped locally when SQLAlchemy is unavailable.
 
-- [ ] **Step 6: Commit and push RED**
+- [x] **Step 6: Commit and push RED**
 
 ```bash
 git add \
@@ -158,7 +158,7 @@ unrelated long-running Rust jobs after the RED evidence is complete.
 - Consumes: `_locked_write`, `_neutron_write`, `_sqlite_write`, `_lock_write_rows`, and existing public repository methods.
 - Produces: atomic `delete_policy(policy_id)` and `delete_address_set(address_set_id)` implementations with unchanged return and error contracts.
 
-- [ ] **Step 1: Serialize in-memory deletes**
+- [x] **Step 1: Serialize in-memory deletes**
 
 Apply the existing decorator to the complete public operations:
 
@@ -174,7 +174,7 @@ def delete_address_set(self, address_set_id):
     self._delete(self.address_sets, address_set_id, "aria_acl_address_set")
 ```
 
-- [ ] **Step 2: Complete the Neutron SQLAlchemy parent-lock protocol**
+- [x] **Step 2: Complete the Neutron SQLAlchemy parent-lock protocol**
 
 Make policy delete own one transaction and lock each delete parent before
 validation:
@@ -224,7 +224,7 @@ for table_name, row_id in ordered:
 
 Do not add a backend-specific public API.
 
-- [ ] **Step 3: Make stdlib SQLite delete helpers transaction-aware**
+- [x] **Step 3: Make stdlib SQLite delete helpers transaction-aware**
 
 Decorate only the policy and address-set delete methods with `_sqlite_write()`
 and call the existing private delete helper with `commit=False`:
@@ -256,7 +256,7 @@ def _delete(self, table, object_id, object_type, commit=True):
 The `_sqlite_write()` wrapper commits successful atomic deletes and rolls back
 typed failures.
 
-- [ ] **Step 4: Run focused GREEN tests**
+- [x] **Step 4: Run focused GREEN tests**
 
 ```bash
 PYTHONPATH=openstack/neutron_aria python3 -m unittest \
@@ -267,7 +267,7 @@ PYTHONPATH=openstack/neutron_aria python3 -m unittest \
 Expected: all executed tests pass; SQLAlchemy-only tests are skipped locally
 when the dependency is unavailable.
 
-- [ ] **Step 5: Run allowed static checks**
+- [x] **Step 5: Run allowed static checks**
 
 ```bash
 python3 -m py_compile \
@@ -279,7 +279,7 @@ git diff --check
 
 Expected: exit code 0 with no diagnostics.
 
-- [ ] **Step 6: Commit and push GREEN**
+- [x] **Step 6: Commit and push GREEN**
 
 ```bash
 git add \
@@ -307,7 +307,7 @@ success. Rust jobs may skip because this batch changes no Rust-relevant file.
 - Consumes: exact RED and GREEN commit/Build/job IDs from Tasks 1 and 2.
 - Produces: an auditable fixed backlog row and advancement to remediation step 9 without field-evidence overclaim.
 
-- [ ] **Step 1: Record implementation evidence**
+- [x] **Step 1: Record implementation evidence**
 
 Mark `REVIEW-ACL-082` fixed only after the exact implementation-head hosted
 lanes pass. Record:
@@ -319,19 +319,19 @@ lanes pass. Record:
 - unchanged HTTP mapping; and
 - that no privileged or target datapath evidence applies.
 
-- [ ] **Step 2: Advance the remediation program**
+- [x] **Step 2: Advance the remediation program**
 
 Mark step 8 complete and identify step 9 as the next active batch:
 `REVIEW-ACL-078` and `REVIEW-OPS-039` as independent commits in one review
 window. Do not pull either item into ACL-082.
 
-- [ ] **Step 3: Update design and plan status**
+- [x] **Step 3: Update design and plan status**
 
 Change the design status to implemented and hosted-CI verified. Check every
 completed plan step and include exact evidence links. Do not write a field
 PASS claim.
 
-- [ ] **Step 4: Verify and commit documentation closure**
+- [x] **Step 4: Verify and commit documentation closure**
 
 ```bash
 rg -n "REVIEW-ACL-082|step 8|step 9" \
@@ -345,7 +345,7 @@ git commit -m "docs: close ACL database delete atomicity"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Require final exact-head CI and clean synchronization**
+- [x] **Step 5: Require final exact-head CI and clean synchronization**
 
 Wait for the documentation-head Build. Require fast-contracts, Neutron DB
 contracts, and clean install to pass; if Rust jobs run, require them to pass as
@@ -358,3 +358,20 @@ git rev-list --left-right --count \
 ```
 
 Expected: clean worktree and `0 0` divergence.
+
+## Completion Evidence
+
+- RED commit `4336892`; Build
+  [31784518770](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784518770)
+  failed only the six intended orphan race assertions: four in
+  [fast-contracts](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784518770/job/94717352346)
+  and two in
+  [neutron-db-contracts](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784518770/job/94717352314).
+- GREEN commit `db169c9`; exact-head Build
+  [31784634775](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775)
+  passed [fast contracts](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775/job/94717707731),
+  [Neutron DB contracts](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775/job/94717707617),
+  and [clean install](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775/job/94717707597).
+- The documentation closure commit is required to pass those same applicable
+  lanes before this plan is reported complete. No privileged or datapath field
+  PASS is required or claimed.

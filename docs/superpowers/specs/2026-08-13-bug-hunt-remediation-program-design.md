@@ -239,5 +239,13 @@ reject submitted generation zero before side effects, bind pending identity to
 generation plus desired hash, and let only a fresh-WAL-verified durable partial
 generation use the typed Status V2 same-generation retry path. Exact-head Build
 [31779783002](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31779783002)
-passed the retry behaviors and warning-denied builds. The active batch is now
-step 8, `REVIEW-ACL-082`; later batches remain in the fixed order above.
+passed the retry behaviors and warning-denied builds. Step 8,
+`REVIEW-ACL-082`, is complete under the shared parent-lock protocol recorded
+in [the formal design](2026-08-14-review-acl-082-database-delete-atomicity-design.md).
+RED `4336892` exposed all six deterministic delete/create races in hosted fast
+and database contracts. Implementation `db169c9` passed exact-head Build
+[31784634775](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31784634775),
+including fast contracts, real SQLAlchemy database contracts, and clean
+install. The active batch is now step 9: `REVIEW-ACL-078` and
+`REVIEW-OPS-039` remain independent implementation commits in one review
+window. Later batches remain in the fixed order above.
