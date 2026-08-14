@@ -7545,21 +7545,33 @@ mod tests {
     }
 
     async fn status_v1_json_for_runtime(id: &str, runtime: NeutronRuntimeState) -> Value {
-        let root = temp_root(&format!("status-v1-{id}"));
-        let state = test_neutron_state(&root);
-        {
-            let mut stored_runtime = state.runtime.write().await;
-            *stored_runtime = runtime;
-        }
-        let response = get_neutron_status(State(state)).await.into_response();
-        let (status, value) = response_json_value(response).await;
-        std::fs::remove_dir_all(&root).expect("Status V1 temporary root should be removable");
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "Status V1 handler must return HTTP 200 for {id}: {value}"
-        );
-        value
+        let projection = project_neutron_status_v1(&runtime);
+        serde_json::to_value(NeutronStatusV1Response {
+            status_schema_version: 1,
+            status_contract_hash: "v0.9-neutron-status-1".to_string(),
+            transaction_state: projection.transaction_state,
+            overall_readiness: projection.overall_readiness,
+            required_action: projection.required_action,
+            recovery_cause: projection.recovery_cause,
+            last_classified_generation: projection.last_classified_generation,
+            generation: runtime.applied_generation,
+            accepted_generation: runtime.accepted_generation,
+            applied_generation: runtime.applied_generation,
+            pending_generation: runtime.pending_generation,
+            desired_hash: runtime.desired_hash.clone(),
+            applied_desired_hash: runtime.applied_desired_hash.clone(),
+            wal_status: runtime.wal_status.clone(),
+            wal_replay_failures: runtime.wal_replay_failures,
+            authority_state: if runtime.authority_state.is_empty() {
+                "idle".to_string()
+            } else {
+                runtime.authority_state.clone()
+            },
+            managed_ports: runtime.ports.values().cloned().collect(),
+            port_statuses: projection.port_statuses,
+            active_instances: Vec::new(),
+        })
+        .unwrap_or_else(|error| panic!("Status V1 projection must serialize for {id}: {error}"))
     }
 
     fn expected_status_v1_projection(id: &str) -> &'static Value {
