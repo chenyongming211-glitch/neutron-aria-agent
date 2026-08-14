@@ -88,6 +88,39 @@ class NeutronClientTestCase(unittest.TestCase):
         self.assertIn("pagination exceeded 2 pages", str(context.exception))
         self.assertEqual(2, len(client.calls))
 
+    def test_port_source_rejects_empty_page_with_next_link(self):
+        client = FakeNeutronClient([{
+            "ports": [],
+            "ports_links": [{"rel": "next", "href": "?marker=missing"}],
+        }])
+        source = NeutronPortSource(client, "compute-1", page_size=1)
+
+        with self.assertRaises(PortSourceUnavailable) as context:
+            source.list_ports_for_host()
+
+        self.assertIn("next page but no pagination marker", str(context.exception))
+        self.assertEqual(1, len(client.calls))
+
+    def test_port_source_rejects_next_page_without_last_port_id(self):
+        client = FakeNeutronClient([{
+            "ports": [{"name": "missing-id"}],
+            "ports_links": [{"rel": "next", "href": "?marker=missing"}],
+        }])
+        source = NeutronPortSource(client, "compute-1", page_size=1)
+
+        with self.assertRaises(PortSourceUnavailable) as context:
+            source.list_ports_for_host()
+
+        self.assertIn("next page but no pagination marker", str(context.exception))
+        self.assertEqual(1, len(client.calls))
+
+    def test_port_source_accepts_terminal_empty_page(self):
+        client = FakeNeutronClient([{"ports": [], "ports_links": []}])
+        source = NeutronPortSource(client, "compute-1", page_size=1)
+
+        self.assertEqual([], source.list_ports_for_host())
+        self.assertEqual(1, len(client.calls))
+
     def test_full_resync_client_delegates_to_port_source(self):
         source = NeutronPortSource(
             FakeNeutronClient([{"ports": [{"id": "p1"}], "ports_links": []}]),

@@ -36,6 +36,7 @@ class FakeSynchronizer(object):
         self.forced_revision_status = None
         self.scoped_exception = None
         self.scoped_result = None
+        self.delete_fail_ids = set()
 
     def safe_full_resync(self):
         self.resync_calls += 1
@@ -89,6 +90,8 @@ class FakeSynchronizer(object):
     def delete_port(self, port_id, reason=None):
         self.delete_calls.append(port_id)
         self.delete_reasons.append(reason)
+        if port_id in self.delete_fail_ids:
+            raise RuntimeError("delete failed for %s" % port_id)
         self.projected_port_ids.discard(port_id)
         return {"deleted": port_id}
 
@@ -707,6 +710,72 @@ class AgentServiceTestCase(unittest.TestCase):
             [decision["action"] for decision in result["events"]["decisions"]],
         )
         self.assertEqual(2, len(result["status"]["last_event_decision_counts"]))
+
+    def test_failed_deleted_port_forces_authoritative_resync_for_drained_batch(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+        sync.projected_port_ids.add("delete-1")
+        sync.delete_fail_ids.add("delete-1")
+
+        merger.record_port_delete("delete-1")
+        merger.record_port_update("update-1", binding_host=sync.host)
+        merger.record_network_update("network-1")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(["delete-1"], sync.delete_calls)
+        self.assertEqual(2, sync.resync_calls)
+        self.assertTrue(result["resync_attempted"])
+        self.assertEqual(["update-1"], result["events"]["port_updates"])
+        self.assertEqual(["network-1"], result["events"]["dirty_networks"])
+        self.assertIn("delete-1", result["events"]["delete_errors"][0])
+
+    def test_failed_foreign_host_delete_forces_authoritative_resync(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+        sync.projected_port_ids.add("move-1")
+        sync.delete_fail_ids.add("move-1")
+
+        merger.record_port_update(
+            "move-1",
+            binding_host="compute-2.example.test",
+        )
+        merger.record_port_update("update-1", binding_host=sync.host)
+        merger.record_network_update("network-1")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(["move-1"], sync.delete_calls)
+        self.assertEqual(2, sync.resync_calls)
+        self.assertTrue(result["resync_attempted"])
+        self.assertEqual(
+            ["move-1", "update-1"],
+            result["events"]["port_updates"],
+        )
+        self.assertEqual(["network-1"], result["events"]["dirty_networks"])
+        self.assertIn("move-1", result["events"]["delete_errors"][0])
 
     def test_network_update_triggers_full_resync(self):
         clock = FakeClock()

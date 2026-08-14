@@ -500,6 +500,27 @@ class AclSourceTestCase(unittest.TestCase):
             client.posts[0][1]["aria_acl_port_status"]["port_id"],
         )
 
+    def test_aria_acl_rest_client_does_not_retry_post_processing_type_error(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.post_count = 0
+
+            def post(self, path, body=None):
+                self.post_count += 1
+                raise TypeError("response decode failed")
+
+        client = FakeNeutronClient()
+
+        with self.assertRaises(TypeError) as context:
+            AriaAclRestClient(client).report_aria_acl_port_status({
+                "port_id": "port-1",
+                "host": "compute-1",
+                "status": "ready",
+            })
+
+        self.assertEqual("response decode failed", str(context.exception))
+        self.assertEqual(1, client.post_count)
+
     def test_aria_acl_rest_client_lists_port_statuses(self):
         class FakeNeutronClient(object):
             def __init__(self):

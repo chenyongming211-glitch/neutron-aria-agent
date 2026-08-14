@@ -549,6 +549,92 @@ class StatusReporterTestCase(unittest.TestCase):
         )
         self.assertEqual(1, result["deleted_port_statuses"])
 
+    def test_port_status_reporter_does_not_retry_report_type_error(self):
+        class TypeErrorApi(object):
+            def __init__(self):
+                self.calls = 0
+
+            def report_aria_acl_port_status(self, *args, **kwargs):
+                self.calls += 1
+                raise TypeError("response processing failed")
+
+        api = TypeErrorApi()
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="compute-1")
+        runtime_status = AgentRuntimeStatus("compute-1")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+
+        with self.assertRaises(TypeError) as context:
+            reporter.report(runtime_status)
+
+        self.assertEqual("response processing failed", str(context.exception))
+        self.assertEqual(1, api.calls)
+
+    def test_port_status_reporter_does_not_retry_delete_type_error(self):
+        class TypeErrorApi(object):
+            def __init__(self):
+                self.calls = 0
+
+            def delete_aria_acl_port_status(self, *args, **kwargs):
+                self.calls += 1
+                raise TypeError("response processing failed")
+
+        api = TypeErrorApi()
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="compute-1")
+
+        with self.assertRaises(TypeError) as context:
+            reporter.remove_port_status("port-1")
+
+        self.assertEqual("response processing failed", str(context.exception))
+        self.assertEqual(1, api.calls)
+
+    def test_port_status_reporter_uses_explicit_payload_adapter_style(self):
+        class PayloadApi(object):
+            ARIA_ACL_STATUS_CALL_STYLE = "payload"
+
+            def __init__(self):
+                self.reports = []
+                self.deletes = []
+
+            def report_aria_acl_port_status(self, payload):
+                self.reports.append(payload)
+                return payload
+
+            def delete_aria_acl_port_status(self, port_id, host):
+                self.deletes.append((port_id, host))
+                return {}
+
+        api = PayloadApi()
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="compute-1")
+        runtime_status = AgentRuntimeStatus("compute-1")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+
+        reporter.report(runtime_status)
+        reporter.remove_port_status("port-1")
+
+        self.assertEqual("port-1", api.reports[0]["port_id"])
+        self.assertEqual([("port-1", "compute-1")], api.deletes)
+
+    def test_port_status_reporter_rejects_unknown_adapter_style_before_write(self):
+        class InvalidApi(object):
+            ARIA_ACL_STATUS_CALL_STYLE = "guess"
+
+        with self.assertRaises(StatusReportError):
+            AriaAclPortStatusReporter(
+                InvalidApi(),
+                context="ctx",
+                host="compute-1",
+            )
+
     def test_composite_reporter_preserves_heartbeat_and_port_status(self):
         runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(
