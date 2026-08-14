@@ -95,6 +95,14 @@ behavior probes. A probe that stays GREEN closes or reclassifies the claim; a
 real RED result creates a new narrowly scoped implementation plan. These
 conditional items are not bundled into either production batch.
 
+`REVIEW-TXN-035` is now closed by that rule. The combined projection starts
+from an applied generation plus a newer partial/error generation, runs the
+same committed-runtime status reconstruction and ACL restart invalidation used
+by startup, then evaluates the public status contract. The port becomes
+`degraded/unchanged` at the applied generation while the newer generation
+remains pending, so the public result is `blocked/recover_pending`, never
+`ready`. No production status behavior was changed.
+
 ## 3. Explicitly Excluded Open Items
 
 The following findings remain recorded and open, but this ACL-only program does
@@ -118,7 +126,8 @@ not modify their tests or production paths:
 Batch 1  ACL-085 + ACL-090 + ACL-091  Fixed with exact RED/GREEN CI
 Batch 2  ACL-098 + ACL-099            Fixed with exact RED/GREEN CI
 Gate 3   ACL-086                      target-kernel evidence before code
-Gate 4   ACL-083/084 + TXN-035        prove each conditional claim separately
+Gate 4   ACL-083/084                  prove each remaining conditional claim separately
+         TXN-035                      closed by GREEN combined restart projection
 ```
 
 Each production batch uses behavior-level RED tests, one or more narrow GREEN

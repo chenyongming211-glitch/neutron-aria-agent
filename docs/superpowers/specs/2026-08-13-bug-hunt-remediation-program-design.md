@@ -118,7 +118,7 @@ These rows are not part of the 25 confirmed production fixes.
 | --- | --- | --- |
 | `REVIEW-ACL-083` | conditional | First prove that a production-style request can reach the sessionless shared fallback. Repository locking may proceed later as defensive hardening, but must not be presented as a reproduced production fix. |
 | `REVIEW-ACL-084` | conditional | Reproduce an upper layer catching an inner write error and then committing or continuing with the failed outer session. Joining an owner transaction without self-rollback is not by itself a defect. |
-| `REVIEW-TXN-035` | conditional | Execute one restart behavior test that includes both committed-runtime reconstruction and ACL restart invalidation before choosing whether error-row preservation is required. |
+| `REVIEW-TXN-035` | closed; original false-ready consequence not reproduced | The exact restart projection test now covers committed-runtime reconstruction, ACL restart invalidation and the public status projection. A partial newer generation remains pending; the applied-generation ACL row becomes `degraded/unchanged`; and readiness remains `blocked/recover_pending`. Preserving the stale error row is neither required nor correct because the row describes the rebuilt applied runtime while transaction fields retain the failed newer generation. |
 | `REVIEW-ACL-087` | merged | No independent implementation. Its truncated-first-fragment consequence is accepted only through the `REVIEW-ACL-075` batch. |
 | `REVIEW-ACL-081` | withdrawn | XDP/DDoS remains outside the current Neutron-managed domain set. Reopen only with a separately approved product/status contract. |
 | `REVIEW-ACL-092` | withdrawn | Feature-ready is contract-defined last-ready history; delete must not rewrite that history. |
@@ -148,9 +148,10 @@ because its edit is convenient.
     `REVIEW-ACL-089/093/094/096/097`.
 13. **Fragment observability ABI:** `REVIEW-ACL-098/099`.
 14. **Defensive API debt:** `REVIEW-ACL-088`.
-15. **Conditional verification:** `REVIEW-ACL-083/084` and
-    `REVIEW-TXN-035`; a demonstrated RED result creates a separately scoped
-    production repair.
+15. **Conditional verification:** `REVIEW-ACL-083/084` remain pending separate
+    probes. `REVIEW-TXN-035` is closed by the GREEN combined restart projection;
+    a future demonstrated RED result for either remaining claim creates a
+    separately scoped production repair.
 
 ## 7. Batch Workflow And Evidence Rules
 
@@ -259,8 +260,9 @@ boundary in
 `REVIEW-ACL-085/090/091` and `REVIEW-ACL-098/099` are fixed with exact
 RED/GREEN hosted evidence. No confirmed ACL production-fix batch remains in
 this narrowed line. `REVIEW-ACL-086` and the conditional `REVIEW-ACL-083/084`
-plus `REVIEW-TXN-035` remain evidence gates and cannot be marked fixed without
-their required proof.
+remain evidence gates and cannot be marked fixed without their required proof.
+`REVIEW-TXN-035` is closed after its combined restart projection stayed
+non-ready without a production behavior change.
 
 The former steps containing `REVIEW-ACL-078`, `REVIEW-OPS-039`,
 `REVIEW-ACL-089`, `REVIEW-ACL-093/094`, and `REVIEW-ACL-096/097` remain valid
