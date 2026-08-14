@@ -312,7 +312,7 @@ increment failures and never reset state. Apply only `Mutation(entry)` through
 `apply_wal_entry`. Preserve the existing read-error stop behavior and malformed
 tail handling.
 
-- [ ] **Step 5: Commit the parsing/replay GREEN slice only after hosted proof**
+- [x] **Step 5: Commit the parsing/replay GREEN slice only after hosted proof**
 
 Do not commit an intermediate production change before Task 3 completes the
 compaction writer; the reader and writer format must land in one GREEN commit.
@@ -411,7 +411,7 @@ git diff --check
 Inspect all `FirewallState` struct literals and every exhaustive
 `PersistedWalRecord`/`WalEntry` match with `rg`; do not run Cargo locally.
 
-- [ ] **Step 6: Commit and push GREEN**
+- [x] **Step 6: Commit and push GREEN**
 
 ```bash
 git add core/src/state.rs core/src/wal.rs ci/check_neutron_stage1.py \
@@ -420,7 +420,7 @@ git commit -m "fix: checkpoint standalone WAL epochs"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Verify exact-head hosted GREEN**
+- [x] **Step 7: Verify exact-head hosted GREEN**
 
 Require:
 
@@ -444,27 +444,27 @@ cancelled, superseded, or non-exact-head run.
 - Modify: `docs/openstack-neutron-aria-details/07-transaction-wal.md`
 - Modify: `docs/openstack-neutron-aria-details/12-review-bug-backlog.md`
 
-- [ ] **Step 1: Record exact RED/GREEN evidence**
+- [x] **Step 1: Record exact RED/GREEN evidence**
 
 Record commit hashes, Build URLs, the precise RED assertion, nonzero hosted
 test count, and all required GREEN jobs. Do not claim allocator collision,
 wrong enforcement, or privileged datapath evidence unless the RED actually
 demonstrated it.
 
-- [ ] **Step 2: Update the transaction contract**
+- [x] **Step 2: Update the transaction contract**
 
 Replace the statement that state/WAL schemas remain unchanged with the
 version-1 checkpoint cursor/record contract, snapshot-first ordering, legacy
 behavior, and older-binary rollback limitation.
 
-- [ ] **Step 3: Close only the proven finding**
+- [x] **Step 3: Close only the proven finding**
 
 Mark `REVIEW-TXN-033` fixed after exact-head GREEN. Preserve P2 severity in the
 historical row unless the RED evidence met its documented escalation test.
 Advance the remediation program to the next fixed-order batch without changing
 the remaining item order.
 
-- [ ] **Step 4: Commit, push and verify the documentation HEAD**
+- [x] **Step 4: Commit, push and verify the documentation HEAD**
 
 ```bash
 git add docs/openstack-neutron-aria-details/07-transaction-wal.md \

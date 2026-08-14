@@ -49,11 +49,33 @@ rename leaves the prior snapshot byte-for-byte intact; a failure after rename
 can return an uncertain result, but the target is still one complete JSON
 document rather than an empty or torn file.
 
-`StateManager` and `WalWriter::compact` share this primitive. Compaction keeps
-the durable ordering `publish snapshot -> truncate and fsync WAL`; truncate-
-first is forbidden. State and WAL schemas are unchanged. The duplicate-replay
-window between snapshot rename and WAL truncation remains independently owned
-by `REVIEW-TXN-033` and is not concealed by this atomic-file fix.
+`StateManager` and `WalWriter::compact` share this primitive. Standalone/local
+compaction now adds a version-1 checkpoint epoch while preserving the
+snapshot-first safety boundary:
+
+```text
+append + fsync Checkpoint(N) to the old WAL
+  -> atomically publish state.json with wal_replay_cursor=N
+  -> truncate + fsync state.wal
+  -> write + fsync Checkpoint(N) as the new WAL header
+  -> acknowledge compaction
+```
+
+Replay begins from the complete snapshot. A version-1 marker matching the
+snapshot cursor discards the covered prefix and its superseded failure count;
+only the following WAL tail is applied. An unmatched supported marker is a
+no-op, so a failed snapshot publication retains full legacy replay. The writer
+will not acknowledge a mutation after truncation until the matching header is
+durable, and checkpoint records do not count as mutations for compaction.
+
+Legacy snapshots omit `wal_replay_cursor`, and legacy mutation JSON lines keep
+their existing byte format and replay without migration. Unknown nonzero
+cursor/marker versions remain visible failures, and an older writer is not
+allowed to overwrite a newer snapshot cursor. A pre-checkpoint binary does not
+understand the marker boundary and can reintroduce allocator drift if rolled
+back while an old covered prefix remains; complete a successful checkpoint
+with the new binary before such an operational rollback. Truncate-first
+remains forbidden.
 
 ## Transaction Boundary
 

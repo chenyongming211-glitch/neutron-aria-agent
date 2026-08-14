@@ -1,6 +1,6 @@
 # REVIEW-TXN-033 WAL Checkpoint Epoch Design
 
-**Status:** approved design; implementation plan ready, production not started
+**Status:** implemented; exact-head hosted CI complete
 
 **Date:** 2026-08-14
 
@@ -91,8 +91,10 @@ pub wal_replay_cursor: WalReplayCursor,
 ```
 
 The only supported non-legacy form is `version=1` with
-`checkpoint_id >= 1`. A missing field, `version=0`, or `checkpoint_id=0`
-means the legacy boundary: replay every ordinary WAL entry.
+`checkpoint_id >= 1`. A missing field, or the exact pair
+`version=0, checkpoint_id=0`, means the legacy boundary: replay every ordinary
+WAL entry. Any partially zero or unknown nonzero form is invalid rather than a
+silent legacy downgrade.
 
 The cursor is persistence metadata, not policy state. It is excluded from
 allocator, policy, datapath and API decisions. `WalWriter` owns cursor
@@ -324,3 +326,19 @@ Explicit exclusions:
 8. The hosted `wal_checkpoint_` filter executes a nonzero test count.
 9. Exact-head fast contracts, Rust behavior, warning-denied userspace and eBPF
    builds pass before `REVIEW-TXN-033` is marked fixed.
+
+## 13. Delivery Evidence
+
+- Formal design: `900e662`; implementation plan: `daddc0d`.
+- RED: `e661627`, Build
+  [31766359370](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31766359370).
+  Ten checkpoint contracts compiled; eight failed on the intended old replay,
+  header, ID and unsupported-version behavior while both legacy cases passed.
+- GREEN: `4265ccf`; approved observability completion: `2cf0d47`; exact-head
+  Build
+  [31767131659](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31767131659).
+  The hosted `wal_checkpoint_` filter executed 10/10 successfully. Fast
+  contracts, database contracts, clean installation, selected Rust behavior,
+  warning-denied eBPF/userspace/agent builds and packaging all passed.
+- No privileged or target-kernel datapath evidence is needed or claimed for
+  this standalone persistence repair.
