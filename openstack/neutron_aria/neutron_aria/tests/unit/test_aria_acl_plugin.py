@@ -211,6 +211,53 @@ class FakeCorePlugin(object):
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
+    def test_in_memory_repository_serializes_every_public_access(self):
+        class LockProbe(object):
+            def __init__(self):
+                self.entries = 0
+
+            def __enter__(self):
+                self.entries += 1
+                return self
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                return False
+
+        repository = InMemoryAriaAclRepository()
+        lock = LockProbe()
+        repository._write_lock = lock
+        operations = (
+            lambda: repository.list_policies(),
+            lambda: repository.get_policy("missing"),
+            lambda: repository.list_rules(),
+            lambda: repository.get_rule("missing"),
+            lambda: repository.delete_rule("missing"),
+            lambda: repository.list_address_sets(),
+            lambda: repository.get_address_set("missing"),
+            lambda: repository.list_bindings(),
+            lambda: repository.get_binding("missing"),
+            lambda: repository.delete_binding("missing"),
+            lambda: repository.upsert_port_status({
+                "port_id": "port-1",
+                "host": "compute-1",
+                "status": "ready",
+            }),
+            lambda: repository.get_port_status("missing"),
+            lambda: repository.list_port_statuses(),
+            lambda: repository.delete_port_status("missing"),
+            lambda: repository.get_port_status_resource("missing"),
+            lambda: repository.delete_port_status_resource("missing"),
+            lambda: repository.to_effective_payload(),
+        )
+
+        for operation in operations:
+            before = lock.entries
+            try:
+                operation()
+            except AriaAclNotFound:
+                pass
+            self.assertGreater(lock.entries, before)
+
     def test_collection_lists_enforce_read_policy_before_repository_access(self):
         class ListDenied(Exception):
             pass
@@ -770,6 +817,44 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "aria_acl_runtime_status": "not_requested",
             },
             projected,
+        )
+
+    def test_sessionless_production_context_never_uses_shared_fallback(self):
+        plugin = AriaAclPlugin(notifier=FakeNotifier())
+        context = type("SessionlessContext", (object,), {})()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "aria_acl_database_session_required",
+        ):
+            plugin.create_aria_acl_policy(context, {
+                "aria_acl_policy": {
+                    "id": "policy-1",
+                    "project_id": "project-1",
+                }
+            })
+
+    def test_legacy_port_wrapper_marks_sessionless_context_unavailable(self):
+        plugin = AriaAclPlugin(notifier=FakeNotifier())
+        core = FakeCorePlugin([{
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "compute-1",
+        }])
+        install_legacy_port_projection(plugin, core_plugin=core)
+        context = type("SessionlessContext", (object,), {})()
+
+        projected = core.get_port(context, "port-1")
+
+        self.assertIsNone(projected["aria_acl_enabled"])
+        self.assertEqual("unknown", projected["aria_acl_effective_source"])
+        self.assertEqual("unknown", projected["aria_acl_runtime_status"])
+        self.assertEqual(
+            "projection_unavailable",
+            projected["aria_acl_runtime_reason"],
         )
 
     def test_port_projection_failure_does_not_break_core_port_show(self):
