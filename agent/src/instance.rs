@@ -270,11 +270,13 @@ fn classify_legacy_tc_query_failure(
 
 pub(crate) fn preexisting_tc_acl_runtime_is_healthy(
     enforcement_required: bool,
+    runtime_gate_quiesced: bool,
     preexisting_live_links: bool,
     preexisting_tc_ingress_link: bool,
     preexisting_tc_egress_link: bool,
     live_health: TcAclLinkHealth,
 ) -> Result<bool, String> {
+    let _ = runtime_gate_quiesced;
     if !preexisting_live_links {
         return Ok(false);
     }
@@ -2675,6 +2677,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 TcAclLinkHealth::new(false, false, false),
             )
             .unwrap(),
@@ -2682,6 +2685,7 @@ mod tests {
         );
         assert!(preexisting_tc_acl_runtime_is_healthy(
             true,
+            false,
             true,
             true,
             true,
@@ -2690,6 +2694,7 @@ mod tests {
         .unwrap());
         let error = preexisting_tc_acl_runtime_is_healthy(
             true,
+            false,
             true,
             true,
             true,
@@ -2700,6 +2705,7 @@ mod tests {
 
         let missing_pin = preexisting_tc_acl_runtime_is_healthy(
             true,
+            false,
             true,
             true,
             false,
@@ -2707,6 +2713,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(missing_pin.contains("tc_egress pin missing"));
+
+        assert!(preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            true,
+            false,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .is_ok());
     }
 
     #[test]

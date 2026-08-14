@@ -4009,6 +4009,7 @@ impl ControlPlane {
         );
         if let Err(error) = preexisting_tc_acl_runtime_is_healthy(
             state.conntrack_enabled || state.acl_enabled,
+            false,
             pin_state.preexisting_live_links,
             pin_state.preexisting_tc_ingress_link,
             pin_state.preexisting_tc_egress_link,
