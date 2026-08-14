@@ -45,11 +45,11 @@ Status V1 negotiation. The response carries three independent kinds of truth:
 
 | Field | Implemented values | Meaning |
 | --- | --- | --- |
-| `status_schema_version` | `1` | Status response schema, independent from snapshot schema. |
-| `status_contract_hash` | `v0.9-neutron-status-1` | Exact shared vocabulary/scenario identity. |
+| `status_schema_version` | `2` | Current Status response schema, independent from snapshot schema; V1 remains a compatibility artifact. |
+| `status_contract_hash` | `v0.9-neutron-status-2` | Exact shared vocabulary/scenario identity. |
 | `transaction_state` | `idle`, `pending`, `classified`, `blocked`, `recovery` | Durable transaction state. |
 | `overall_readiness` | `ready`, `degraded`, `blocked`, `unknown` | Aggregate feature-readiness result. |
-| `required_action` | `none`, `poll`, `recover_pending`, `full_resync`, `operator` | The only action Python may take from this response. |
+| `required_action` | `none`, `poll`, `retry_snapshot`, `recover_pending`, `full_resync`, `operator` | The only action Python may take from this response; `retry_snapshot` requires an exact durable partial G/H and a fresh WAL/live barrier. |
 | `recovery_cause` | null or `inventory_unavailable` | Typed cause for the supported recovery exception. |
 | `last_classified_generation` | unsigned generation | Latest generation with terminal classification. |
 

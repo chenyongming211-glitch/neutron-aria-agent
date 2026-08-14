@@ -1,6 +1,6 @@
 # REVIEW-ACL-079/080 Generation And Same-Generation Retry Contract Design
 
-**Status:** approved; Python-first consumer GREEN, Rust producer RED prepared
+**Status:** implemented; exact-head hosted GREEN in Build `31779783002`
 
 **Date:** 2026-08-14
 

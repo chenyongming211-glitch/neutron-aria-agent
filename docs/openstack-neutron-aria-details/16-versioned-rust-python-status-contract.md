@@ -5,6 +5,11 @@ Status: implemented and verified on the Batch 2C branch. GitHub Actions Build
 passed at exact implementation head
 `3c61187db25f557fcf2bff3fcd765f3d9ea0a5ce`.
 
+Current producer update: Status V2 is the active Rust contract as of the
+`REVIEW-ACL-079/080` generation-retry batch. Status V1 and its scenario file
+remain immutable compatibility artifacts; the V1 sections below document that
+frozen contract rather than the current producer version.
+
 Batch: 2C, after `REVIEW-TXN-028` and `REVIEW-TXN-029`, before
 `REVIEW-ACL-046`.
 
@@ -207,7 +212,47 @@ fields above:
   generation/hash/projected IDs, rebuilds event-routing state from that track,
   and clears only the matching pending marker. For both cases it preserves the
   previous feature-ready track, publishes a degraded heartbeat, and never calls
-  `mark_ready()`.
+`mark_ready()`.
+
+## Status V2 Generation Retry Extension
+
+Status V2 keeps the V1 identity, readiness and applied-row rules and changes
+only the versioned transaction decision needed for a durable ordinary partial:
+
+```json
+{
+  "status_schema_version_min": 2,
+  "status_schema_version_max": 2,
+  "status_contract_hash": "v0.9-neutron-status-2",
+  "error_codes_hash": "v0.9-neutron-errors-3",
+  "capability_hash": "v0.9-neutron-capabilities-4"
+}
+```
+
+The one new closed triple is
+`blocked/blocked/retry_snapshot`. Rust emits it only when the pending identity
+is complete, `authority_state=partial`, WAL replay has no failure or unresolved
+intent, and the latest committed WAL state exactly matches live generation,
+hash, authority, managed ports, port statuses and recovery state after
+normalizing only `status_hash`. Public port rows remain applied-baseline-only;
+pending-generation error rows never become readiness evidence.
+
+Python accepts exact V1 and V2 profiles. For `retry_snapshot`, it loads the
+bounded durable original request, proves its full/scoped route and G/H, rebuilds
+fresh Neutron desired state, and performs at most one exact replay in the
+current convergence attempt. Changed desired state is never replayed under the
+old generation. A positive applied baseline may use exact recover-pending
+before a newer resync; generation-zero partial state remains operator-blocked.
+
+Submitted full-host and scoped snapshots must have `generation >= 1`.
+Generation zero remains only the internal empty baseline and the previously
+approved typed `inventory_unavailable` recovery exception. Active exact G/H is
+still deduplicated; different G or H returns `snapshot_apply_in_progress`, and
+an unprovable partial retry returns `snapshot_retry_not_safe` without mutation.
+
+The rollout order was Python V1/V2 reader first and Rust V2 producer second.
+New Python with V1 Rust remains supported; old Python with V2 Rust fails its
+exact capability negotiation closed. The request schema remains version 1.
 - Legacy V0 degraded behavior is not relaxed. Only an exact, negotiated V1
   classification can use the separate classified-generation path.
 

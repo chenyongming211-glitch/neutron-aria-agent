@@ -3,10 +3,11 @@
   "api_version": "v1",
   "schema_version_min": 1,
   "schema_version_max": 1,
-  "status_schema_version_min": 1,
-  "status_schema_version_max": 1,
-  "status_contract_hash": "v0.9-neutron-status-1",
-  "status_contract_scenarios_path": "docs/neutron-status-contract-v1-scenarios.json",
+  "status_schema_version_min": 2,
+  "status_schema_version_max": 2,
+  "status_contract_hash": "v0.9-neutron-status-2",
+  "status_contract_scenarios_path": "docs/neutron-status-contract-v2-scenarios.json",
+  "status_v1_compatibility_scenarios_path": "docs/neutron-status-contract-v1-scenarios.json",
   "attach_authority": "neutron_snapshot",
   "supports_full_snapshot": true,
   "supports_port_scoped_snapshot": true,
@@ -18,7 +19,7 @@
   "mandatory_domains": [],
   "body_max_bytes": 1048576,
   "timeout_ms": 3000,
-  "error_codes_hash": "v0.9-neutron-errors-2",
+  "error_codes_hash": "v0.9-neutron-errors-3",
   "error_codes": [
     {
       "code": "UDS_SCHEMA_MISMATCH",
@@ -39,6 +40,21 @@
       "code": "stale_generation",
       "owner": "rust_snapshot_apply",
       "phase": "implemented"
+    },
+    {
+      "code": "INVALID_SNAPSHOT_GENERATION",
+      "owner": "rust_snapshot_preflight",
+      "phase": "implemented"
+    },
+    {
+      "code": "snapshot_apply_in_progress",
+      "owner": "rust_snapshot_admission",
+      "phase": "implemented"
+    },
+    {
+      "code": "snapshot_retry_not_safe",
+      "owner": "rust_snapshot_retry_barrier",
+      "phase": "implemented"
     }
   ],
   "p3_port_scoped_snapshot": {
@@ -57,13 +73,16 @@
     "body_max_bytes": 1048576,
     "timeout_ms": 3000,
     "domains_rule": "only domains present in the port managed_domains list may be mutated",
-    "generation_rule": "host generation must remain monotonic and use the same stale generation/hash conflict semantics as full snapshot",
+    "generation_rule": "submitted host generations start at 1; pending identity is the exact generation plus desired hash; a durable ordinary partial may retry only that exact identity",
     "fallback_rule": "on missing index, stale contract, body limit, unsafe revision relation, multi-port batch, delete event, network update, or scoped submit failure, Python falls back to full resync while keeping polling recovery enabled",
     "planned_error_codes": [
       "UDS_SCHEMA_MISMATCH",
       "UDS_BODY_TOO_LARGE",
       "generation_hash_conflict",
       "stale_generation",
+      "INVALID_SNAPSHOT_GENERATION",
+      "snapshot_apply_in_progress",
+      "snapshot_retry_not_safe",
       "PORT_SCOPE_MISMATCH",
       "PORT_IFACE_NOT_FOUND",
       "UDS_CONTRACT_DRIFT"
@@ -78,19 +97,19 @@
     ]
   },
   "peer_auth_policy": "filesystem_permissions_then_peercred",
-  "capability_hash": "v0.9-neutron-capabilities-3",
+  "capability_hash": "v0.9-neutron-capabilities-4",
   "routes": [
     {
       "method": "GET",
       "path": "/readyz",
       "success_schema": {
         "http_status": 200,
-        "body": "NeutronStatusV1Response",
+        "body": "NeutronStatusV2Response",
         "overall_readiness": "ready"
       },
       "unready_schema": {
         "http_status": 503,
-        "body": "NeutronStatusV1Response",
+        "body": "NeutronStatusV2Response",
         "overall_readiness": [
           "unknown",
           "degraded",

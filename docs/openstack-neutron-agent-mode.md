@@ -702,6 +702,9 @@ GET /api/v1/neutron/capabilities
   "contract_version": "2026-06-v0.9",
   "schema_version_min": 1,
   "schema_version_max": 1,
+  "status_schema_version_min": 2,
+  "status_schema_version_max": 2,
+  "status_contract_hash": "v0.9-neutron-status-2",
   "attach_authority": "neutron_snapshot",
   "supports_full_snapshot": true,
   "supports_port_delete": true,
@@ -714,9 +717,9 @@ GET /api/v1/neutron/capabilities
     "mirror"
   ],
   "mandatory_domains": [],
-  "error_codes_hash": "v0.9-neutron-errors-2",
+  "error_codes_hash": "v0.9-neutron-errors-3",
   "peer_auth_policy": "filesystem_permissions_then_peercred",
-  "capability_hash": "v0.9-neutron-capabilities-3"
+  "capability_hash": "v0.9-neutron-capabilities-4"
 }
 ```
 

@@ -409,7 +409,15 @@ def check_uds_contract_artifact():
                 "ERROR: public UDS route parity drifted for %s %s" % (method, path)
             )
     errors = {item.get("code"): item for item in contract.get("error_codes", [])}
-    for code in ("UDS_SCHEMA_MISMATCH", "UDS_BODY_TOO_LARGE", "generation_hash_conflict", "stale_generation"):
+    for code in (
+        "UDS_SCHEMA_MISMATCH",
+        "UDS_BODY_TOO_LARGE",
+        "generation_hash_conflict",
+        "stale_generation",
+        "INVALID_SNAPSHOT_GENERATION",
+        "snapshot_apply_in_progress",
+        "snapshot_retry_not_safe",
+    ):
         if errors.get(code, {}).get("phase") != "implemented":
             raise SystemExit("ERROR: UDS contract error %s must be implemented" % code)
 
@@ -429,8 +437,8 @@ def check_rust_uds_contract_source():
         "api_version": "NEUTRON_UDS_API_VERSION", "contract_version": "NEUTRON_UDS_CONTRACT_VERSION",
         "schema_version_min": "NEUTRON_UDS_SCHEMA_VERSION_MIN", "schema_version_max": "NEUTRON_UDS_SCHEMA_VERSION_MAX",
         "attach_authority": "NEUTRON_ATTACH_AUTHORITY", "body_max_bytes": "NEUTRON_UDS_BODY_MAX_BYTES",
-        "timeout_ms": "NEUTRON_UDS_TIMEOUT_MS",
-        "peer_auth_policy": "NEUTRON_UDS_PEER_AUTH_POLICY",
+        "timeout_ms": "NEUTRON_UDS_TIMEOUT_MS", "error_codes_hash": "NEUTRON_UDS_ERROR_CODES_HASH",
+        "peer_auth_policy": "NEUTRON_UDS_PEER_AUTH_POLICY", "capability_hash": "NEUTRON_UDS_CAPABILITY_HASH",
     }
     for field, constant in constants.items():
         value = rust_const(source, constant)
@@ -440,18 +448,6 @@ def check_rust_uds_contract_source():
             pass
         if contract.get(field) != value:
             raise SystemExit("ERROR: Rust UDS constant %s does not match contract field %s" % (constant, field))
-    producer_versions = {
-        "NEUTRON_UDS_ERROR_CODES_HASH": "v0.9-neutron-errors-3",
-        "NEUTRON_UDS_CAPABILITY_HASH": "v0.9-neutron-capabilities-4",
-    }
-    for constant, expected in producer_versions.items():
-        if rust_const(source, constant) != expected:
-            raise SystemExit("ERROR: public Rust UDS producer constant %s drifted" % constant)
-    if (
-        contract.get("error_codes_hash") != "v0.9-neutron-errors-2"
-        or contract.get("capability_hash") != "v0.9-neutron-capabilities-3"
-    ):
-        raise SystemExit("ERROR: immutable Status V1 compatibility artifact drifted")
     if contract.get("supported_domains") != ["attach", "acl"]:
         raise SystemExit("ERROR: public UDS domain schema drifted")
     router = read_text(RUST_NEUTRON_API_PATH)
@@ -491,8 +487,9 @@ def check_status_v1_contract():
     fixture = read_json(STATUS_FIXTURE_PATH)
     fixture_v2 = read_json(STATUS_V2_FIXTURE_PATH)
     expected_contract = {
-        "status_schema_version_min": 1, "status_schema_version_max": 1,
-        "status_contract_hash": "v0.9-neutron-status-1", "status_contract_scenarios_path": STATUS_FIXTURE_PATH,
+        "status_schema_version_min": 2, "status_schema_version_max": 2,
+        "status_contract_hash": "v0.9-neutron-status-2", "status_contract_scenarios_path": STATUS_V2_FIXTURE_PATH,
+        "status_v1_compatibility_scenarios_path": STATUS_FIXTURE_PATH,
     }
     for field, value in expected_contract.items():
         if contract.get(field) != value:

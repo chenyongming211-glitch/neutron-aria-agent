@@ -464,7 +464,7 @@ gate/warning-hygiene unit modules ran 10 tests, blocked-term and Python syntax
 checks passed, and `git diff --check` was clean. No local Cargo command was
 run.
 
-- [ ] **Step 8: Commit and push Rust GREEN**
+- [x] **Step 8: Commit and push Rust GREEN**
 
 ```bash
 git add api/src/lib.rs agent/src/neutron_api.rs agent/src/neutron_wal.rs \
@@ -474,7 +474,7 @@ git commit -m "fix: retry durable snapshot generations"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 9: Verify exact-head hosted GREEN**
+- [x] **Step 9: Verify exact-head hosted GREEN**
 
 Require:
 
@@ -485,6 +485,14 @@ Require:
 - packaging/database jobs success;
 - no compiler warning or superseded/cancelled evidence substituted for exact
   head.
+
+Rust GREEN: implementation `c2f2ad3`, V1 compatibility corrections `8f77ea9`
+and `2848a54`, exact-head Build `31779783002`. Job `rust-behavior`
+`94702865347` passed the nonzero eight-test generation/retry filter and all
+selected compatibility behaviors. Job `rust-build` `94702865257` passed the
+warning-denied eBPF, userspace and agent builds plus packaging. Fast contracts
+`94702816843`, clean install `94702816823` and database contracts `94702816738`
+also passed at the same head.
 
 ---
 
@@ -502,34 +510,34 @@ Require:
 - Modify: approved design and this plan
 - Modify: `ci/check_neutron_stage1.py`
 
-- [ ] **Step 1: Make V2 the active public artifact contract**
+- [x] **Step 1: Make V2 the active public artifact contract**
 
 Update schema/status/error/capability hashes, the new stable errors, action
 vocabulary, routes and V2 scenario path. Retain and validate the immutable V1
 fixture as a compatibility artifact. Static checks may validate public JSON,
 enum and workflow structure; they must not parse private Rust helper shape.
 
-- [ ] **Step 2: Update transaction and scoped-apply documentation**
+- [x] **Step 2: Update transaction and scoped-apply documentation**
 
 Document positive submitted generations, exact G/H pending identity, active
 deduplication, durable partial retry, changed-desired fallback and unsafe-state
 exclusions. Remove the obsolete claim that same hash alone identifies pending
 work.
 
-- [ ] **Step 3: Record RED/GREEN evidence**
+- [x] **Step 3: Record RED/GREEN evidence**
 
 Record commit hashes, Build URLs, exact failing RED assertions, nonzero Rust
 test count, Python-first GREEN and final producer GREEN. Do not claim field or
 privileged datapath evidence.
 
-- [ ] **Step 4: Close only ACL-079/080 after exact-head GREEN**
+- [x] **Step 4: Close only ACL-079/080 after exact-head GREEN**
 
 Mark both fixed only when the generation-zero side-effect test, exact pending
 identity, first-generation partial convergence and mixed V1/V2 matrix all
 pass. Advance the remediation program to the next fixed-order batch without
 pulling it into this implementation.
 
-- [ ] **Step 5: Commit, push and verify documentation head**
+- [x] **Step 5: Commit, push and verify documentation head**
 
 ```bash
 git add docs ci/check_neutron_stage1.py

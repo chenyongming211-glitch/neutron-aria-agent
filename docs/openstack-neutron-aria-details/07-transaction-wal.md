@@ -359,7 +359,9 @@ Rust side:
 | stale Python pending snapshot | Python still has an older pending generation, while datapath reports a newer applied generation with no runtime pending transaction. | Clear the Python pending fields, record `last_cleared_pending_*`, and run a new full resync using the datapath generation as the floor. |
 | WAL intent without commit | Datapath started apply but crashed or failed before commit. | Replay, scrub, or wait for full resync; never claim ready. |
 | committed with degraded domain | Generation was classified, but one or more domains are not enforcing. | Report per-domain status and keep local gate active. |
-| same generation same hash | Idempotent replay. | Return converged state without widening permissions. |
+| active pending generation/hash matches exactly | Idempotent deduplication. | Return the actual pending generation and do not launch a second apply. |
+| durable ordinary partial generation/hash matches exactly | Explicit same-generation retry. | Under `apply_lock`, replay WAL, require no failures or unresolved intent, compare the complete committed/live state, then reuse the concrete snapshot transaction at the same generation. |
+| pending generation or hash differs | Transaction identity conflict. | Return `snapshot_apply_in_progress`; the same hash never aliases a different generation. |
 | same generation different hash | Conflict. | Reject or classify as error. |
 | stale generation | Older desired state. | Reject and keep newer classified state. |
 
@@ -373,6 +375,9 @@ Rust side:
 | WAL commit succeeds, post-commit return-error fires | Keep committed WAL/RAM state and report the classified success; log the hook error. |
 | Recover-pending sees newer valid WAL commit than RAM | Refresh RAM and return `already_committed`; do not append a rollback. |
 | Same generation, different desired hash | `generation_hash_conflict` stable error. |
+| Submitted generation is zero | `INVALID_SNAPSHOT_GENERATION` before restore readiness, inventory, lock, WAL, runtime, or datapath work. |
+| Pending generation/hash differs from the request | `snapshot_apply_in_progress`; preserve the actual pending identity. |
+| Exact partial retry lacks a clean committed WAL/live match | `snapshot_retry_not_safe`; append no retry intent. |
 | Older generation | `stale_generation` stable status reason. |
 | Client timeout | Python marks pending and reconciles with status; timeout is not authority release. |
 | Same-generation Python pending hash mismatch | Python keeps the pending record and reports `stale_pending_snapshot_requires_operator`; it must not auto-clear. |
@@ -385,7 +390,8 @@ Rust side:
 | --- | --- |
 | Snapshot intent without commit then restart | Replay/scrub path does not claim ready until proven. |
 | Delete intent without commit then restart | Port cleanup is retried or classified without deleting unrelated local state. |
-| Same generation and same hash replay | Idempotent success. |
+| Active same generation and same hash replay | Deduplicated pending response; no second task. |
+| Durable partial same generation and same hash replay | One guarded retry; success commits ready at the same generation and another failure stays partial at that generation. |
 | Same generation with different hash | Rejected or classified as conflict. |
 | Older generation after newer commit | Rejected. |
 | WAL append failure | No accepted/applied generation is advanced. |

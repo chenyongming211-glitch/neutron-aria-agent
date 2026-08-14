@@ -179,7 +179,7 @@ def main():
         'PIN_PATH="${PIN_PATH:-}"',
         'LISTEN_ADDR="${LISTEN_ADDR:-}"',
         'neutron_socket_path = \\"${SOCKET_PATH}\\"',
-        'v0.9-neutron-capabilities-3',
+        'v0.9-neutron-capabilities-4',
         'for domain in ("attach", "acl"):',
         "wait_for_snapshot_generation() {",
         'json_check missing_port_status "${settled_status}" "${snapshot_generation}"',

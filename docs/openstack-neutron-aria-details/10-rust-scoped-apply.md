@@ -134,6 +134,15 @@ Required behavior:
   only the target port status;
 - preserve unrelated managed ports and their statuses across commit/replay.
 
+Submitted generations are positive for both full-host and scoped routes.
+Generation zero is reserved for the internal empty baseline and the typed
+inventory-unavailable recovery exception. Pending identity is the exact pair
+`(generation, desired_hash)`: an active exact pair is deduplicated, while a
+durably committed ordinary `partial` exact pair may re-enter the same concrete
+scoped transaction only after the fresh WAL/live retry barrier passes. A
+different generation or hash conflicts, and an unsafe recovery/WAL state
+returns `snapshot_retry_not_safe` without widening the scoped target.
+
 No new WAL record kind is required for the MVP unless existing snapshot intent
 cannot express the affected port/domain set safely.
 
@@ -146,7 +155,7 @@ Scoped apply must not turn unrelated ports stale or invisible.
 | target update succeeds | target port status has new generation/hash; unrelated port statuses preserved. |
 | target ACL degrades | target domain reports degraded/bypass; unrelated ports keep previous status. |
 | target tap missing | target reports detached/degraded or error; no unrelated detach. |
-| scoped apply partially fails | `accepted_generation` may advance, `applied_generation` stays at previous value, `pending_generation` is set. |
+| scoped apply partially fails | `accepted_generation` becomes the submitted positive generation, `applied_generation` stays at the previous value, and `pending_generation` is set; Status V2 requests an exact same-generation retry only for a clean durable ordinary partial. |
 | full resync after scoped apply | full resync remains authoritative and may replace the scoped desired hash with a full-host desired hash at a newer generation. |
 
 ## Python Failure Boundary

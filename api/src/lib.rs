@@ -432,15 +432,15 @@ pub struct NeutronCapabilitiesResponse {
     pub schema_version_max: u32,
     /// Minimum supported Status response schema version.
     #[serde(default)]
-    #[schema(example = 1)]
+    #[schema(example = 2)]
     pub status_schema_version_min: u32,
     /// Maximum supported Status response schema version.
     #[serde(default)]
-    #[schema(example = 1)]
+    #[schema(example = 2)]
     pub status_schema_version_max: u32,
     /// Stable hash/version for the independent Status response vocabulary.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-status-1")]
+    #[schema(example = "v0.9-neutron-status-2")]
     pub status_contract_hash: String,
     /// Authority model for attach/detach operations.
     #[schema(example = "neutron_snapshot")]
@@ -470,7 +470,7 @@ pub struct NeutronCapabilitiesResponse {
     pub timeout_ms: u64,
     /// Stable hash/version for UDS error code vocabulary.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-errors-2")]
+    #[schema(example = "v0.9-neutron-errors-3")]
     pub error_codes_hash: String,
     /// Expected local Unix peer authentication policy.
     #[serde(default)]
@@ -478,7 +478,7 @@ pub struct NeutronCapabilitiesResponse {
     pub peer_auth_policy: String,
     /// Stable hash/version for capability drift detection.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-capabilities-3")]
+    #[schema(example = "v0.9-neutron-capabilities-4")]
     pub capability_hash: String,
 }
 
