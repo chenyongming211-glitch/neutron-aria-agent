@@ -31,13 +31,13 @@ existing clean-install container lane.
 - Modify: `openstack/neutron_aria/neutron_aria/tests/unit/test_status_reporter.py`
 - Modify: `ci/test_neutron_agent_clean_install.sh`
 
-- [ ] Add a unit behavior that decodes a durable history through `json.loads`,
+- [x] Add a unit behavior that decodes a durable history through `json.loads`,
   hydrates `AgentRuntimeStatus`, and verifies the exact domain-generation map.
-- [ ] Include invalid empty/non-text keys through a direct helper input so the
+- [x] Include invalid empty/non-text keys through a direct helper input so the
   tolerant filtering contract remains explicit.
-- [ ] Extend the installed-egg Python 2.7 smoke to assert that `json.loads`
+- [x] Extend the installed-egg Python 2.7 smoke to assert that `json.loads`
   returns a `unicode` `acl` key and that hydration preserves `{"acl": 42}`.
-- [ ] Run the focused Python 3 unit test locally.
+- [x] Run the focused Python 3 unit test locally.
 - [ ] Commit and push RED. Record the expected Python 2.7 clean-install failure.
 
 ### Task 2: Implement The Compatibility Boundary
@@ -67,4 +67,3 @@ existing clean-install container lane.
 - [ ] Record RED and GREEN commit/Build evidence in the design and register.
 - [ ] Mark `REVIEW-ACL-077` fixed only after exact-head GREEN.
 - [ ] Advance the fixed remediation order to `REVIEW-TXN-033`.
-

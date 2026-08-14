@@ -63,8 +63,11 @@ RESTART_AGENT_AFTER_ROLLBACK=false \
 docker exec -i -u neutron "${SERVICE_NAME}" python - <<'PY'
 from __future__ import print_function
 
+import json
+
 from neutron_aria.agent.acl_source import NeutronAclSource
 from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
+from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalClient
 from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
 
@@ -95,8 +98,20 @@ assert install_legacy_port_projection(
 assert core.get_port(None, "port-1")["aria_acl_runtime_status"] == "not_requested"
 assert core.get_ports(None)[0]["aria_acl_runtime_status"] == "not_requested"
 
+history = json.loads(
+    '{"last_feature_ready_generation_by_domain":{"acl":"42"}}'
+)
+domain_generations = history["last_feature_ready_generation_by_domain"]
+domain_key = next(iter(domain_generations))
+assert isinstance(domain_key, unicode)
+
+runtime_status = AgentRuntimeStatus("clean-python27")
+runtime_status.hydrate_durable_history(history)
+assert runtime_status.last_feature_ready_generation_by_domain == {"acl": 42}
+
 print("clean_agent_imports=ok")
 print("clean_python27_port_projection=ok")
+print("clean_python27_unicode_domain_history=ok")
 PY
 docker exec -u neutron "${SERVICE_NAME}" neutron-aria-agent --help >/dev/null
 

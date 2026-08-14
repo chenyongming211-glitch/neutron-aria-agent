@@ -43,6 +43,37 @@ class FakeAriaAclApi(object):
 
 
 class StatusReporterTestCase(unittest.TestCase):
+    def test_durable_domain_history_preserves_json_text_keys(self):
+        history = json.loads(
+            '{"last_feature_ready_generation_by_domain":'
+            '{"acl":"42","qos":7}}'
+        )
+        runtime_status = AgentRuntimeStatus("compute-1")
+
+        runtime_status.hydrate_durable_history(history)
+
+        self.assertEqual(
+            {"acl": 42, "qos": 7},
+            runtime_status.last_feature_ready_generation_by_domain,
+        )
+
+    def test_durable_domain_history_ignores_empty_and_non_text_keys(self):
+        runtime_status = AgentRuntimeStatus("compute-1")
+
+        runtime_status.hydrate_durable_history({
+            "last_feature_ready_generation_by_domain": {
+                "acl": "42",
+                "": 43,
+                None: 44,
+                45: 46,
+            },
+        })
+
+        self.assertEqual(
+            {"acl": 42},
+            runtime_status.last_feature_ready_generation_by_domain,
+        )
+
     def test_report_state_topic_prefers_reports_and_falls_back_to_plugin(self):
         class ModernTopics(object):
             REPORTS = "q-reports"
