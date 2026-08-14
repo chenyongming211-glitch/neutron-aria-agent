@@ -14256,6 +14256,92 @@ mod tests {
     }
 
     #[test]
+    fn neutron_snapshot_restart_partial_status_remains_blocked_after_runtime_reconcile_and_acl_invalidation(
+    ) {
+        let mut restored = managed_with_ifindex("vm-port", "tap-vm", 17);
+        restored.managed_domains = vec!["acl".to_string()];
+        restored
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash-43".to_string());
+        let prior_error = port_runtime_status(
+            "vm-port",
+            "tap-vm",
+            43,
+            Some("hash-43".to_string()),
+            vec!["acl".to_string()],
+            "error",
+            Some("acl_apply_failed".to_string()),
+            vec![domain_status_with_action(
+                "acl",
+                "error",
+                Some("acl_apply_failed".to_string()),
+                Some("unchanged".to_string()),
+            )],
+        );
+        let before_restart = NeutronRuntimeState {
+            accepted_generation: 43,
+            applied_generation: 42,
+            pending_generation: Some(43),
+            desired_hash: Some("hash-43".to_string()),
+            applied_desired_hash: Some("hash-42".to_string()),
+            authority_state: "partial".to_string(),
+            wal_status: "commit_written".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([("vm-port".to_string(), prior_error)]),
+            ..Default::default()
+        };
+        let reconcile_results = vec![crate::tap_registry::RuntimeReconcileResult {
+            ifname: "tap-vm".to_string(),
+            action: "claim_committed".to_string(),
+            status: "ready".to_string(),
+            reason: Some("runtime_reconciled".to_string()),
+        }];
+
+        let after_restart = project_committed_runtime_reconcile(
+            &before_restart,
+            std::slice::from_ref(&restored),
+            42,
+            Some("hash-42".to_string()),
+            &reconcile_results,
+            false,
+        )
+        .expect("a committed runtime reconcile result must project status");
+
+        assert_eq!(after_restart.pending_generation, Some(43));
+        assert_eq!(after_restart.authority_state, "partial");
+        assert_eq!(after_restart.wal_status, "runtime_reconciled");
+        let status = &after_restart.port_statuses["vm-port"];
+        assert_eq!(status.generation, 42);
+        assert_eq!(status.desired_hash.as_deref(), Some("hash-42"));
+        assert_eq!(status.status, "degraded");
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("acl_restart_replay_requires_resync")
+        );
+        let acl = status
+            .domains
+            .iter()
+            .find(|domain| domain.domain == "acl")
+            .expect("ACL restart status");
+        assert_eq!(acl.status, "degraded");
+        assert_eq!(acl.effective_action.as_deref(), Some("unchanged"));
+
+        let projection = project_neutron_status_v1(&after_restart);
+        assert_eq!(
+            projection.transaction_state,
+            NeutronStatusTransactionState::Blocked
+        );
+        assert_eq!(
+            projection.overall_readiness,
+            NeutronStatusOverallReadiness::Blocked
+        );
+        assert_eq!(
+            projection.required_action,
+            NeutronStatusRequiredAction::RecoverPending
+        );
+    }
+
+    #[test]
     fn restart_missing_committed_tap_is_deferred_for_full_resync() {
         let mut results = vec![
             crate::tap_registry::RuntimeReconcileResult {
