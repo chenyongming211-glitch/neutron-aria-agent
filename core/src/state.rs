@@ -68,6 +68,7 @@ pub struct BitmapCleanupIntent {
 }
 
 pub const LOCAL_PROJECTION_RECOVERY_VERSION: u8 = 1;
+pub const WAL_REPLAY_CURSOR_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalProjectionRecovery {
@@ -81,6 +82,33 @@ impl LocalProjectionRecovery {
             version: LOCAL_PROJECTION_RECOVERY_VERSION,
             reason: reason.into(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalReplayCursor {
+    #[serde(default)]
+    pub version: u8,
+    #[serde(default)]
+    pub checkpoint_id: u64,
+}
+
+impl WalReplayCursor {
+    pub fn is_legacy(&self) -> bool {
+        self.version == 0 && self.checkpoint_id == 0
+    }
+
+    pub(crate) fn supported_checkpoint_id(&self) -> Result<Option<u64>, String> {
+        if self.is_legacy() {
+            return Ok(None);
+        }
+        if self.version != WAL_REPLAY_CURSOR_VERSION || self.checkpoint_id == 0 {
+            return Err(format!(
+                "unsupported WAL replay cursor version={} checkpoint_id={}",
+                self.version, self.checkpoint_id
+            ));
+        }
+        Ok(Some(self.checkpoint_id))
     }
 }
 
@@ -125,6 +153,8 @@ pub struct FirewallState {
     pub pending_bitmap_cleanups: BTreeMap<u32, BitmapCleanupIntent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub local_projection_recoveries: BTreeMap<String, LocalProjectionRecovery>,
+    #[serde(default, skip_serializing_if = "WalReplayCursor::is_legacy")]
+    pub wal_replay_cursor: WalReplayCursor,
     #[serde(default = "default_max_port_policies")]
     pub max_port_policies: u32,
     /// Stable per-instance namespace id reserved for the future shared data plane.
@@ -168,6 +198,7 @@ impl Default for FirewallState {
             free_bitmap_indices: Vec::new(),
             pending_bitmap_cleanups: BTreeMap::new(),
             local_projection_recoveries: BTreeMap::new(),
+            wal_replay_cursor: WalReplayCursor::default(),
             max_port_policies: default_max_port_policies(),
             tap_id: 0,
             attached_iface: None,

@@ -9,7 +9,9 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::state::{persist_state_file_atomically, FirewallState};
+use crate::state::{
+    persist_state_file_atomically, FirewallState, WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
+};
 
 /// Time-based compact interval (5 minutes)
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
@@ -99,11 +101,122 @@ pub enum WalEntry {
     ClearAttachedIface,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalCheckpointRecord {
+    version: u8,
+    checkpoint_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PersistedWalRecord {
+    Checkpoint {
+        wal_checkpoint: WalCheckpointRecord,
+    },
+    Mutation(WalEntry),
+}
+
+#[derive(Default)]
+struct WalInventory {
+    mutation_count: u64,
+    max_checkpoint_id: u64,
+    has_matching_checkpoint: bool,
+    has_nonempty_line: bool,
+}
+
+fn parse_persisted_wal_record(line: &str) -> Result<PersistedWalRecord, String> {
+    serde_json::from_str(line).map_err(|error| format!("invalid WAL record: {}", error))
+}
+
+fn serialize_checkpoint_record(checkpoint_id: u64) -> Result<String, String> {
+    if checkpoint_id == 0 {
+        return Err("checkpoint ID must be nonzero".to_string());
+    }
+    serde_json::to_string(&PersistedWalRecord::Checkpoint {
+        wal_checkpoint: WalCheckpointRecord {
+            version: WAL_REPLAY_CURSOR_VERSION,
+            checkpoint_id,
+        },
+    })
+    .map_err(|error| format!("Failed to serialize WAL checkpoint: {}", error))
+}
+
+fn snapshot_cursor(state_path: &str) -> Result<WalReplayCursor, String> {
+    let state_file = PathBuf::from(state_path).join("state.json");
+    let contents = match fs::read_to_string(&state_file) {
+        Ok(contents) if !contents.trim().is_empty() => contents,
+        Ok(_) => return Ok(WalReplayCursor::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(WalReplayCursor::default());
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to read snapshot cursor from {}: {}",
+                state_file.display(),
+                error
+            ));
+        }
+    };
+    // Snapshot recovery retains its existing best-effort fallback for malformed
+    // JSON. Cursor validation only adds a hard gate when the metadata itself is
+    // present and parseable, so opening the WAL does not broaden startup policy.
+    let value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
+        Err(_) => return Ok(WalReplayCursor::default()),
+    };
+    match value.get("wal_replay_cursor") {
+        Some(cursor) => serde_json::from_value(cursor.clone()).map_err(|error| {
+            format!(
+                "Failed to parse WAL replay cursor from {}: {}",
+                state_file.display(),
+                error
+            )
+        }),
+        None => Ok(WalReplayCursor::default()),
+    }
+}
+
+fn inventory_wal(
+    wal_path: &PathBuf,
+    snapshot_checkpoint_id: Option<u64>,
+) -> Result<WalInventory, String> {
+    if !wal_path.exists() {
+        return Ok(WalInventory::default());
+    }
+    let file = File::open(wal_path)
+        .map_err(|error| format!("Failed to open WAL for inventory: {}", error))?;
+    let mut inventory = WalInventory::default();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        inventory.has_nonempty_line = true;
+        match parse_persisted_wal_record(&line) {
+            Ok(PersistedWalRecord::Mutation(_)) => inventory.mutation_count += 1,
+            Ok(PersistedWalRecord::Checkpoint { wal_checkpoint }) => {
+                inventory.max_checkpoint_id = inventory
+                    .max_checkpoint_id
+                    .max(wal_checkpoint.checkpoint_id);
+                if wal_checkpoint.version == WAL_REPLAY_CURSOR_VERSION
+                    && Some(wal_checkpoint.checkpoint_id) == snapshot_checkpoint_id
+                {
+                    inventory.has_matching_checkpoint = true;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(inventory)
+}
+
 pub struct WalWriter {
     file: BufWriter<File>,
     wal_path: PathBuf,
     entry_count: u64,
     last_compact_time: Instant,
+    next_checkpoint_id: Option<u64>,
+    current_checkpoint_id: Option<u64>,
+    header_required: bool,
 }
 
 impl WalWriter {
@@ -116,18 +229,16 @@ impl WalWriter {
                 .map_err(|e| format!("Failed to create WAL directory: {}", e))?;
         }
 
-        // Count existing valid entries (skip corrupt lines)
-        let entry_count = if wal_path.exists() {
-            let f = File::open(&wal_path)
-                .map_err(|e| format!("Failed to open WAL for counting: {}", e))?;
-            BufReader::new(f)
-                .lines()
-                .filter_map(|l| l.ok())
-                .filter(|l| !l.trim().is_empty() && serde_json::from_str::<WalEntry>(l).is_ok())
-                .count() as u64
-        } else {
-            0
-        };
+        let cursor = snapshot_cursor(state_path)?;
+        let snapshot_checkpoint_id = cursor.supported_checkpoint_id()?;
+        let inventory = inventory_wal(&wal_path, snapshot_checkpoint_id)?;
+        let max_checkpoint_id = snapshot_checkpoint_id
+            .unwrap_or(0)
+            .max(inventory.max_checkpoint_id);
+        let next_checkpoint_id = max_checkpoint_id.checked_add(1);
+        let header_required = snapshot_checkpoint_id.is_some()
+            && !inventory.has_nonempty_line
+            && !inventory.has_matching_checkpoint;
 
         let file = OpenOptions::new()
             .create(true)
@@ -138,12 +249,39 @@ impl WalWriter {
         Ok(Self {
             file: BufWriter::new(file),
             wal_path,
-            entry_count,
+            entry_count: inventory.mutation_count,
             last_compact_time: Instant::now(),
+            next_checkpoint_id,
+            current_checkpoint_id: snapshot_checkpoint_id,
+            header_required,
         })
     }
 
+    fn append_checkpoint_buffered(&mut self, checkpoint_id: u64) -> Result<(), String> {
+        let line = serialize_checkpoint_record(checkpoint_id)?;
+        self.file
+            .write_all(line.as_bytes())
+            .map_err(|error| format!("Failed to write WAL checkpoint: {}", error))?;
+        self.file
+            .write_all(b"\n")
+            .map_err(|error| format!("Failed to write WAL checkpoint newline: {}", error))
+    }
+
+    fn ensure_checkpoint_header(&mut self) -> Result<(), String> {
+        if !self.header_required {
+            return Ok(());
+        }
+        let checkpoint_id = self.current_checkpoint_id.ok_or_else(|| {
+            "checkpoint header required without a current checkpoint ID".to_string()
+        })?;
+        self.append_checkpoint_buffered(checkpoint_id)?;
+        self.sync()?;
+        self.header_required = false;
+        Ok(())
+    }
+
     fn append_buffered(&mut self, entry: &WalEntry) -> Result<(), String> {
+        self.ensure_checkpoint_header()?;
         let line = serde_json::to_string(entry)
             .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
         self.file
@@ -184,27 +322,48 @@ impl WalWriter {
             || self.last_compact_time.elapsed().as_secs() >= WAL_COMPACT_INTERVAL_SECS
     }
 
-    /// Write a full snapshot to state.json and truncate the WAL.
+    /// Publish a full checkpointed snapshot, then replace the covered WAL prefix.
     /// Accepts pre-serialized JSON to avoid borrow conflicts when wal and state
     /// are fields of the same struct.
     pub fn compact(&mut self, state_json: &str) -> Result<(), String> {
+        let checkpoint_id = self.next_checkpoint_id.ok_or_else(|| {
+            "WAL checkpoint ID space exhausted; refusing to truncate WAL".to_string()
+        })?;
+        let mut state: FirewallState = serde_json::from_str(state_json)
+            .map_err(|error| format!("Failed to parse compact snapshot: {}", error))?;
+        state.wal_replay_cursor = WalReplayCursor {
+            version: WAL_REPLAY_CURSOR_VERSION,
+            checkpoint_id,
+        };
+        let checkpointed_state = serde_json::to_vec_pretty(&state)
+            .map_err(|error| format!("Failed to serialize compact snapshot: {}", error))?;
+
+        self.append_checkpoint_buffered(checkpoint_id)?;
+        self.sync()?;
+        self.next_checkpoint_id = checkpoint_id.checked_add(1);
+
         let state_dir = self
             .wal_path
             .parent()
             .ok_or_else(|| "WAL path has no parent directory".to_string())?;
         let state_file = state_dir.join("state.json");
-        persist_state_file_atomically(&state_file, state_json.as_bytes())
+        persist_state_file_atomically(&state_file, &checkpointed_state)
             .map_err(|error| format!("Failed to write snapshot: {}", error))?;
 
-        // Truncate WAL
+        self.current_checkpoint_id = Some(checkpoint_id);
         let file = OpenOptions::new()
+            .create(true)
             .write(true)
             .truncate(true)
             .open(&self.wal_path)
             .map_err(|e| format!("Failed to truncate WAL: {}", e))?;
-        file.sync_all()
-            .map_err(|e| format!("Failed to sync truncated WAL: {}", e))?;
         self.file = BufWriter::new(file);
+        self.header_required = true;
+        self.file
+            .get_ref()
+            .sync_all()
+            .map_err(|e| format!("Failed to sync truncated WAL: {}", e))?;
+        self.ensure_checkpoint_header()?;
         self.entry_count = 0;
         self.last_compact_time = Instant::now();
 
@@ -598,24 +757,55 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
         FirewallState::default()
     };
 
+    let checkpoint_state = state.clone();
+    let cursor_result = state.wal_replay_cursor.supported_checkpoint_id();
+    let cursor_failed = cursor_result.is_err();
+    let snapshot_checkpoint_id = match cursor_result {
+        Ok(checkpoint_id) => checkpoint_id,
+        Err(error) => {
+            warn!(path = %state_file, error = %error, "unsupported WAL replay cursor");
+            None
+        }
+    };
+
     // 2. Replay WAL
     let wal_path = format!("{}/state.wal", state_path);
     if let Ok(file) = File::open(&wal_path) {
         let reader = BufReader::new(file);
         let mut replayed = 0u64;
-        let mut failed = 0u64;
+        let mut failed = u64::from(cursor_failed);
         for (line_num, line_result) in reader.lines().enumerate() {
             match line_result {
                 Ok(line) => {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    match serde_json::from_str::<WalEntry>(&line) {
-                        Ok(entry) => {
+                    match parse_persisted_wal_record(&line) {
+                        Ok(PersistedWalRecord::Mutation(entry)) => {
                             if apply_wal_entry(&mut state, entry) {
                                 replayed += 1;
                             } else {
                                 failed += 1;
+                            }
+                        }
+                        Ok(PersistedWalRecord::Checkpoint { wal_checkpoint }) => {
+                            if wal_checkpoint.version != WAL_REPLAY_CURSOR_VERSION
+                                || wal_checkpoint.checkpoint_id == 0
+                            {
+                                warn!(
+                                    path = %wal_path,
+                                    line = line_num + 1,
+                                    version = wal_checkpoint.version,
+                                    checkpoint_id = wal_checkpoint.checkpoint_id,
+                                    "unsupported WAL checkpoint record"
+                                );
+                                failed += 1;
+                            } else if Some(wal_checkpoint.checkpoint_id)
+                                == snapshot_checkpoint_id
+                            {
+                                state = checkpoint_state.clone();
+                                replayed = 0;
+                                failed = 0;
                             }
                         }
                         Err(e) => {
@@ -639,7 +829,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
             warn!(path = %wal_path, failed, "WAL replay completed with failures");
         }
     } else {
-        LAST_WAL_REPLAY_FAILURES.store(0, Ordering::Relaxed);
+        LAST_WAL_REPLAY_FAILURES.store(u64::from(cursor_failed), Ordering::Relaxed);
     }
 
     state
@@ -888,9 +1078,10 @@ mod tests {
         wal.compact(&json).unwrap();
         assert_eq!(wal.entry_count(), 0);
 
-        // WAL file should be empty
+        // WAL retains only the checkpoint header; it is not a mutation.
         let wal_contents = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();
-        assert!(wal_contents.is_empty(), "WAL should be empty after compact");
+        assert_eq!(wal_contents.lines().count(), 1);
+        assert!(wal_contents.contains("wal_checkpoint"));
 
         // Snapshot should have all groups
         let loaded = load_with_wal(&state_path);
@@ -1134,7 +1325,8 @@ mod tests {
         wal.shutdown().await;
 
         let wal_contents = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();
-        assert!(wal_contents.is_empty(), "WAL should be empty after compact");
+        assert_eq!(wal_contents.lines().count(), 1);
+        assert!(wal_contents.contains("wal_checkpoint"));
 
         let loaded = load_with_wal(&state_path);
         assert!(loaded.groups.contains_key("web"));

@@ -187,7 +187,7 @@ git diff --check
 
 Do not run Cargo locally.
 
-- [ ] **Step 7: Commit and push RED**
+- [x] **Step 7: Commit and push RED**
 
 ```bash
 git add core/src/wal.rs ci/check_neutron_stage1.py \
@@ -233,7 +233,7 @@ pub wal_replay_cursor: WalReplayCursor,
 - Keep `WalEntry` unchanged and add private `WalCheckpointRecord` and
   `PersistedWalRecord` in `core/src/wal.rs`.
 
-- [ ] **Step 1: Add the cursor type and legacy semantics**
+- [x] **Step 1: Add the cursor type and legacy semantics**
 
 Implement:
 
@@ -262,7 +262,7 @@ Place the cursor field after allocator recovery fields in `FirewallState` and
 initialize it with `WalReplayCursor::default()`. Update any complete struct
 literals that do not use `..FirewallState::default()`.
 
-- [ ] **Step 2: Add private persisted record parsing**
+- [x] **Step 2: Add private persisted record parsing**
 
 Implement the design's private JSON envelope and helpers:
 
@@ -276,7 +276,7 @@ legacy `WalEntry`. Version 1 requires nonzero ID. Unknown versions parse as a
 checkpoint record and are classified by replay, not silently reinterpreted as
 a mutation.
 
-- [ ] **Step 3: Make open inventory mutation count and maximum marker ID**
+- [x] **Step 3: Make open inventory mutation count and maximum marker ID**
 
 Replace the current `WalEntry`-only count with one scan returning:
 
@@ -295,7 +295,7 @@ cursor and the WAL is empty; a retained WAL containing its matching marker is
 already append-safe. Reject an unsupported nonzero snapshot cursor from
 `WalWriter::open` before accepting any mutation or compact request.
 
-- [ ] **Step 4: Make replay select the authoritative tail**
+- [x] **Step 4: Make replay select the authoritative tail**
 
 Retain `checkpoint_state = state.clone()` before reading WAL. On a matching
 version-1 checkpoint:
@@ -342,14 +342,14 @@ pub fn append(&mut self, entry: &WalEntry) -> Result<(), String>;
 pub fn compact(&mut self, state_json: &str) -> Result<(), String>;
 ```
 
-- [ ] **Step 1: Reserve IDs without reuse or wrap**
+- [x] **Step 1: Reserve IDs without reuse or wrap**
 
 At open, set the next candidate from the maximum snapshot/marker ID using
 `checked_add(1)`. Reserve the candidate before writing its marker; after any
 successful marker fsync, advance the next candidate even if snapshot
 publication later fails.
 
-- [ ] **Step 2: Add checkpoint header repair before append**
+- [x] **Step 2: Add checkpoint header repair before append**
 
 Implement:
 
@@ -362,7 +362,7 @@ current checkpoint record, then clear the flag. `append_buffered` must call it
 before serializing an ordinary mutation. Header failure returns before mutation
 bytes are written or `entry_count` changes.
 
-- [ ] **Step 3: Implement the exact compact order**
+- [x] **Step 3: Implement the exact compact order**
 
 `compact` must:
 
@@ -384,14 +384,14 @@ If truncate fails, retain the old append writer and its matching end marker.
 If truncate succeeds but later sync/header fails, keep `header_required=true`
 so no subsequent mutation is acknowledged before repair.
 
-- [ ] **Step 4: Keep actor counters semantically accurate**
+- [x] **Step 4: Keep actor counters semantically accurate**
 
 The actor-facing mutation count remains zero only after successful compact.
 Checkpoint records never increment it. A failed compact may conservatively
 retain the prior atomic count and trigger an earlier retry, but it must never
 report zero while a mutation tail remains uncheckpointed.
 
-- [ ] **Step 5: Run non-Cargo local validation**
+- [x] **Step 5: Run non-Cargo local validation**
 
 Run:
 
