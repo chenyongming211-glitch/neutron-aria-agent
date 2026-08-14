@@ -222,6 +222,12 @@ This gate never restarts or modifies OVS, `neutron-openvswitch-agent`, or
 `aria-datapath`. Runtime stability, fixed-policy enforcement, disabled-binding
 control-plane churn, and active-matrix results remain separate.
 
+Accepted field result: the three-node run bound to candidate `2a68e39`
+completed on 2026-08-14 with 444/444 passing cases, 9,325/9,325 passing OVS
+canary samples, zero generation lag at collection, and zero owned resources
+remaining. See
+[`20260814-acl-active-matrix/summary.md`](../evidence/openstack-n05-lite/20260814-acl-active-matrix/summary.md).
+
 ### Rollback Flow
 
 1. Set `full_resync_enabled=false`.

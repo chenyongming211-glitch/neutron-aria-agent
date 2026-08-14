@@ -498,19 +498,19 @@ Require the exact pushed SHA's GitHub Actions fast-contract, sensitive-term, Pyt
 - Consumes: exact CI-passed commit, current immutable agent image digest, runtime-only target/password files, existing CirrOS image/network/flavor, and three ready compute nodes.
 - Produces: public-safe summary bound to commit/image, raw evidence retained outside Git, and zero owned resources after cleanup.
 
-- [ ] **Step 1: Capture the immutable preflight baseline**
+- [x] **Step 1: Capture the immutable preflight baseline**
 
 Record commit SHA, image digest, container IDs, process identities, agent heartbeat fields, `/readyz`, OVS/ovs-agent process identities, existing fixed-soak bindings, and current runtime/control-plane soak directories. Confirm all three target computes use the same candidate.
 
-- [ ] **Step 2: Stage scripts without restarting services**
+- [x] **Step 2: Stage scripts without restarting services**
 
 Copy only the three smoke helpers to `/var/tmp/aria-acl-active-matrix-<sha>/` on each node, mark them executable, and verify their SHA-256 values match the local commit. Do not copy configuration, agent packages, Rust binaries, or eBPF objects.
 
-- [ ] **Step 3: Run a one-cycle canary**
+- [x] **Step 3: Run a one-cycle canary**
 
 Set `DEADLINE_EPOCH` far enough for exactly the first ingress ICMP stateful row on all three nodes. Require exact status identity, matching drops, non-matching allows, complete cleanup, heartbeat health, and zero OVS-canary loss before the long run.
 
-- [ ] **Step 4: Run the full matrix until the agreed deadline**
+- [x] **Step 4: Run the full matrix until the agreed deadline**
 
 Start the scheduler through its named `systemd-run` service on the designated
 controller compute with
@@ -533,7 +533,7 @@ service.log contains no immediate error
 If any item fails, stop the unit, run cleanup, and report that the overnight
 gate did not start. Do not describe the gate as passed while it is running.
 
-- [ ] **Step 5: Collect and validate evidence**
+- [x] **Step 5: Collect and validate evidence**
 
 After completion, require:
 
@@ -552,7 +552,7 @@ dedicated VMs/ports/listeners remaining = 0
 
 Correlate, but do not merge, the external runtime, fixed-policy, and control-plane churn results.
 
-- [ ] **Step 6: Write public-safe evidence and commit it**
+- [x] **Step 6: Write public-safe evidence and commit it**
 
 Summarize topology aliases, matrix counts, convergence percentiles, cleanup, resource trends, commit/image digest, and separate external-soak dispositions. Exclude credentials, tokens, internal endpoint URLs, full configuration, and raw logs.
 
@@ -563,9 +563,18 @@ git commit -m "test(acl): record three-node active matrix acceptance"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Update the morning collection automation**
+- [x] **Step 7: Update the morning collection automation**
 
 Add the systemd unit state, active-matrix work directory, `checkpoint.json`,
 `exit-code`, `complete`, `summary.json`, `metrics.tsv`, service log, cleanup
 inventory, and OVS-canary result to the existing soak collection instructions.
 If SSH is unavailable, report collection deferred rather than test failure.
+
+## Field Result
+
+The authoritative detached run `acl-matrix-2a68e39-20260814` completed with
+exit status `0`, a completion marker, 444 passing cases, zero failing cases,
+9,325 OVS-canary samples with zero failures, and no owned resources remaining.
+All three agents were alive, ready, non-degraded, and at generation lag zero
+when evidence was collected. Public-safe evidence is recorded in
+[`20260814-acl-active-matrix/summary.md`](../../evidence/openstack-n05-lite/20260814-acl-active-matrix/summary.md).
