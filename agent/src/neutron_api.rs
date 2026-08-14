@@ -6962,7 +6962,7 @@ mod tests {
             &ebpf_path,
             &pin_path,
             &state_path,
-            "^tap",
+            regex::Regex::new("^tap").unwrap(),
             4096,
             control_plane.clone(),
         ));

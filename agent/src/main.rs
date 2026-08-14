@@ -1,5 +1,6 @@
 use axum::serve::ListenerExt;
 use clap::Parser;
+use regex::Regex;
 use serde::Deserialize;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
@@ -483,28 +484,48 @@ fn init_tracing(config: &Config) -> Result<(), String> {
     }
 }
 
-fn load_config(path: &PathBuf) -> Config {
-    if path.exists() {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str(&contents) {
-                Ok(config) => {
-                    println!("Loaded config from {:?}", path);
-                    return config;
-                }
-                Err(e) => {
-                    eprintln!("Warning: failed to parse config {:?}: {}", path, e);
-                    eprintln!("Using default configuration");
-                }
-            },
-            Err(e) => {
-                eprintln!("Warning: failed to read config {:?}: {}", path, e);
-                eprintln!("Using default configuration");
-            }
+struct StartupConfig {
+    config: Config,
+    iface_pattern: Regex,
+}
+
+fn load_startup_config(path: &Path) -> Result<StartupConfig, String> {
+    let config = match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let config = toml::from_str(&contents).map_err(|error| {
+                format!(
+                    "failed to parse configuration {}: {}",
+                    path.display(),
+                    error
+                )
+            })?;
+            println!("Loaded config from {:?}", path);
+            config
         }
-    } else {
-        println!("Config file {:?} not found, using defaults", path);
-    }
-    Config::default()
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("Config file {:?} not found, using defaults", path);
+            Config::default()
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read configuration {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    };
+
+    let iface_pattern = Regex::new(&config.iface_pattern).map_err(|error| {
+        format!(
+            "invalid iface_pattern {:?}: {}",
+            config.iface_pattern, error
+        )
+    })?;
+
+    Ok(StartupConfig {
+        config,
+        iface_pattern,
+    })
 }
 
 async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixListener, String> {
@@ -824,7 +845,16 @@ async fn main() {
     }
 
     let args = Args::parse();
-    let config = load_config(&args.config);
+    let StartupConfig {
+        config,
+        iface_pattern,
+    } = match load_startup_config(&args.config) {
+        Ok(startup) => startup,
+        Err(error) => {
+            eprintln!("Error: invalid startup configuration: {}", error);
+            std::process::exit(1);
+        }
+    };
     let fragment_tracking = match config.fragment_tracking_settings() {
         Ok(settings) => settings,
         Err(e) => {
@@ -987,7 +1017,7 @@ async fn main() {
         &resolved_ebpf.selected_path,
         &config.pin_path,
         &config.state_path,
-        &config.iface_pattern,
+        iface_pattern,
         config.max_port_policies,
         control_plane.clone(),
     ));

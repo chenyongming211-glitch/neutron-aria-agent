@@ -109,7 +109,7 @@ impl TapRegistry {
         ebpf_path: &str,
         base_pin_path: &str,
         base_state_path: &str,
-        iface_pattern: &str,
+        iface_pattern: Regex,
         max_port_policies: u32,
         control_plane: Arc<ControlPlane>,
     ) -> Self {
@@ -119,8 +119,7 @@ impl TapRegistry {
             ebpf_path: PathBuf::from(ebpf_path),
             base_pin_path: PathBuf::from(base_pin_path),
             base_state_path: PathBuf::from(base_state_path),
-            iface_pattern: Regex::new(iface_pattern)
-                .unwrap_or_else(|_| Regex::new("^tap").unwrap()),
+            iface_pattern,
             max_port_policies,
             control_plane,
         }
