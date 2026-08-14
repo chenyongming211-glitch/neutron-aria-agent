@@ -256,10 +256,11 @@ execution scope.
 After `REVIEW-ACL-082`, implementation scope was narrowed to the ACL product
 boundary in
 [the ACL-only continuation design](2026-08-14-acl-only-remaining-remediation-design.md).
-`REVIEW-ACL-085/090/091` is fixed with exact RED/GREEN hosted evidence. The
-active production batch is now `REVIEW-ACL-098/099`. `REVIEW-ACL-086` and the conditional
-`REVIEW-ACL-083/084` plus `REVIEW-TXN-035` remain evidence gates and cannot be
-marked fixed without their required proof.
+`REVIEW-ACL-085/090/091` and `REVIEW-ACL-098/099` are fixed with exact
+RED/GREEN hosted evidence. No confirmed ACL production-fix batch remains in
+this narrowed line. `REVIEW-ACL-086` and the conditional `REVIEW-ACL-083/084`
+plus `REVIEW-TXN-035` remain evidence gates and cannot be marked fixed without
+their required proof.
 
 The former steps containing `REVIEW-ACL-078`, `REVIEW-OPS-039`,
 `REVIEW-ACL-089`, `REVIEW-ACL-093/094`, and `REVIEW-ACL-096/097` remain valid

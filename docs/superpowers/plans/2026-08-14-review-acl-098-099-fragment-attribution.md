@@ -1,6 +1,6 @@
 # REVIEW-ACL-098/099 Fragment Attribution Implementation Plan
 
-**Status:** implementation in progress
+**Status:** complete; exact RED/GREEN hosted evidence recorded
 
 **Goal:** Attribute fragment-subsystem drops distinctly from ACL policy drops
 and preserve available source/destination group identity on resolve-stage
@@ -34,15 +34,15 @@ ACL/CT/QoS ordering are unchanged.
 - Modify: `abi/tests/fragment_context_contract.rs`
 - Modify: `core/src/trace_ops.rs`
 
-- [ ] Add an ABI contract that requires `TRACE_RESULT_DROP_FRAGMENT == 5`,
+- [x] Add an ABI contract that requires `TRACE_RESULT_DROP_FRAGMENT == 5`,
   proves existing trace-result values remain `0..4`, and reasserts all three
   trace event sizes.
-- [ ] Add a shared `PipelineCtx` behavior contract requiring resolve-stage
+- [x] Add a shared `PipelineCtx` behavior contract requiring resolve-stage
   attribution to overwrite poisoned IDs with exact map hits and use `0` for a
   missing side.
-- [ ] Add a core observation contract requiring result `5` to render as
+- [x] Add a core observation contract requiring result `5` to render as
   `drop:fragment`, never `drop:acl` or `result:5`.
-- [ ] Commit and push RED tests. Require hosted `rust-behavior` failure only on
+- [x] Commit and push RED tests. Require hosted `rust-behavior` failure only on
   the missing additive ABI/helper behavior; unrelated build lanes must remain
   healthy.
 
@@ -53,34 +53,34 @@ ACL/CT/QoS ordering are unchanged.
 - Modify: `abi/src/lib.rs`
 - Modify: `core/src/trace_ops.rs`
 
-- [ ] Append `TRACE_RESULT_DROP_FRAGMENT = 5` and export it through the stable
+- [x] Append `TRACE_RESULT_DROP_FRAGMENT = 5` and export it through the stable
   userspace module without changing any structure.
-- [ ] Add one inline shared helper that replaces both `PipelineCtx` group IDs
+- [x] Add one inline shared helper that replaces both `PipelineCtx` group IDs
   from optional general-map lookup results, using zero only for a miss.
-- [ ] Render result `5` as `drop:fragment` in every v4/v6/stream projection
+- [x] Render result `5` as `drop:fragment` in every v4/v6/stream projection
   through the existing common `result_name` path.
 
 ## Task 3: GREEN eBPF Resolve-Drop Attribution
 
 **File:** `ebpf/src/lib.rs`
 
-- [ ] Import the additive trace constant and shared ID-assignment helper.
-- [ ] Add no-inline IPv4 and IPv6 resolve-drop phases. Each performs exactly
+- [x] Import the additive trace constant and shared ID-assignment helper.
+- [x] Add no-inline IPv4 and IPv6 resolve-drop phases. Each performs exactly
   two existing general-map lookups, writes both IDs through the shared helper,
   then invokes the existing fragment drop phase.
-- [ ] Route only the four ingress/egress resolve-stage drop branches through
+- [x] Route only the four ingress/egress resolve-stage drop branches through
   the new family-specific phases. Leave context-install failure calls on the
   existing phase.
-- [ ] Make the common fragment drop phase emit
+- [x] Make the common fragment drop phase emit
   `TRACE_RESULT_DROP_FRAGMENT`; keep exact `drop_reason` values unchanged.
 
 ## Task 4: Hosted Verification And Closure
 
-- [ ] Push GREEN and require exact-head `rust-behavior` and `rust-build`.
-- [ ] Require the linked eBPF stack-budget report to keep both TC entry paths
+- [x] Push GREEN and require exact-head `rust-behavior` and `rust-build`.
+- [x] Require the linked eBPF stack-budget report to keep both TC entry paths
   at or below 448 bytes and require warning-denied ABI/core/agent/eBPF builds.
-- [ ] Mark only `REVIEW-ACL-098/099` fixed with RED/GREEN evidence. Keep
+- [x] Mark only `REVIEW-ACL-098/099` fixed with RED/GREEN evidence. Keep
   `REVIEW-ACL-086`, `REVIEW-ACL-083/084`, and `REVIEW-TXN-035` as evidence
   gates; keep every excluded non-ACL finding open.
-- [ ] Push the documentation closure, require exact-head CI, and finish with a
+- [x] Push the documentation closure, require exact-head CI, and finish with a
   clean worktree and `0 0` local/remote divergence.
