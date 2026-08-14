@@ -10500,7 +10500,10 @@ mod tests {
         let root = temp_root("generation-zero-preflight");
         let state = test_neutron_state(&root);
         state.restore_ready.store(false, Ordering::Release);
-        let before = SnapshotAdmissionIdentity::capture(&state.runtime.read().await);
+        let before = {
+            let runtime = state.runtime.read().await;
+            SnapshotAdmissionIdentity::capture(&runtime)
+        };
         let wal_path = state
             .registry
             .base_state_path
@@ -10542,10 +10545,11 @@ mod tests {
                 Some("INVALID_SNAPSHOT_GENERATION")
             );
         }
-        assert_eq!(
-            SnapshotAdmissionIdentity::capture(&state.runtime.read().await),
-            before
-        );
+        let after = {
+            let runtime = state.runtime.read().await;
+            SnapshotAdmissionIdentity::capture(&runtime)
+        };
+        assert_eq!(after, before);
         assert!(!wal_path.exists());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -11150,11 +11154,11 @@ mod tests {
 
             assert_eq!(error.status, StatusCode::CONFLICT, "{case}");
             assert_eq!(error.code, "snapshot_retry_not_safe", "{case}");
-            assert_eq!(
-                SnapshotAdmissionIdentity::capture(&state.runtime.read().await),
-                before,
-                "{case}"
-            );
+            let after = {
+                let runtime = state.runtime.read().await;
+                SnapshotAdmissionIdentity::capture(&runtime)
+            };
+            assert_eq!(after, before, "{case}");
             assert_eq!(
                 state.runtime.read().await.port_statuses,
                 before_statuses,
