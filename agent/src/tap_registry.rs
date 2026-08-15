@@ -589,31 +589,14 @@ impl TapRegistry {
         names
     }
 
-    /// Snapshot of ifname -> tap_id for attached instances (read-only).
+    /// Snapshot of ifname -> (tap_id, state_path) for attached instances.
     ///
     /// Reads persisted tap-id state files and is therefore intended for
     /// blocking contexts (e.g. `tokio::task::spawn_blocking`), not async
     /// handlers. Uses `try_read` so a contended registry yields an empty
-    /// snapshot instead of blocking.
-    pub fn tap_ids_by_ifname_now(&self) -> HashMap<String, u32> {
-        let instances = match self.instances.try_read() {
-            Ok(guard) => guard,
-            Err(_) => return HashMap::new(),
-        };
-        let mut ids = HashMap::new();
-        for (ifname, instance) in instances.iter() {
-            if let Some(tap_id) = instance.tap_id() {
-                ids.insert(ifname.clone(), tap_id);
-            }
-        }
-        ids
-    }
-
-    /// Snapshot of ifname -> (tap_id, state_path) for attached instances.
-    ///
-    /// Same blocking-context contract as `tap_ids_by_ifname_now`; the state
-    /// path lets callers read per-tap persisted runtime metadata (e.g. the
-    /// group registry for counter display translation) off the async worker.
+    /// snapshot instead of blocking. The state path lets callers read
+    /// per-tap persisted runtime metadata (e.g. the group registry for
+    /// counter display translation) off the async worker.
     pub fn tap_runtimes_now(&self) -> HashMap<String, (u32, PathBuf)> {
         let instances = match self.instances.try_read() {
             Ok(guard) => guard,
@@ -841,16 +824,16 @@ mod tests {
     }
 
     #[test]
-    fn tap_ids_by_ifname_returns_empty_without_instances() {
-        let root = temp_root("tap-ids-empty");
+    fn tap_runtimes_return_empty_without_instances() {
+        let root = temp_root("tap-runtimes-empty");
         let registry = test_registry(&root);
-        assert!(registry.tap_ids_by_ifname_now().is_empty());
+        assert!(registry.tap_runtimes_now().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn tap_ids_by_ifname_maps_attached_instances_with_assigned_ids() {
-        let root = temp_root("tap-ids-mapped");
+    async fn tap_runtimes_map_attached_instances_with_assigned_ids() {
+        let root = temp_root("tap-runtimes-mapped");
         let registry = test_registry(&root);
         let ifname = "tap-with-id";
         let state_path = registry.base_state_path.join(ifname);
@@ -860,7 +843,7 @@ mod tests {
         let instance = FirewallInstance::new(
             ifname,
             PathBuf::from(registry.control_plane.managed_pin_path()),
-            state_path,
+            state_path.clone(),
             true,
             registry.control_plane.trace_map_mode(),
         );
@@ -869,8 +852,10 @@ mod tests {
             .write()
             .await
             .insert(ifname.to_string(), instance);
-        let ids = registry.tap_ids_by_ifname_now();
-        assert_eq!(ids.get(ifname), Some(&7));
+        let runtimes = registry.tap_runtimes_now();
+        let (tap_id, runtime_state_path) = runtimes.get(ifname).expect("runtime snapshot");
+        assert_eq!(*tap_id, 7);
+        assert_eq!(runtime_state_path, &state_path);
         let _ = std::fs::remove_dir_all(root);
     }
 
