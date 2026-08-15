@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_filter_delete_is_idempotent_only_for_missing_key() {
+    fn map_delete_trace_filter_is_idempotent_only_for_missing_key() {
         assert!(!delete_trace_filter_entry(
             || Err(MapError::KeyNotFound),
             "delete TRACE_FILTER tap 42",
