@@ -88,37 +88,6 @@ ARIA_ACL_TABLES = {
         "effective_action",
         "generation",
         "updated_at",
-        "counters_sampled_at",
-        "counters_policy_packets",
-        "counters_policy_bytes",
-        "counters_policy_allow_packets",
-        "counters_policy_dropped_packets",
-        "counters_policy_dropped_bytes",
-        "counters_policy_pps",
-        "counters_drop_packets",
-        "counters_drop_bytes",
-        "counters_drop_pps",
-        "counters_truncated",
-        "counters_reset_detected",
-        "counters_group_map",
-    ),
-    "aria_acl_port_counters": (
-        "id",
-        "port_id",
-        "host",
-        "kind",
-        "src_id",
-        "dst_id",
-        "proto",
-        "direction",
-        "reason",
-        "packets",
-        "bytes",
-        "dropped_packets",
-        "dropped_bytes",
-        "pps",
-        "bps",
-        "sampled_at",
     ),
 }
 
@@ -204,37 +173,6 @@ _TABLE_DEFINITIONS = {
         ("effective_action", "short", True, False),
         ("generation", "bigint", True, False),
         ("updated_at", "datetime", True, False),
-        ("counters_sampled_at", "datetime", True, False),
-        ("counters_policy_packets", "bigint", True, False),
-        ("counters_policy_bytes", "bigint", True, False),
-        ("counters_policy_allow_packets", "bigint", True, False),
-        ("counters_policy_dropped_packets", "bigint", True, False),
-        ("counters_policy_dropped_bytes", "bigint", True, False),
-        ("counters_policy_pps", "float", True, False),
-        ("counters_drop_packets", "bigint", True, False),
-        ("counters_drop_bytes", "bigint", True, False),
-        ("counters_drop_pps", "float", True, False),
-        ("counters_truncated", "bool", True, False),
-        ("counters_reset_detected", "bool", True, False),
-        ("counters_group_map", "text", True, False),
-    ),
-    "aria_acl_port_counters": (
-        ("id", "uuid", False, True),
-        ("port_id", "uuid", False, False),
-        ("host", "name", False, False),
-        ("kind", "short", False, False),
-        ("src_id", "int", True, False),
-        ("dst_id", "int", True, False),
-        ("proto", "int", True, False),
-        ("direction", "short", True, False),
-        ("reason", "int", True, False),
-        ("packets", "bigint", False, False),
-        ("bytes", "bigint", False, False),
-        ("dropped_packets", "bigint", True, False),
-        ("dropped_bytes", "bigint", True, False),
-        ("pps", "float", True, False),
-        ("bps", "float", True, False),
-        ("sampled_at", "datetime", True, False),
     ),
 }
 
@@ -249,12 +187,6 @@ _INDEXES = (
     ),
     ("ix_aria_acl_bindings_target", "aria_acl_bindings", ("target_type", "target_id"), False),
     ("ix_aria_acl_bindings_policy_id", "aria_acl_bindings", ("policy_id",), False),
-    (
-        "uq_aria_acl_port_counters_natural",
-        "aria_acl_port_counters",
-        ("port_id", "host", "kind", "src_id", "dst_id", "proto", "direction", "reason"),
-        True,
-    ),
 )
 
 
@@ -292,8 +224,6 @@ def _type(sa, type_name):
         return sa.Integer()
     if type_name == "bigint":
         return sa.BigInteger()
-    if type_name == "float":
-        return sa.Float()
     if type_name == "datetime":
         return sa.DateTime()
     raise ValueError("unsupported aria_acl column type: %s" % type_name)
