@@ -590,8 +590,16 @@ impl TapRegistry {
     }
 
     /// Snapshot of ifname -> tap_id for attached instances (read-only).
-    pub async fn tap_ids_by_ifname(&self) -> HashMap<String, u32> {
-        let instances = self.instances.read().await;
+    ///
+    /// Reads persisted tap-id state files and is therefore intended for
+    /// blocking contexts (e.g. `tokio::task::spawn_blocking`), not async
+    /// handlers. Uses `try_read` so a contended registry yields an empty
+    /// snapshot instead of blocking.
+    pub fn tap_ids_by_ifname_now(&self) -> HashMap<String, u32> {
+        let instances = match self.instances.try_read() {
+            Ok(guard) => guard,
+            Err(_) => return HashMap::new(),
+        };
         let mut ids = HashMap::new();
         for (ifname, instance) in instances.iter() {
             if let Some(tap_id) = instance.tap_id() {
@@ -813,11 +821,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[tokio::test]
-    async fn tap_ids_by_ifname_returns_empty_without_instances() {
+    #[test]
+    fn tap_ids_by_ifname_returns_empty_without_instances() {
         let root = temp_root("tap-ids-empty");
         let registry = test_registry(&root);
-        assert!(registry.tap_ids_by_ifname().await.is_empty());
+        assert!(registry.tap_ids_by_ifname_now().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -842,7 +850,7 @@ mod tests {
             .write()
             .await
             .insert(ifname.to_string(), instance);
-        let ids = registry.tap_ids_by_ifname().await;
+        let ids = registry.tap_ids_by_ifname_now();
         assert_eq!(ids.get(ifname), Some(&7));
         let _ = std::fs::remove_dir_all(root);
     }

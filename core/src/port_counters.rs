@@ -1,4 +1,4 @@
-use aya::maps::{MapData, PerCpuHashMap};
+use aya::maps::{MapData, MapError, PerCpuHashMap};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common::{DropKey, DropValue, PolicyKey, RuleStatsValue};
@@ -34,7 +34,6 @@ pub struct PortCounterSummary {
     pub policy_packets: u64,
     pub policy_bytes: u64,
     pub policy_allow_packets: u64,
-    pub policy_allow_bytes: u64,
     pub policy_dropped_packets: u64,
     pub policy_dropped_bytes: u64,
     pub drop_packets: u64,
@@ -82,8 +81,6 @@ pub fn aggregate_port_counters(
     }
     summary.policy_allow_packets =
         summary.policy_packets.saturating_sub(summary.policy_dropped_packets);
-    summary.policy_allow_bytes =
-        summary.policy_bytes.saturating_sub(summary.policy_dropped_bytes);
     buckets.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(b.packets.cmp(&a.packets)));
     if buckets.len() > MAX_COUNTER_BUCKET_ROWS {
         buckets.truncate(MAX_COUNTER_BUCKET_ROWS);
@@ -112,31 +109,36 @@ pub fn aggregate_port_counters(
     summary
 }
 
-/// Read RULE_STATS and DROP_REASON_STATS once from a shared (multi-tap)
-/// managed pin path and aggregate per requested tap id.
-///
-/// A missing/unpinned map yields `Ok(vec![])` (counters are best-effort);
-/// a genuine map error yields `Err`.
-pub fn read_port_counters(
-    pin_path: &str,
-    tap_ids: &[u32],
-) -> Result<Vec<PortCounterSummary>, String> {
-    if tap_ids.is_empty() {
-        return Ok(Vec::new());
+/// A pin-open failure counts as "map missing" only for ENOENT; permission,
+/// corruption, and wrong-type failures are genuine errors surfaced to the
+/// caller (best-effort counters must not silently mask real map faults).
+fn pin_missing(error: &MapError) -> bool {
+    match error {
+        MapError::PinError { error: pin_error, .. } => match pin_error {
+            aya::pin::PinError::SyscallError(syscall) => {
+                syscall.io_error.kind() == std::io::ErrorKind::NotFound
+            }
+            _ => false,
+        },
+        _ => false,
     }
-    let requested: BTreeSet<u32> = tap_ids.iter().copied().collect();
+}
 
-    // Read RULE_STATS without tap filtering (shared managed pin path).
+fn collect_rule_rows(
+    pin_path: &str,
+    requested: &BTreeSet<u32>,
+) -> Result<BTreeMap<u32, Vec<RuleStatsEntry>>, String> {
+    let mut rows: BTreeMap<u32, Vec<RuleStatsEntry>> = BTreeMap::new();
     let rule_path = format!("{}/RULE_STATS", pin_path);
     let rule_map_data = match MapData::from_pin(&rule_path) {
         Ok(data) => data,
-        Err(_) => return Ok(Vec::new()),
+        Err(error) if pin_missing(&error) => return Ok(rows),
+        Err(error) => return Err(format!("open RULE_STATS: {}", error)),
     };
     let rule_map = PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
         aya::maps::Map::PerCpuHashMap(rule_map_data),
     )
     .map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
-    let mut rule_rows: BTreeMap<u32, Vec<RuleStatsEntry>> = BTreeMap::new();
     for item in rule_map.iter() {
         if let Ok((key, values)) = item {
             if !requested.contains(&key.tap_id) {
@@ -147,8 +149,7 @@ pub fn read_port_counters(
             if packets == 0 {
                 continue;
             }
-            rule_rows
-                .entry(key.tap_id)
+            rows.entry(key.tap_id)
                 .or_default()
                 .push(RuleStatsEntry {
                     key,
@@ -159,18 +160,24 @@ pub fn read_port_counters(
                 });
         }
     }
+    Ok(rows)
+}
 
-    // Read DROP_REASON_STATS without tap filtering (shared managed pin path).
+fn collect_drop_rows(
+    pin_path: &str,
+    requested: &BTreeSet<u32>,
+) -> Result<BTreeMap<u32, Vec<DropStatsEntry>>, String> {
+    let mut rows: BTreeMap<u32, Vec<DropStatsEntry>> = BTreeMap::new();
     let drop_path = format!("{}/DROP_REASON_STATS", pin_path);
     let drop_map_data = match MapData::from_pin(&drop_path) {
         Ok(data) => data,
-        Err(_) => return Ok(Vec::new()),
+        Err(error) if pin_missing(&error) => return Ok(rows),
+        Err(error) => return Err(format!("open DROP_REASON_STATS: {}", error)),
     };
     let drop_map = PerCpuHashMap::<_, DropKey, DropValue>::try_from(
         aya::maps::Map::PerCpuHashMap(drop_map_data),
     )
     .map_err(|e| format!("convert DROP_REASON_STATS: {:?}", e))?;
-    let mut drop_rows: BTreeMap<u32, Vec<DropStatsEntry>> = BTreeMap::new();
     for item in drop_map.iter() {
         if let Ok((key, values)) = item {
             if !requested.contains(&key.tap_id) {
@@ -180,8 +187,7 @@ pub fn read_port_counters(
             if packets == 0 {
                 continue;
             }
-            drop_rows
-                .entry(key.tap_id)
+            rows.entry(key.tap_id)
                 .or_default()
                 .push(DropStatsEntry {
                     reason: key.reason,
@@ -195,6 +201,25 @@ pub fn read_port_counters(
                 });
         }
     }
+    Ok(rows)
+}
+
+/// Read RULE_STATS and DROP_REASON_STATS once from a shared (multi-tap)
+/// managed pin path and aggregate per requested tap id.
+///
+/// Each map is read independently: a missing RULE_STATS map only zeroes the
+/// policy view, a missing DROP_REASON_STATS map only zeroes the drop view.
+/// A genuine map error (permissions, corruption, wrong type) yields `Err`.
+pub fn read_port_counters(
+    pin_path: &str,
+    tap_ids: &[u32],
+) -> Result<Vec<PortCounterSummary>, String> {
+    if tap_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requested: BTreeSet<u32> = tap_ids.iter().copied().collect();
+    let rule_rows = collect_rule_rows(pin_path, &requested)?;
+    let drop_rows = collect_drop_rows(pin_path, &requested)?;
 
     let mut summaries = Vec::new();
     for &tap_id in &requested {

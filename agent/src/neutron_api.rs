@@ -7,8 +7,8 @@ use aria_api::{
     NeutronStatusDomainState, NeutronStatusEffectiveAction, NeutronStatusOverallReadiness,
     NeutronStatusPortEvidence, NeutronStatusRecoveryCause, NeutronStatusRequiredAction,
     NeutronStatusSupportDisposition, NeutronStatusTransactionState, NeutronStatusV1Response,
-    NEUTRON_COUNTERS_SCHEMA_VERSION, NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT,
-    NEUTRON_STATUS_CONTRACT_HASH, NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
+    NEUTRON_COUNTERS_SCHEMA_VERSION, NEUTRON_STATUS_CONTRACT_HASH,
+    NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
     NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
 use aria_core::port_counters::read_port_counters;
@@ -2085,15 +2085,37 @@ fn project_neutron_status_v2(
     projection
 }
 
+/// Resolve the tap id list and tap_id -> port_id mapping for counters.
+///
+/// Ports without a registered tap id are skipped. Duplicate tap ids are
+/// deduplicated. Exposed as a pure function so the mapping rules are
+/// unit-testable without a live registry or pinned maps.
+fn counters_tap_mapping(
+    ports: &BTreeMap<String, ManagedNeutronPort>,
+    tap_ids: &std::collections::HashMap<String, u32>,
+) -> (BTreeMap<u32, String>, Vec<u32>) {
+    let mut tap_to_port: BTreeMap<u32, String> = BTreeMap::new();
+    let mut tap_list: Vec<u32> = Vec::new();
+    for port in ports.values() {
+        if let Some(tap_id) = tap_ids.get(&port.ifname).copied() {
+            tap_to_port.insert(tap_id, port.port_id.clone());
+            tap_list.push(tap_id);
+        }
+    }
+    tap_list.sort_unstable();
+    tap_list.dedup();
+    (tap_to_port, tap_list)
+}
+
 /// Build the optional counters v1 section for a status response.
 ///
 /// Best-effort by design: reads the shared managed pin path maps once and maps
-/// rows back to managed ports via the registry's ifname -> tap_id snapshot.
-/// Any tap id without a managed port is dropped; ports without a tap id are
-/// skipped. Map iteration is bounded (512 rows/port) and fast enough for the
-/// status handler; a read failure degrades only this section.
+/// rows back to managed ports via the ifname -> tap_id snapshot. Any tap id
+/// without a managed port is dropped; ports without a tap id are skipped. A
+/// read failure degrades only this section. Callers should invoke this on a
+/// blocking task: it performs file I/O and full per-CPU map iteration.
 fn build_neutron_counters_section(
-    state: &NeutronApiState,
+    pin_path: &str,
     ports: &BTreeMap<String, ManagedNeutronPort>,
     tap_ids: &std::collections::HashMap<String, u32>,
 ) -> Option<NeutronStatusCountersV1> {
@@ -2108,14 +2130,7 @@ fn build_neutron_counters_section(
         ports: Vec::new(),
     };
 
-    let mut tap_to_port: BTreeMap<u32, String> = BTreeMap::new();
-    let mut tap_list: Vec<u32> = Vec::new();
-    for port in ports.values() {
-        if let Some(tap_id) = tap_ids.get(&port.ifname).copied() {
-            tap_to_port.insert(tap_id, port.port_id.clone());
-            tap_list.push(tap_id);
-        }
-    }
+    let (tap_to_port, tap_list) = counters_tap_mapping(ports, tap_ids);
     if tap_list.is_empty() {
         return Some(NeutronStatusCountersV1 {
             counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
@@ -2124,11 +2139,8 @@ fn build_neutron_counters_section(
             ports: Vec::new(),
         });
     }
-    tap_list.sort_unstable();
-    tap_list.dedup();
 
-    let pin_path = state.control_plane.managed_pin_path();
-    let summaries = match read_port_counters(&pin_path, &tap_list) {
+    let summaries = match read_port_counters(pin_path, &tap_list) {
         Ok(summaries) => summaries,
         Err(error) => return Some(error_section(error)),
     };
@@ -2137,10 +2149,9 @@ fn build_neutron_counters_section(
         let Some(port_id) = tap_to_port.get(&summary.tap_id) else {
             continue;
         };
-        let mut buckets: Vec<NeutronCounterBucketV1> = summary
+        let buckets: Vec<NeutronCounterBucketV1> = summary
             .buckets
             .iter()
-            .take(NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT)
             .map(|b| NeutronCounterBucketV1 {
                 src_id: b.src_id,
                 dst_id: b.dst_id,
@@ -2152,7 +2163,6 @@ fn build_neutron_counters_section(
                 dropped_bytes: b.dropped_bytes,
             })
             .collect();
-        buckets.sort_by(|a, b| b.bytes.cmp(&a.bytes));
         let reasons: Vec<NeutronCounterReasonV1> = summary
             .reasons
             .iter()
@@ -2207,10 +2217,31 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
         runtime.authority_state.clone()
     };
     let counters_ports = runtime.ports.clone();
-    let counters_tap_ids = state.registry.tap_ids_by_ifname().await;
     drop(runtime);
 
-    let counters = build_neutron_counters_section(state, &counters_ports, &counters_tap_ids);
+    // Build the counters section off the async worker: it reads persisted
+    // tap-id state files and iterates pinned per-CPU maps, and must not block
+    // the tokio worker that serves status/readiness probes. The registry
+    // snapshot is taken after dropping the runtime guard, so no lock is held
+    // across the blocking work.
+    let registry = state.registry.clone();
+    let pin_path = state.control_plane.managed_pin_path();
+    let counters = tokio::task::spawn_blocking(move || {
+        let tap_ids = registry.tap_ids_by_ifname_now();
+        build_neutron_counters_section(&pin_path, &counters_ports, &tap_ids)
+    })
+    .await
+    .unwrap_or_else(|join_error| {
+        Some(NeutronStatusCountersV1 {
+            counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
+            sampled_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            counters_error: Some(format!("counters build task failed: {}", join_error)),
+            ports: Vec::new(),
+        })
+    });
 
     NeutronStatusV1Response {
         status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
@@ -7985,6 +8016,73 @@ mod tests {
             }
         }
         body
+    }
+
+    #[test]
+    fn counters_tap_mapping_maps_ports_and_skips_unregistered_taps() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "p1".to_string(),
+            ManagedNeutronPort {
+                port_id: "p1".to_string(),
+                ifname: "tape1".to_string(),
+                ifindex: Some(11),
+                managed_domains: vec!["acl".to_string()],
+                domain_desired_hashes: BTreeMap::new(),
+            },
+        );
+        ports.insert(
+            "p2".to_string(),
+            ManagedNeutronPort {
+                port_id: "p2".to_string(),
+                ifname: "tape2".to_string(),
+                ifindex: Some(12),
+                managed_domains: vec!["acl".to_string()],
+                domain_desired_hashes: BTreeMap::new(),
+            },
+        );
+        let mut tap_ids = std::collections::HashMap::new();
+        tap_ids.insert("tape1".to_string(), 7u32);
+        tap_ids.insert("tape3".to_string(), 9u32); // unregistered port
+        let (tap_to_port, tap_list) = counters_tap_mapping(&ports, &tap_ids);
+        assert_eq!(tap_list, vec![7]);
+        assert_eq!(tap_to_port.get(&7).map(String::as_str), Some("p1"));
+        assert_eq!(tap_to_port.get(&9), None);
+    }
+
+    #[test]
+    fn counters_tap_mapping_deduplicates_reused_tap_ids() {
+        let mut ports = BTreeMap::new();
+        for (port_id, ifname) in [("p1", "tape1"), ("p2", "tape1")] {
+            ports.insert(
+                port_id.to_string(),
+                ManagedNeutronPort {
+                    port_id: port_id.to_string(),
+                    ifname: ifname.to_string(),
+                    ifindex: None,
+                    managed_domains: vec!["acl".to_string()],
+                    domain_desired_hashes: BTreeMap::new(),
+                },
+            );
+        }
+        let mut tap_ids = std::collections::HashMap::new();
+        tap_ids.insert("tape1".to_string(), 5u32);
+        let (tap_to_port, tap_list) = counters_tap_mapping(&ports, &tap_ids);
+        assert_eq!(tap_list, vec![5]);
+        // Last port wins for a reused tap id; rows cannot be double-counted.
+        assert_eq!(tap_to_port.get(&5).map(String::as_str), Some("p2"));
+    }
+
+    #[test]
+    fn counters_section_is_empty_without_registered_taps() {
+        let ports = BTreeMap::new();
+        let tap_ids = std::collections::HashMap::new();
+        let section =
+            build_neutron_counters_section("/nonexistent", &ports, &tap_ids);
+        let section = section.expect("empty section must be present");
+        assert_eq!(section.counters_schema_version, 1);
+        assert!(section.counters_error.is_none());
+        assert!(section.ports.is_empty());
     }
 
     #[tokio::test]

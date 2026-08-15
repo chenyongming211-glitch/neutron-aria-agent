@@ -488,7 +488,7 @@ pub struct NeutronCapabilitiesResponse {
     pub status_schema_version_min: u32,
     /// Maximum supported Status response schema version.
     #[serde(default)]
-    #[schema(example = 2)]
+    #[schema(example = 3)]
     pub status_schema_version_max: u32,
     /// Stable hash/version for the independent Status response vocabulary.
     #[serde(default)]
