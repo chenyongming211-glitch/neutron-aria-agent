@@ -986,6 +986,117 @@ mod tests {
         assert!(!ct_acl_cache_is_current(CT_FLAG_ACL_EVALUATED, 0, 1, 1,));
     }
 
+    fn ct_concurrency_fixture() -> CtValue {
+        CtValue {
+            state: CT_NEW,
+            flags: CT_FLAG_ACL_EVALUATED | CT_FLAG_POLICY_HIT,
+            direction: DIR_INGRESS,
+            matched_proto: 6,
+            matched_src_id: 101,
+            matched_dst_id: 202,
+            matched_bank: ACL_BANK_SHADOW,
+            _pad: [0; 3],
+            last_seen: 1_000,
+            pkt_count: 7,
+            byte_count: 700,
+        }
+    }
+
+    #[test]
+    fn tc_ct_concurrency_accepts_only_identical_complete_snapshots() {
+        let first = ct_concurrency_fixture();
+        let same = first;
+        assert!(ct_snapshot_is_stable(&first, Some(&same)));
+        assert!(!ct_snapshot_is_stable(&first, None));
+
+        let mutations = [
+            CtValue {
+                state: CT_ESTABLISHED,
+                ..first
+            },
+            CtValue {
+                flags: first.flags | CT_FLAG_SEEN_REPLY,
+                ..first
+            },
+            CtValue {
+                direction: DIR_EGRESS,
+                ..first
+            },
+            CtValue {
+                matched_proto: 17,
+                ..first
+            },
+            CtValue {
+                matched_src_id: 303,
+                ..first
+            },
+            CtValue {
+                matched_dst_id: 404,
+                ..first
+            },
+            CtValue {
+                matched_bank: ACL_BANK_PRIMARY,
+                ..first
+            },
+            CtValue {
+                _pad: [1, 0, 0],
+                ..first
+            },
+            CtValue {
+                last_seen: first.last_seen + 1,
+                ..first
+            },
+            CtValue {
+                pkt_count: first.pkt_count + 1,
+                ..first
+            },
+            CtValue {
+                byte_count: first.byte_count + 1,
+                ..first
+            },
+        ];
+        for reused in &mutations {
+            assert!(!ct_snapshot_is_stable(&first, Some(reused)));
+        }
+    }
+
+    #[test]
+    fn tc_ct_concurrency_forward_hit_promotes_only_after_reply() {
+        let mut without_reply = ct_concurrency_fixture();
+        ct_apply_confirmed_hit(&mut without_reply, 2_000, 128, true);
+        assert_eq!(without_reply.state, CT_NEW);
+        assert_eq!(without_reply.last_seen, 2_000);
+        assert_eq!(without_reply.pkt_count, 8);
+        assert_eq!(without_reply.byte_count, 828);
+
+        let mut after_reply = ct_concurrency_fixture();
+        after_reply.flags |= CT_FLAG_SEEN_REPLY;
+        ct_apply_confirmed_hit(&mut after_reply, 3_000, 64, true);
+        assert_eq!(after_reply.state, CT_ESTABLISHED);
+    }
+
+    #[test]
+    fn tc_ct_concurrency_reverse_hit_marks_reply_without_promotion() {
+        let mut entry = ct_concurrency_fixture();
+        ct_apply_confirmed_hit(&mut entry, 2_000, 128, false);
+        assert_eq!(entry.state, CT_NEW);
+        assert_ne!(entry.flags & CT_FLAG_SEEN_REPLY, 0);
+        assert_eq!(entry.last_seen, 2_000);
+        assert_eq!(entry.pkt_count, 8);
+        assert_eq!(entry.byte_count, 828);
+    }
+
+    #[test]
+    fn tc_ct_concurrency_hit_counters_wrap_without_layout_change() {
+        let mut entry = ct_concurrency_fixture();
+        entry.pkt_count = u64::MAX;
+        entry.byte_count = u64::MAX - 7;
+        ct_apply_confirmed_hit(&mut entry, 2_000, 16, true);
+        assert_eq!(entry.pkt_count, 0);
+        assert_eq!(entry.byte_count, 8);
+        assert_eq!(core::mem::size_of::<CtValue>(), 40);
+    }
+
     #[test]
     fn ct_policy_hit_uses_an_unused_flag_without_layout_change() {
         assert_eq!(CT_FLAG_POLICY_HIT, 2);
