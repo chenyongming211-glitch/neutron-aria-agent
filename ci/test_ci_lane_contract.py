@@ -10,6 +10,25 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "buil
 STAGE_ONE = Path(__file__).with_name("check_neutron_stage1.py")
 CHECKOUT_NODE24 = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 CACHE_NODE24 = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+QUALITY_CONDITION = (
+    "github.event_name == 'schedule' || "
+    "(github.event_name == 'workflow_dispatch' && "
+    "inputs.run_quality_audit == true)"
+)
+RUST_WORKSPACE_TEST = (
+    "cargo +stable test --workspace --exclude ebpf-firewall "
+    "--all-targets --locked"
+)
+RUST_WORKSPACE_CLIPPY = (
+    "cargo +stable clippy --workspace --exclude ebpf-firewall "
+    "--all-targets --locked -- -D warnings"
+)
+RUST_WORKSPACE_FMT = "cargo +stable fmt --all -- --check"
+RUFF_COMMAND = "ruff check --select E9,F63,F7,F82 ci openstack"
+SHELLCHECK_COMMAND = (
+    "git ls-files -z '*.sh' | "
+    "xargs -0 --no-run-if-empty shellcheck"
+)
 
 
 def job_block(source: str, job: str) -> str:
@@ -90,6 +109,49 @@ class CiLaneContractTests(unittest.TestCase):
         build = job_block(self.source, "rust-build")
         self.assertRegex(build, r"\bcargo\s+\+[^\n]*\bbuild\b")
         self.assertNotRegex(build, r"\bcargo\s+\+[^\n]*\btest\b")
+
+    def test_quality_audit_input_is_explicitly_opt_in(self):
+        self.assertRegex(
+            self.source,
+            r"(?ms)^      run_quality_audit:\n"
+            r"        description: .+\n"
+            r"        required: false\n"
+            r"        default: false\n"
+            r"        type: boolean$",
+        )
+
+    def test_quality_jobs_are_independent_and_share_the_exact_trigger(self):
+        for name in ["quality-rust", "quality-scripts"]:
+            block = job_block(self.source, name)
+            self.assertIn("if: " + QUALITY_CONDITION, block)
+            self.assertNotRegex(block, r"(?m)^    needs:")
+
+        release = job_block(self.source, "release")
+        self.assertNotIn("quality-rust", release)
+        self.assertNotIn("quality-scripts", release)
+
+    def test_quality_rust_has_the_broad_host_commands(self):
+        block = job_block(self.source, "quality-rust")
+        for command in [
+            RUST_WORKSPACE_TEST,
+            RUST_WORKSPACE_CLIPPY,
+            RUST_WORKSPACE_FMT,
+        ]:
+            self.assertIn(command, block)
+        self.assertNotIn("--exclude aria-", block)
+        self.assertNotIn("continue-on-error", block)
+        self.assertNotIn("|| true", block)
+
+    def test_quality_scripts_is_cargo_free_and_uses_pinned_correctness_tools(self):
+        block = job_block(self.source, "quality-scripts")
+        self.assertIn("ruff==0.16.0", block)
+        self.assertIn("ruff --version", block)
+        self.assertIn("shellcheck --version", block)
+        self.assertIn(RUFF_COMMAND, block)
+        self.assertIn(SHELLCHECK_COMMAND, block)
+        self.assertNotRegex(block, r"\bcargo\b")
+        self.assertNotIn("continue-on-error", block)
+        self.assertNotIn("|| true", block)
 
 
 if __name__ == "__main__":
