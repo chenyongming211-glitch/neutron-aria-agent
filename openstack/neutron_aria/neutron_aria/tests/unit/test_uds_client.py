@@ -1835,6 +1835,33 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
             parsed["counters"]["ports"][0]["port_id"], "port-counters-1"
         )
 
+    def test_status_v3_malformed_counters_are_contained_as_counter_error(self):
+        from neutron_aria.agent.uds_client import _decode_status_v3
+        scenario = status_v3_scenario("counters-present-single-port")
+        invalid_sections = [
+            [],
+            {"counters_schema_version": 2, "sampled_at_ms": 2000, "ports": []},
+            {"counters_schema_version": 1, "sampled_at_ms": -1, "ports": []},
+            {"counters_schema_version": 1, "sampled_at_ms": 2000, "ports": "bad"},
+            {
+                "counters_schema_version": 1,
+                "sampled_at_ms": 2000,
+                "ports": [{"port_id": "p1", "tap_id": 7,
+                           "policy_packets": -1}],
+            },
+        ]
+        for invalid in invalid_sections:
+            status = copy.deepcopy(scenario["status"])
+            status["counters"] = invalid
+            with self.subTest(counters=invalid):
+                parsed = _decode_status_v3(status)
+                self.assertEqual(parsed["transaction_state"], "blocked")
+                self.assertEqual(parsed["counters"]["ports"], [])
+                self.assertIn(
+                    "invalid_counters_v1",
+                    parsed["counters"]["counters_error"],
+                )
+
     def test_status_v3_without_counters_still_decodes(self):
         from neutron_aria.agent.uds_client import _decode_status_v3
         scenario = status_v3_scenario("counters-absent-legacy-datapath")

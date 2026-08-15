@@ -1012,6 +1012,41 @@ class CountersReportTestCase(unittest.TestCase):
         blob = port_counters_blob(runtime, "missing-port")
         self.assertEqual(blob, {"counters_error": "port_not_sampled"})
 
+    def test_malformed_counters_do_not_suppress_ordinary_heartbeat(self):
+        runtime = self._runtime(with_counters=True)
+        runtime.last_counters = {
+            "counters_schema_version": 1,
+            "sampled_at_ms": 2000,
+            "ports": ["malformed-port-row"],
+        }
+        runtime.last_port_statuses = [{
+            "port_id": "p1",
+            "status": "ready",
+            "domains": [{
+                "domain": "acl",
+                "status": "ready",
+                "effective_action": "enforce",
+            }],
+        }]
+        report_state = FakeReportStateApi()
+        aria_acl_api = FakeAriaAclApi()
+        reporter = CompositeStatusReporter(
+            NeutronStatusReporter(report_state, context="ctx", host="h"),
+            AriaAclPortStatusReporter(
+                aria_acl_api,
+                context="ctx",
+                host="h",
+                counters_report_enabled=True,
+            ),
+        )
+
+        reporter.report(runtime)
+
+        self.assertEqual(len(report_state.calls), 1)
+        self.assertEqual(len(aria_acl_api.statuses), 1)
+        payload = aria_acl_api.statuses[0][1]["aria_acl_port_status"]
+        self.assertIn("invalid_counters_v1", payload["counters_error"])
+
     def test_port_counters_blob_diffs_drop_pps_from_summary(self):
         from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
         from neutron_aria.agent.status_reporter import port_counters_blob

@@ -827,7 +827,10 @@ mod tests {
     fn tap_runtimes_return_empty_without_instances() {
         let root = temp_root("tap-runtimes-empty");
         let registry = test_registry(&root);
-        assert!(registry.tap_runtimes_now().is_empty());
+        assert!(registry
+            .tap_runtimes_now()
+            .expect("empty runtime snapshot should remain readable")
+            .is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -852,10 +855,43 @@ mod tests {
             .write()
             .await
             .insert(ifname.to_string(), instance);
-        let runtimes = registry.tap_runtimes_now();
+        let runtimes = registry
+            .tap_runtimes_now()
+            .expect("assigned runtime snapshot should succeed");
         let (tap_id, runtime_state_path) = runtimes.get(ifname).expect("runtime snapshot");
         assert_eq!(*tap_id, 7);
         assert_eq!(runtime_state_path, &state_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tap_runtimes_surface_corrupt_persisted_tap_state() {
+        let root = temp_root("tap-runtimes-corrupt-state");
+        let registry = test_registry(&root);
+        let ifname = "tap-corrupt-state";
+        let state_path = registry.base_state_path.join(ifname);
+        std::fs::create_dir_all(&state_path).expect("test state directory");
+        std::fs::write(state_path.join("state.json"), b"not-json")
+            .expect("corrupt test state");
+        let instance = FirewallInstance::new(
+            ifname,
+            PathBuf::from(registry.control_plane.managed_pin_path()),
+            state_path,
+            true,
+            registry.control_plane.trace_map_mode(),
+        );
+        registry
+            .instances
+            .write()
+            .await
+            .insert(ifname.to_string(), instance);
+
+        let error = registry
+            .tap_runtimes_now()
+            .expect_err("corrupt attached tap state must not look absent");
+
+        assert!(error.contains("tap-corrupt-state"));
+        assert!(error.contains("parse state file"));
         let _ = std::fs::remove_dir_all(root);
     }
 

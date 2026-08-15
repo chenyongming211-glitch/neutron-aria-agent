@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import inspect
+import datetime
 import json
 import os
 import re
@@ -2248,6 +2249,42 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertIsNone(status["counters_sampled_at"])
         self.assertEqual(repository.get_port_counters("p1", host="h1"), [])
 
+    def test_clean_counter_absence_clears_previous_detail_rows(self):
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        plugin.report_aria_acl_port_status(None, {
+            "aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_sampled_at_ms": 2000000,
+                "counters_rows": [{
+                    "port_id": "p1",
+                    "summary": {"policy_packets": 1},
+                    "rows": [{
+                        "kind": "bucket",
+                        "key": {"src_id": 1, "dst_id": 2,
+                                "proto": 6, "direction": 0},
+                        "packets": 1,
+                        "bytes": 10,
+                    }],
+                }],
+            },
+        })
+        self.assertEqual(
+            len(repository.get_port_counters("p1", host="h1")), 1
+        )
+
+        plugin.report_aria_acl_port_status(None, {
+            "aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+            },
+        })
+
+        self.assertEqual(repository.get_port_counters("p1", host="h1"), [])
+
     def test_report_port_status_keeps_last_good_on_counter_error(self):
         repository = InMemoryAriaAclRepository()
         plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
@@ -2264,7 +2301,12 @@ class AriaAclPluginTestCase(unittest.TestCase):
                     "reset_detected": False,
                     "drop_pps": 10.0,
                     "summary": {"policy_packets": 100},
-                    "rows": [],
+                    "rows": [{
+                        "kind": "reason",
+                        "key": {"reason": 1, "direction": 0, "proto": 6},
+                        "packets": 10,
+                        "bytes": 100,
+                    }],
                 }],
             }},
         )
@@ -2281,6 +2323,65 @@ class AriaAclPluginTestCase(unittest.TestCase):
         # Last good snapshot is preserved, not cleared.
         self.assertEqual(status["counters_policy_packets"], 100)
         self.assertIn("counters_sampled_at", status)
+        self.assertEqual(
+            len(repository.get_port_counters("p1", host="h1")), 1
+        )
+
+    def test_sqlite_repository_accepts_counter_datetime_status(self):
+        fd, path = tempfile.mkstemp(prefix="aria-acl-counter-status-", suffix=".db")
+        os.close(fd)
+        try:
+            repository = SqliteAriaAclRepository(path)
+            sampled_at = datetime.datetime(2026, 8, 15, 10, 30, 0)
+
+            repository.upsert_port_status({
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_sampled_at": sampled_at,
+            })
+            status = repository.get_port_status("p1", host="h1")
+
+            self.assertEqual(status["counters_sampled_at"], sampled_at)
+            repository.close()
+        finally:
+            os.unlink(path)
+
+    def test_sqlite_counter_rows_replace_clear_and_sort_by_natural_key(self):
+        fd, path = tempfile.mkstemp(prefix="aria-acl-counter-rows-", suffix=".db")
+        os.close(fd)
+        try:
+            repository = SqliteAriaAclRepository(path)
+            sampled_at = datetime.datetime(2026, 8, 15, 10, 30, 0)
+            rows = [{
+                "kind": "reason",
+                "reason": 9,
+                "direction": "ingress",
+                "proto": 17,
+                "packets": 2,
+                "bytes": 20,
+                "sampled_at": sampled_at,
+            }, {
+                "kind": "bucket",
+                "src_id": 1,
+                "dst_id": 2,
+                "direction": "ingress",
+                "proto": 6,
+                "packets": 1,
+                "bytes": 10,
+                "sampled_at": sampled_at,
+            }]
+
+            repository.upsert_port_counters("p1", "h1", rows)
+            stored = repository.get_port_counters("p1", host="h1")
+            self.assertEqual([row["kind"] for row in stored], ["bucket", "reason"])
+            self.assertEqual(stored[0]["sampled_at"], sampled_at)
+
+            repository.upsert_port_counters("p1", "h1", [])
+            self.assertEqual(repository.get_port_counters("p1", host="h1"), [])
+            repository.close()
+        finally:
+            os.unlink(path)
 
     def test_report_port_status_counter_persistence_failure_is_swallowed(self):
         class FailingCountersRepository(InMemoryAriaAclRepository):

@@ -348,6 +348,8 @@ class AriaAclCliTest(unittest.TestCase):
                 return {"aria_acl_port_status": {
                     "id": resource_id,
                     "port_id": "port-1",
+                    "aria_acl_port_counters": [{"kind": "reason"}],
+                    "aria_acl_port_group_map": {"1": ["10.0.0.0/24"]},
                 }}
 
         command = aria_acl.AriaAclPortStatusShow(FakeApp(FakeClient()), None)
@@ -357,6 +359,34 @@ class AriaAclCliTest(unittest.TestCase):
         rows = self._show_result(command.execute(parsed_args))
         self.assertEqual(rows["port_id"], "port-1")
         self.assertNotIn("counters.bucket[1]", rows)
+        self.assertNotIn("aria_acl_port_counters", rows)
+        self.assertNotIn("aria_acl_port_group_map", rows)
+
+    def test_status_show_unknown_reason_preserves_numeric_identity(self):
+        class FakeClient(object):
+            def show_ext(self, path, resource_id):
+                return {"aria_acl_port_status": {
+                    "id": resource_id,
+                    "port_id": "port-1",
+                    "aria_acl_port_counters": [{
+                        "kind": "reason",
+                        "reason": 250,
+                        "direction": 0,
+                        "packets": 1,
+                        "bytes": 10,
+                        "pps": None,
+                        "bps": None,
+                    }],
+                }}
+
+        command = aria_acl.AriaAclPortStatusShow(FakeApp(FakeClient()), None)
+        parsed_args = command.get_parser("aria-acl-port-status-show").parse_args([
+            "status-1",
+            "--counters",
+        ])
+        rows = self._show_result(command.execute(parsed_args))
+
+        self.assertIn("reason=UNKNOWN(250)", rows["counters.reason[1]"])
 
     def test_policy_parser_rejects_default_deny(self):
         parser = argparse.ArgumentParser()

@@ -341,4 +341,22 @@ mod tests {
         let summaries = read_port_counters("/nonexistent/pin/path", &[7]).unwrap();
         assert!(summaries.is_empty());
     }
+
+    #[test]
+    fn port_counters_pin_missing_recognizes_bpf_obj_get_enoent() {
+        let error = MapError::SyscallError(aya::sys::SyscallError {
+            call: "BPF_OBJ_GET",
+            io_error: std::io::Error::from(std::io::ErrorKind::NotFound),
+        });
+
+        assert!(pin_missing(&error));
+    }
+
+    #[test]
+    fn port_counters_map_iteration_error_is_not_partial_success() {
+        let result: Result<(u32, u64), String> =
+            counter_map_item("RULE_STATS", Err(MapError::KeyNotFound));
+
+        assert!(result.unwrap_err().contains("iterate RULE_STATS"));
+    }
 }

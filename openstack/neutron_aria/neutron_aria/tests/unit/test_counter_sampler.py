@@ -9,6 +9,7 @@ from neutron_aria.agent.counter_sampler import diff_port_counters
 class CounterSamplerTestCase(unittest.TestCase):
     def _port(self, packets, dropped, sampled):
         return {
+            "tap_id": 7,
             "policy_packets": packets,
             "policy_bytes": packets * 10,
             "policy_allow_packets": packets - dropped,
@@ -96,6 +97,53 @@ class CounterSamplerTestCase(unittest.TestCase):
         self.assertTrue(reset)
         for row in rows:
             self.assertIsNone(row["pps"])
+
+    def test_decrease_in_any_summary_component_resets_the_sample(self):
+        omitted_fields = (
+            "policy_bytes",
+            "policy_allow_packets",
+            "policy_dropped_bytes",
+            "drop_bytes",
+        )
+        for field in omitted_fields:
+            previous = self._port(100, 10, 1000)
+            current = self._port(120, 15, 2000)
+            current[field] = previous[field] - 1
+            with self.subTest(field=field):
+                rows, reset = diff_port_counters(previous, current)
+                self.assertTrue(reset)
+                self.assertTrue(all(row["pps"] is None for row in rows))
+                self.assertTrue(all(row["bps"] is None for row in rows))
+
+    def test_decrease_in_bucket_drop_component_resets_the_sample(self):
+        previous = self._port(100, 10, 1000)
+        current = self._port(120, 15, 2000)
+        current["buckets"][0]["dropped_packets"] = 9
+        current["buckets"][0]["dropped_bytes"] = 90
+
+        rows, reset = diff_port_counters(previous, current)
+
+        self.assertTrue(reset)
+        self.assertTrue(all(row["pps"] is None for row in rows))
+
+    def test_tap_id_change_resets_the_sample(self):
+        previous = self._port(100, 10, 1000)
+        current = self._port(120, 15, 2000)
+        current["tap_id"] = 8
+
+        rows, reset = diff_port_counters(previous, current)
+
+        self.assertTrue(reset)
+        self.assertTrue(all(row["pps"] is None for row in rows))
+
+    def test_non_increasing_sample_time_resets_the_sample(self):
+        previous = self._port(100, 10, 1000)
+        current = self._port(120, 15, 1000)
+
+        rows, reset = diff_port_counters(previous, current)
+
+        self.assertTrue(reset)
+        self.assertTrue(all(row["pps"] is None for row in rows))
 
     def test_bucket_rows_are_capped_at_512(self):
         current = self._port(100, 10, 1000)

@@ -89,6 +89,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-core", "scrub_iteration_"],
     ["test", "--locked", "-p", "aria-core", "ct_contract_stats_iteration_"],
     ["test", "--locked", "-p", "aria-core", "port_counters_"],
+    ["test", "--locked", "-p", "aria-agent", "tap_runtimes_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_status_counters_"],
     ["test", "--locked", "-p", "aria-core", "wal_inventory_"],
     ["test", "--locked", "-p", "aria-agent", "local_projection_"],
@@ -112,6 +113,14 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_first_snapshot_has_no_rates",
     "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
     "test_negative_delta_is_reset_and_rates_are_none",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_decrease_in_any_summary_component_resets_the_sample",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_decrease_in_bucket_drop_component_resets_the_sample",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_tap_id_change_resets_the_sample",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_non_increasing_sample_time_resets_the_sample",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
     "test_full_resync_builds_and_submits_snapshot",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
@@ -132,6 +141,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_rest_reporter_attaches_counters_only_when_enabled",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
     "test_port_counters_blob_reports_datapath_error_marker",
+    "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
+    "test_malformed_counters_do_not_suppress_ordinary_heartbeat",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
     "test_capabilities_validates_required_domains",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
@@ -140,6 +151,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_status_v3_counters_section_is_preserved",
     "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
     "test_status_v3_without_counters_still_decodes",
+    "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
+    "test_status_v3_malformed_counters_are_contained_as_counter_error",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
     "test_legacy_port_read_wrapper_batches_projection_and_preserves_fields",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
@@ -152,6 +165,12 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_report_port_status_counter_persistence_failure_is_swallowed",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
     "test_report_port_status_keeps_last_good_on_counter_error",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_clean_counter_absence_clears_previous_detail_rows",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_sqlite_repository_accepts_counter_datetime_status",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_sqlite_counter_rows_replace_clear_and_sort_by_natural_key",
 )
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
