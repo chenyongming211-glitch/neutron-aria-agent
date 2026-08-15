@@ -1,6 +1,7 @@
 # ACL Explainability Counter Pipeline Design
 
-**Status:** design approved 2026-08-15; pre-implementation
+**Status:** implementation and hosted CI complete 2026-08-15; privileged field
+evidence deferred/pending; production gate remains default-off
 
 **Scope:** Phase B of `docs/openstack-ebpf-platform-roadmap.md` — per-rule hit/drop
 counters, drop-reason vocabulary, and per-port metrics for the Neutron-managed
@@ -43,10 +44,12 @@ eBPF maps (unchanged)
   DROP_REASON_STATS  per DropKey:   packets/bytes/last_seen
         │ read-only
 aria-datapath (core/src/monitoring.rs + drop_ops.rs already read these maps)
-        │ UDS status response gains an optional read-only `counters` section
-        │ (same route, same peercred policy)
+        │ an explicit UDS status query gains an optional read-only `counters`
+        │ section (same route and peercred policy; ordinary status/readiness
+        │ responses never scan or serialize counters)
 neutron-aria-agent
-  each heartbeat cycle: fetch status+counters -> difference vs previous cycle
+  when counters_report_enabled=true: explicitly fetch status+counters during
+  each heartbeat cycle -> difference vs previous cycle
   -> compute pps/bps -> carry the datapath-provided group id -> CIDR map
   -> attach counters payload to the per-port status report
   (report_aria_acl_port_status, emitted within the same heartbeat cycle)
@@ -66,10 +69,17 @@ Principles:
 
 - Data plane untouched; the only new code paths are read-only aggregations and
   payload plumbing.
-- Payload is bounded: per-port bucket rows are capped at 512 plus the fixed
-  reason enumeration; overflow sets `truncated=true` and never fails the
-  heartbeat (UDS body budget of 1 MiB and heartbeat budgets stay enforced).
+- Payload is bounded twice: per-port bucket rows are capped at 512 plus the
+  fixed reason enumeration, and the complete optional counters section is
+  limited by the remaining 1 MiB UDS response budget with 64 KiB reserved for
+  encoding headroom. If the section cannot fit, it is replaced by an empty
+  `counters_response_budget_exceeded` error section. The ordinary status and
+  readiness responses remain counter-free.
 - Counters are best-effort and can never degrade ACL apply or status.
+- With `counters_report_enabled=false`, the Python agent never requests the
+  counters view and the Rust status/readiness path performs no counter map
+  scan. A failure of the explicit counters read is logged and retains the last
+  good counter snapshot; it does not latch ACL writes closed.
 
 ## 5. Counting Semantics (normative)
 
@@ -152,6 +162,13 @@ Upsert policy: each report replaces all rows for the port in one transaction
 extension point: QoS/Mirror/flow counters become new `kind` values without a
 schema change.
 
+Existing deployments are upgraded by Alembic revision `a4e7c2d9b610`, whose
+parent is the write-invariant revision `f61a2c4e7b90`. It adds the nullable
+status columns, creates `aria_acl_port_counters`, preserves existing status
+rows, and is idempotent when invoked through the runtime migration bridge. The
+historical initial migration is intentionally unchanged so an already-created
+database cannot be mistaken for an upgraded one.
+
 The DB stores numeric ids only. Display-layer translation is carried
 alongside the counters: the datapath reads its per-tap group registry
 (`StateManager::list_groups`) and ships the id -> CIDR map in the counters
@@ -200,9 +217,12 @@ dedicated group-name table remains out of scope.
 
 ## 10. Failure Semantics
 
-- Map read failure or aggregation failure: heartbeat continues with the normal
-  status payload plus `counters_error` (one field); server keeps the last good
-  snapshot and marks it stale by `counters_sampled_at` age.
+- Map read, aggregation, or explicit counters-response failure: the ordinary
+  status contract remains readable, ACL writes remain governed only by that
+  ordinary contract, and the agent keeps the last good counter snapshot. A
+  successfully encoded counter error is carried in `counters_error`; an
+  oversized section is reduced to
+  `counters_response_budget_exceeded` with no port rows.
 - Counter truncation, resets, or absence never change `runtime_status`,
   `effective_action`, or OVS forwarding.
 - No new blocking paths: any counters bug is containable to the counters fields.
@@ -230,6 +250,10 @@ CI (must pass before merge):
   counter-less datapath fallback.
 - agent diff/rate math with synthetic clock data, including first-snapshot nulls.
 - server DB upsert-replace atomicity and cascade cleanup on port delete.
+- upgrade from the pre-counter write-invariant schema, including existing row
+  preservation and repeated-upgrade idempotency.
+- ordinary status/readiness omission of counters and explicit counters-query
+  enforcement of the complete 1 MiB response budget.
 - CLI rendering: reason names, group names, `--counters` expansion.
 
 Field acceptance: recorded as deferred/pending until a real three-compute

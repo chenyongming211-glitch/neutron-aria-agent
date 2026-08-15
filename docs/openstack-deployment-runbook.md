@@ -70,13 +70,18 @@ socket_path = /run/aria/aria-agent.sock
 source = disabled
 ```
 
-`counters_report_enabled` gates the ACL explainability counter pipeline
-(status v3 counters section, heartbeat counter rows, `aria_acl_port_counters`).
-It must stay `false` until field RED/GREEN evidence for the counter pipeline is
-recorded; CI exercises the pipeline with fixtures regardless. Enablement
-procedure: record evidence in `docs/evidence` following the AGENTS.md
-deferred/pending rules, set `counters_report_enabled = true` on the three
-compute agents, restart `neutron-aria-agent`, then verify
+`counters_report_enabled` gates the ACL explainability counter pipeline. When
+it is `false`, ordinary UDS status/readiness responses contain no counters and
+perform no counter-map scan. When enabled, the Python agent explicitly requests
+the optional bounded status-v3 counters view, then reports heartbeat counter
+rows for `aria_acl_port_counters`. An oversized counters view degrades to
+`counters_response_budget_exceeded`; it never blocks the ordinary ACL status
+contract or ACL writes. The option must stay `false` until field RED/GREEN
+evidence for the counter pipeline is recorded; CI exercises the pipeline with
+fixtures regardless. Enablement procedure: record evidence in `docs/evidence`
+following the AGENTS.md deferred/pending rules, set
+`counters_report_enabled = true` on the three compute agents, restart
+`neutron-aria-agent`, then verify
 `neutron aria-acl-port-status-show <port> --counters` reports bucket/reason
 rows with non-null `sampled_at`.
 

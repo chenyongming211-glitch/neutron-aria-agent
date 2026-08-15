@@ -2,9 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Execution status (2026-08-15):** functional implementation and hosted CI are
+complete; privileged field evidence remains deferred/pending and the feature
+remains default-off. The unchecked task steps below are the preserved original
+execution recipe, not the current delivery-state register. Post-review
+corrections supersede the original Task 3 and Task 9 mechanics as recorded
+below.
+
 **Goal:** Deliver the Phase B ACL explainability pipeline from `docs/superpowers/specs/2026-08-15-acl-explainability-counters-design.md`: minute-fresh per-port and per-policy-bucket allow/drop counters plus drop-reason distribution, carried from eBPF maps through the UDS status v3 optional counters section, the neutron-aria-agent heartbeat, and into `aria_acl_port_statuses` + a new `aria_acl_port_counters` table with an admin-only CLI view.
 
-**Architecture:** Zero eBPF data-plane changes. A new Rust aggregation module (`aria-core`) reads the existing `RULE_STATS`/`DROP_REASON_STATS` maps once per status request and attaches an optional, versioned `counters` section to the UDS status response (schema v3, backward compatible). The Python agent samples that section each heartbeat, differences consecutive snapshots to produce pps/bps with reset detection, and forwards bounded rows through the existing RPC heartbeat; the server persists the latest snapshot and the CLI renders it.
+**Architecture:** Zero eBPF data-plane changes. A new Rust aggregation module (`aria-core`) reads the existing `RULE_STATS`/`DROP_REASON_STATS` maps only for an explicit counters query and attaches an optional, versioned, response-budgeted `counters` section to the UDS status response (schema v3, backward compatible). Ordinary status/readiness calls remain counter-free. When enabled, the Python agent samples that explicit view each heartbeat, differences consecutive snapshots to produce pps/bps with reset detection, and forwards bounded rows through the existing RPC heartbeat; the server persists the latest snapshot and the CLI renders it.
 
 **Tech Stack:** Rust (axum UDS, aya map reads), Python 2/3-compatible neutron-aria-agent (stdlib unittest), Neutron server plugin (SQLAlchemy), neutronclient CLI, `ci/check_neutron_stage1.py` contract checker.
 
@@ -16,6 +23,8 @@
 - The counting-semantics rules from the spec §5 are normative: policy view and drop view are **never summed**; bucket drop ⊆ reason drop; `allow = packets − dropped` only inside the policy view.
 - v1 gate: agent config `counters_report_enabled` defaults to **false**; CI exercises the pipeline with fixtures regardless.
 - Payload caps: 512 bucket rows per port, fixed reason enumeration; overflow → `truncated=true`.
+- Complete counters responses also fit within the existing 1 MiB UDS response
+  contract. Oversize counters degrade independently and never latch ACL writes.
 - All existing status semantics (transaction state, readiness, port projection) must remain byte-identical when the counters section is absent.
 - Keep the files Python 2/3 compatible (`from __future__ import absolute_import`, `basestring` guard) matching `neutron_aria/agent/*.py`.
 
@@ -1579,6 +1588,26 @@ git add docs/acl-drop-reason-dictionary.md docs/openstack-ebpf-platform-roadmap.
 git commit -m "docs: ACL explainability drop-reason dictionary and doc alignment"
 git push origin v0.9-neutron-agent
 ```
+
+---
+
+## Post-review implementation corrections
+
+- **Task 3 status isolation:** the ordinary `/api/v1/neutron/status` and
+  `/readyz` paths do not clone managed ports, read state files, or iterate
+  counter maps. The opt-in agent path requests
+  `/api/v1/neutron/status?include_counters=1`; a counters-only failure retains
+  the last good sample without changing the ACL status-contract write latch.
+- **Task 3 global capacity:** after the 512-row per-port cap, the full counters
+  section is serialized against the remaining 1 MiB response allowance with
+  64 KiB headroom. Oversize output becomes an empty
+  `counters_response_budget_exceeded` section; a final whole-response guard
+  removes the optional section if the base response itself consumes the limit.
+- **Task 9 deployed-schema upgrade:** counters schema is not folded only into
+  the historical initial migration. Revision `a4e7c2d9b610`, following
+  `f61a2c4e7b90`, upgrades existing databases, preserves status rows, and is
+  idempotent through the runtime migration bridge. The DB contract lane runs
+  this old-schema upgrade path explicitly.
 
 ---
 
