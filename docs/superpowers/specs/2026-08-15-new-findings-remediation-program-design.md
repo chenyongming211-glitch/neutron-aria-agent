@@ -1,6 +1,6 @@
 # New-Findings Remediation Program Design
 
-Status: approved plan; Batches 1-3 complete (2026-08-15), Batches 4-5 pending
+Status: approved plan; Batches 1-4 complete (2026-08-15), Batch 5 pending
 
 Date: 2026-08-15
 
@@ -198,7 +198,7 @@ baseline established by Batches 1–4:
 Batch 1  ACL-106 + ACL-107   Python agent, user-visible P2 fast wins   DONE
 Batch 2  ACL-108 + ACL-109 + ACL-110 + TXN-038   Python robustness    DONE
 Batch 3  ACL-101 + ACL-102 + TXN-037             Rust core ERROR-EXACT DONE
-Batch 4  ACL-104 + ACL-105                       eBPF fragment attribution
+Batch 4  ACL-104 + ACL-105                       eBPF fragment attribution DONE
 Batch 5  TXN-036 + ACL-100                       transaction/status projection
 ```
 
@@ -226,6 +226,15 @@ failed rust-behavior only on the four missing-interface errors; GREEN
 with all jobs green. The parallel Phase B line shared the branch during this
 batch; the multi-session coordination rules in `AGENTS.md` record the
 attribution protocol used to isolate this batch's evidence.
+
+Batch 4 closed 2026-08-15: RED `97b12d6` / Build
+[31866487502](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31866487502)
+failed fast-contracts on the missing trace-refresh call site and
+rust-behavior on the missing abi helper; GREEN `db5297a` + `e895ef6` +
+`edab3e1` passed exact-head Build
+[31867137312](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31867137312)
+with all jobs green, including the nightly eBPF build and the 448-byte
+stack budget. Target-kernel observation stays deferred.
 
 The order fixes the two user-visible P2 rows first, then completes the
 same-language Python hardening, then the core error-propagation family, then
