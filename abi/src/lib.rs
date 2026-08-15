@@ -158,7 +158,9 @@ pub fn ct_snapshot_is_stable(first: &CtValue, second: Option<&CtValue>) -> bool 
         && first.matched_src_id == second.matched_src_id
         && first.matched_dst_id == second.matched_dst_id
         && first.matched_bank == second.matched_bank
-        && first._pad == second._pad
+        && first._pad[0] == second._pad[0]
+        && first._pad[1] == second._pad[1]
+        && first._pad[2] == second._pad[2]
         && first.last_seen == second.last_seen
         && first.pkt_count == second.pkt_count
         && first.byte_count == second.byte_count

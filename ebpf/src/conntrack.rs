@@ -140,7 +140,9 @@ unsafe fn copy_ct_value(dst: *mut CtValue, src: *const CtValue) {
     (*dst).matched_src_id = (*src).matched_src_id;
     (*dst).matched_dst_id = (*src).matched_dst_id;
     (*dst).matched_bank = (*src).matched_bank;
-    (*dst)._pad = (*src)._pad;
+    (*dst)._pad[0] = (*src)._pad[0];
+    (*dst)._pad[1] = (*src)._pad[1];
+    (*dst)._pad[2] = (*src)._pad[2];
     (*dst).last_seen = (*src).last_seen;
     (*dst).pkt_count = (*src).pkt_count;
     (*dst).byte_count = (*src).byte_count;
