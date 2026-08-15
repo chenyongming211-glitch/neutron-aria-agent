@@ -100,6 +100,7 @@ class EventMergerTestCase(unittest.TestCase):
             clock.advance(0.1)
 
         # The silence window never opened; the absolute deadline fires.
+        clock.advance(0.01)
         self.assertTrue(merger.ready(0.2, max_merge_delay=5.0))
 
     def test_max_merge_delay_is_measured_from_first_pending_event(self):

@@ -13,6 +13,7 @@ DEFAULT_REPORT_INTERVAL = 30
 DEFAULT_HEARTBEAT_DETAIL_MODE = "summary_only"
 DEFAULT_PORT_SOURCE = "disabled"
 DEFAULT_EVENT_MERGE_INTERVAL = 0.2
+DEFAULT_EVENT_MAX_MERGE_DELAY = 5.0
 DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
 DEFAULT_EVENT_QUEUE_MAX_NETWORKS = 1000
 DEFAULT_REVISIONLESS_INCREMENTAL_MODE = "disabled"
@@ -75,6 +76,7 @@ class AgentConfig(object):
         incremental_rpc_enabled=False,
         revisionless_incremental_mode=DEFAULT_REVISIONLESS_INCREMENTAL_MODE,
         event_merge_interval=DEFAULT_EVENT_MERGE_INTERVAL,
+        event_max_merge_delay=DEFAULT_EVENT_MAX_MERGE_DELAY,
         event_queue_max_ports=DEFAULT_EVENT_QUEUE_MAX_PORTS,
         event_queue_max_networks=DEFAULT_EVENT_QUEUE_MAX_NETWORKS,
         acl_source=DEFAULT_ACL_SOURCE,
@@ -109,6 +111,7 @@ class AgentConfig(object):
             revisionless_incremental_mode or DEFAULT_REVISIONLESS_INCREMENTAL_MODE
         ).strip().lower()
         self.event_merge_interval = float(event_merge_interval)
+        self.event_max_merge_delay = float(event_max_merge_delay)
         self.event_queue_max_ports = int(event_queue_max_ports)
         self.event_queue_max_networks = int(event_queue_max_networks)
         self.acl_source = self._normalize_acl_source(acl_source, acl_fixture_path)
@@ -339,6 +342,12 @@ def load_config(path):
             "neutron",
             "event_merge_interval",
             str(DEFAULT_EVENT_MERGE_INTERVAL),
+        ),
+        event_max_merge_delay=_get(
+            parser,
+            "neutron",
+            "event_max_merge_delay",
+            str(DEFAULT_EVENT_MAX_MERGE_DELAY),
         ),
         event_queue_max_ports=_get(
             parser,

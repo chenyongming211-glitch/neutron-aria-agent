@@ -164,11 +164,20 @@ class EventMerger(object):
         with self._lock:
             return self._last_pending_at
 
-    def ready(self, merge_interval):
+    def ready(self, merge_interval, max_merge_delay=None):
         with self._lock:
             if not self._has_pending_locked():
                 return False
-            return self.clock() >= self._last_pending_at + float(merge_interval)
+            now = self.clock()
+            if now >= self._last_pending_at + float(merge_interval):
+                return True
+            if (
+                max_merge_delay is not None and
+                self._first_pending_at is not None and
+                now >= self._first_pending_at + float(max_merge_delay)
+            ):
+                return True
+            return False
 
     def drain(self):
         with self._lock:
@@ -210,7 +219,9 @@ class EventMerger(object):
             len(self._dirty_networks) > self.max_pending_networks
         ):
             self._port_updates = {}
-            self._deleted_ports = set()
+            # Deleted ports are preserved: they represent deletions that must
+            # still reach the datapath, and the drain deadline bounds the set
+            # size even under sustained events.
             self._dirty_networks = set()
             self._full_resync = True
             self._overflowed = True

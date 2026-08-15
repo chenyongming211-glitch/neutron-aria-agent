@@ -41,6 +41,7 @@ class AgentService(object):
         resync_backoff_max=300,
         event_merger=None,
         event_merge_interval=0.2,
+        event_max_merge_delay=5.0,
         incremental_rpc_enabled=False,
         revisionless_incremental_mode=REVISIONLESS_INCREMENTAL_DISABLED,
         clock=None,
@@ -62,6 +63,7 @@ class AgentService(object):
         self.current_resync_backoff = 0
         self.event_merger = event_merger
         self.event_merge_interval = float(event_merge_interval)
+        self.event_max_merge_delay = float(event_max_merge_delay)
         self.clock = clock or time.time
         self.sleeper = sleeper or time.sleep
         self.initialized = False
@@ -215,7 +217,10 @@ class AgentService(object):
     def _events_ready(self):
         return (
             self.event_merger is not None and
-            self.event_merger.ready(self.event_merge_interval)
+            self.event_merger.ready(
+                self.event_merge_interval,
+                max_merge_delay=self.event_max_merge_delay,
+            )
         )
 
     def _event_deadline(self):

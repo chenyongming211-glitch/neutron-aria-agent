@@ -318,6 +318,7 @@ def main(argv=None):
         resync_backoff_max=config.resync_backoff_max,
         event_merger=event_merger,
         event_merge_interval=config.event_merge_interval,
+        event_max_merge_delay=config.event_max_merge_delay,
         incremental_rpc_enabled=config.incremental_rpc_enabled,
         revisionless_incremental_mode=config.revisionless_incremental_mode,
     )

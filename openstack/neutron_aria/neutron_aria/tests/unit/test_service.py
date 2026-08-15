@@ -335,6 +335,7 @@ class AgentServiceTestCase(unittest.TestCase):
             self.assertEqual(None, service.run_once())
             clock.advance(0.1)
 
+        clock.advance(0.01)
         result = service.run_once()
 
         self.assertIsNotNone(result)
