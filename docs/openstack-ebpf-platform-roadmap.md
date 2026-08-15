@@ -329,17 +329,21 @@ Goals:
 
 ### Phase B: ACL Explainability
 
-This should be the next product enhancement after ACL hardening.
+This is the next product enhancement after ACL hardening. Status: delivered in
+code and CI gates (2026-08-15); field enablement remains deferred/pending
+behind `counters_report_enabled=false` per AGENTS.md.
 
-Deliver:
+Deliver (design: `docs/superpowers/specs/2026-08-15-acl-explainability-counters-design.md`):
 
-- Per-rule hit count.
-- Per-rule drop count.
-- Per-port allow/drop counters.
-- Drop reason vocabulary.
+- Per-policy-bucket hit count (`RULE_STATS` policy view; buckets shared by
+  multiple Neutron rules are honestly reported as merged counts).
+- Per-policy-bucket drop count (same view's `dropped_*` fields).
+- Per-port allow/drop counters (summary columns on `aria_acl_port_statuses`).
+- Drop reason vocabulary (`docs/acl-drop-reason-dictionary.md`).
 - Runtime status that separates `DomainStatus`, `effective_action`, and support
   disposition.
 - CLI/API view for "why is this VM traffic blocked or bypassed?"
+  (`aria-acl-port-status-show --counters`).
 
 This phase gives immediate product value without expanding into QoS or Mirror.
 

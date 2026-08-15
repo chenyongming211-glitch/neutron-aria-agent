@@ -963,8 +963,25 @@ tap_name                   String nullable
 ifindex                    Integer nullable
 reason                     String nullable
 last_applied_at             DateTime nullable
+counters_sampled_at         DateTime nullable
+counters_policy_packets      BigInteger nullable
+counters_policy_bytes        BigInteger nullable
+counters_policy_allow_packets  BigInteger nullable
+counters_policy_dropped_packets  BigInteger nullable
+counters_policy_dropped_bytes  BigInteger nullable
+counters_policy_pps         Float nullable
+counters_drop_packets        BigInteger nullable
+counters_drop_bytes          BigInteger nullable
+counters_drop_pps           Float nullable
+counters_truncated          Boolean nullable
+counters_reset_detected     Boolean nullable
 updated_at                 DateTime not null
 ```
+
+计数口径（ACL 可解释性 Phase B，详见
+`docs/acl-drop-reason-dictionary.md`）：policy 视图（bucket 级）与 drop 视图
+（按 reason）相互独立、**不得相加成"总流量"**；bucket 的 dropped 计数是
+reason 计数中 ACL 类 reason 的子集，属设计使然。
 
 索引：
 
@@ -988,6 +1005,39 @@ updated_at                 DateTime not null
 - port 迁移到其它 host 后，新 host 上报会覆盖 `host`、`tap_name`、`ifindex` 和 runtime 状态。
 - agent 长时间未上报时，`runtime_status` 不应继续显示为可靠 `applied`；查询层应结合 agent heartbeat 或 `updated_at` 标记为 `unknown` 或 `stale`。
 - 该表不参与策略决策，不能用它反向推导是否应该启用 ACL。
+
+### 6.9 `aria_acl_port_counters`
+
+`aria_acl_port_counters` 保存 ACL 可解释性计数器明细（bucket 行与 reason 行），
+只保留最近一次采样（每次上报按 port 原子 upsert-replace，不保留历史）。
+
+```text
+id                 String(36) primary key
+port_id            String(36) not null
+host               String(255) not null
+kind               Enum bucket/reason not null
+src_id             Integer nullable   (bucket rows)
+dst_id             Integer nullable   (bucket rows)
+proto              Integer nullable   (bucket rows)
+direction          Enum ingress/egress nullable (bucket rows)
+reason             Integer nullable   (reason rows)
+packets            BigInteger not null
+bytes              BigInteger not null
+dropped_packets    BigInteger nullable (bucket rows only)
+dropped_bytes      BigInteger nullable (bucket rows only)
+pps                Float nullable
+bps                Float nullable
+sampled_at         DateTime nullable
+```
+
+设计要点：
+
+- 通用 `kind` 行模型是后续扩展点：QoS/Mirror/flow 计数器以新 `kind` 值接入，
+  不改变表结构。
+- 表内存的是数值 id；bucket 的地址集名称由展示层翻译（v1 不做独立名称表）。
+- 计数器是 best-effort：写失败只记日志，绝不影响 status 写入与 ACL 生效。
+- 生产启用门槛：`counters_report_enabled` 默认 false，待现场 RED/GREEN 证据后
+  放开（现场证据规则见 AGENTS.md deferred/pending）。
 
 ## 7. ACL 生效语义
 

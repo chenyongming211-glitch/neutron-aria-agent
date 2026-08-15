@@ -55,6 +55,7 @@ Before the target environment is fully verified:
 [agent]
 managed_domains = acl
 full_resync_enabled = false
+counters_report_enabled = false
 
 [neutron]
 port_source = disabled
@@ -68,6 +69,16 @@ socket_path = /run/aria/aria-agent.sock
 [acl]
 source = disabled
 ```
+
+`counters_report_enabled` gates the ACL explainability counter pipeline
+(status v3 counters section, heartbeat counter rows, `aria_acl_port_counters`).
+It must stay `false` until field RED/GREEN evidence for the counter pipeline is
+recorded; CI exercises the pipeline with fixtures regardless. Enablement
+procedure: record evidence in `docs/evidence` following the AGENTS.md
+deferred/pending rules, set `counters_report_enabled = true` on the three
+compute agents, restart `neutron-aria-agent`, then verify
+`neutron aria-acl-port-status-show <port> --counters` reports bucket/reason
+rows with non-null `sampled_at`.
 
 Keep the shipped `aria-agent` fragment gate closed as a separate datapath
 configuration boundary:
