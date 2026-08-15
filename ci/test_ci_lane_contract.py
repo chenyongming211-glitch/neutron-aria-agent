@@ -68,6 +68,7 @@ class CiLaneContractTests(unittest.TestCase):
         db_contracts = job_block(self.source, "neutron-db-contracts")
         self.assertIn("ci/requirements-neutron-db-contracts.txt", db_contracts)
         self.assertIn("test_aria_acl_sql_query", db_contracts)
+        self.assertIn("test_aria_acl_counter_migration", db_contracts)
         self.assertIn("PYTHONWARNINGS: error", db_contracts)
         self.assertIn('SQLALCHEMY_WARN_20: "1"', db_contracts)
         self.assertNotRegex(db_contracts, r"\bcargo\b")
