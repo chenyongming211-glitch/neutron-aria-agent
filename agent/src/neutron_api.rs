@@ -14,7 +14,7 @@ use aria_api::{
 use aria_core::port_counters::read_port_counters;
 use axum::{
     extract::DefaultBodyLimit,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -47,6 +47,19 @@ const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
 const RUNTIME_REBUILD_REQUIRED_REASON: &str = "runtime_rebuild_required";
 const OVS_INVENTORY_TIMEOUT: Duration = Duration::from_secs(3);
 const SNAPSHOT_ADMISSION_REVALIDATION_ATTEMPTS: usize = 3;
+const NEUTRON_COUNTERS_RESPONSE_HEADROOM_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Default, Deserialize)]
+struct NeutronStatusQuery {
+    #[serde(default)]
+    include_counters: Option<String>,
+}
+
+impl NeutronStatusQuery {
+    fn counters_requested(&self) -> bool {
+        self.include_counters.as_deref() == Some("1")
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct NeutronApiState {
@@ -1193,7 +1206,10 @@ pub(crate) fn build_router(
             "/api/v1/neutron/capabilities",
             get(get_neutron_capabilities),
         )
-        .route("/api/v1/neutron/status", get(get_neutron_status))
+        .route(
+            "/api/v1/neutron/status",
+            get(get_neutron_status_with_query),
+        )
         .route(
             "/api/v1/neutron/snapshot/recover-pending",
             post(post_neutron_recover_pending),
@@ -2148,12 +2164,7 @@ fn build_neutron_counters_section(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let error_section = |reason: String| NeutronStatusCountersV1 {
-        counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
-        sampled_at_ms,
-        counters_error: Some(reason),
-        ports: Vec::new(),
-    };
+    let error_section = |reason: String| neutron_counters_error(sampled_at_ms, reason);
 
     let (tap_to_port, tap_list) = counters_tap_mapping(ports, tap_ids);
     if tap_list.is_empty() {
@@ -2229,7 +2240,58 @@ fn build_neutron_counters_section(
     })
 }
 
-async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatusV1Response {
+fn neutron_counters_error(sampled_at_ms: u64, reason: String) -> NeutronStatusCountersV1 {
+    NeutronStatusCountersV1 {
+        counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
+        sampled_at_ms,
+        counters_error: Some(reason),
+        ports: Vec::new(),
+    }
+}
+
+fn enforce_neutron_counters_budget(
+    section: NeutronStatusCountersV1,
+    budget: usize,
+) -> NeutronStatusCountersV1 {
+    match serde_json::to_vec(&section) {
+        Ok(encoded) if encoded.len() <= budget => section,
+        _ => neutron_counters_error(
+            section.sampled_at_ms,
+            "counters_response_budget_exceeded".to_string(),
+        ),
+    }
+}
+
+fn enforce_neutron_status_response_budget(
+    mut response: NeutronStatusV1Response,
+) -> NeutronStatusV1Response {
+    let oversized = serde_json::to_vec(&response)
+        .map(|encoded| encoded.len() > NEUTRON_UDS_BODY_MAX_BYTES as usize)
+        .unwrap_or(true);
+    if oversized {
+        let sampled_at_ms = response
+            .counters
+            .as_ref()
+            .map(|section| section.sampled_at_ms)
+            .unwrap_or(0);
+        response.counters = Some(neutron_counters_error(
+            sampled_at_ms,
+            "counters_response_budget_exceeded".to_string(),
+        ));
+        let still_oversized = serde_json::to_vec(&response)
+            .map(|encoded| encoded.len() > NEUTRON_UDS_BODY_MAX_BYTES as usize)
+            .unwrap_or(true);
+        if still_oversized {
+            response.counters = None;
+        }
+    }
+    response
+}
+
+async fn build_neutron_status_response(
+    state: &NeutronApiState,
+    include_counters: bool,
+) -> NeutronStatusV1Response {
     let runtime = state.runtime.read().await;
     let durable_partial_retryable =
         validate_durable_partial_retry_barrier(state, &runtime).is_ok();
@@ -2248,8 +2310,42 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
     } else {
         runtime.authority_state.clone()
     };
-    let counters_ports = runtime.ports.clone();
+    let counters_ports = include_counters.then(|| runtime.ports.clone());
     drop(runtime);
+
+    let active_instances = state.registry.list().await;
+    let mut response = NeutronStatusV1Response {
+        status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
+        status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
+        transaction_state: projection.transaction_state,
+        overall_readiness: projection.overall_readiness,
+        required_action: projection.required_action,
+        recovery_cause: projection.recovery_cause,
+        last_classified_generation: projection.last_classified_generation,
+        generation,
+        accepted_generation,
+        applied_generation,
+        pending_generation,
+        desired_hash,
+        applied_desired_hash,
+        wal_status,
+        wal_replay_failures,
+        authority_state,
+        managed_ports,
+        port_statuses: projection.port_statuses,
+        active_instances,
+        counters: None,
+    };
+
+    let Some(counters_ports) = counters_ports else {
+        return response;
+    };
+    let base_bytes = serde_json::to_vec(&response)
+        .map(|encoded| encoded.len())
+        .unwrap_or(NEUTRON_UDS_BODY_MAX_BYTES as usize);
+    let counter_budget = (NEUTRON_UDS_BODY_MAX_BYTES as usize).saturating_sub(
+        base_bytes.saturating_add(NEUTRON_COUNTERS_RESPONSE_HEADROOM_BYTES),
+    );
 
     // Build the counters section off the async worker: it reads persisted
     // tap-id state files and iterates pinned per-CPU maps, and must not block
@@ -2270,47 +2366,30 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
     })
     .await
     .unwrap_or_else(|join_error| {
-        Some(NeutronStatusCountersV1 {
-            counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
-            sampled_at_ms: SystemTime::now()
+        Some(neutron_counters_error(
+            SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
-            counters_error: Some(format!("counters build task failed: {}", join_error)),
-            ports: Vec::new(),
-        })
+            format!("counters build task failed: {}", join_error),
+        ))
     });
 
-    NeutronStatusV1Response {
-        status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
-        status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
-        transaction_state: projection.transaction_state,
-        overall_readiness: projection.overall_readiness,
-        required_action: projection.required_action,
-        recovery_cause: projection.recovery_cause,
-        last_classified_generation: projection.last_classified_generation,
-        generation,
-        accepted_generation,
-        applied_generation,
-        pending_generation,
-        desired_hash,
-        applied_desired_hash,
-        wal_status,
-        wal_replay_failures,
-        authority_state,
-        managed_ports,
-        port_statuses: projection.port_statuses,
-        active_instances: state.registry.list().await,
-        counters,
-    }
+    response.counters = counters.map(|section| {
+        enforce_neutron_counters_budget(section, counter_budget)
+    });
+    enforce_neutron_status_response_budget(response)
 }
 
-async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {
-    Json(build_neutron_status_response(&state).await)
+async fn get_neutron_status_with_query(
+    State(state): State<NeutronApiState>,
+    Query(query): Query<NeutronStatusQuery>,
+) -> impl IntoResponse {
+    Json(build_neutron_status_response(&state, query.counters_requested()).await)
 }
 
 async fn get_neutron_readiness(State(state): State<NeutronApiState>) -> impl IntoResponse {
-    let response = build_neutron_status_response(&state).await;
+    let response = build_neutron_status_response(&state, false).await;
     let status = if response.overall_readiness == NeutronStatusOverallReadiness::Ready {
         StatusCode::OK
     } else {
@@ -8131,8 +8210,12 @@ mod tests {
             let mut stored_runtime = state.runtime.write().await;
             *stored_runtime = runtime;
         }
-        let status_response =
-            get_neutron_status(State(state.clone())).await.into_response();
+        let status_response = get_neutron_status_with_query(
+            State(state.clone()),
+            Query(NeutronStatusQuery::default()),
+        )
+        .await
+        .into_response();
         let readiness_response = get_neutron_readiness(State(state)).await.into_response();
         let status = response_json_value(status_response).await;
         let readiness = response_json_value(readiness_response).await;

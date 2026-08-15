@@ -148,6 +148,11 @@ def build_synchronizer(
         state_store=SnapshotStateStore(config.state_dir),
         timeout_convergence_attempts=config.timeout_convergence_attempts,
         timeout_convergence_interval=config.timeout_convergence_interval,
+        counters_report_enabled=getattr(
+            config,
+            "counters_report_enabled",
+            False,
+        ),
     )
 
 

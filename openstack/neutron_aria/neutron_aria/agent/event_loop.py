@@ -177,6 +177,7 @@ class SnapshotSynchronizer(object):
         timeout_convergence_attempts=5,
         timeout_convergence_interval=1.0,
         sleeper=None,
+        counters_report_enabled=False,
     ):
         self.host = host
         self.port_source = port_source
@@ -204,6 +205,7 @@ class SnapshotSynchronizer(object):
         self.timeout_convergence_attempts = max(1, int(timeout_convergence_attempts))
         self.timeout_convergence_interval = max(0.0, float(timeout_convergence_interval))
         self.sleeper = sleeper or time.sleep
+        self.counters_report_enabled = bool(counters_report_enabled)
 
     def check_capabilities(self):
         return self.local_client.capabilities(required_domains=self.managed_domains)
@@ -1462,7 +1464,8 @@ class SnapshotSynchronizer(object):
                 **runtime_arguments
             )
         self.runtime_status.update_projection_summary(self.projection_summary())
-        self.runtime_status.last_counters = status.get("counters")
+        if "counters" in status:
+            self.runtime_status.last_counters = status.get("counters")
         return managed_ports
 
     def _raise_if_response_failed(self, response):
@@ -3611,6 +3614,16 @@ class SnapshotSynchronizer(object):
     def report_status(self):
         if self.status_reporter is None:
             return None
+        if self.counters_report_enabled:
+            try:
+                counter_status = self.local_client.counter_status()
+                self.runtime_status.last_counters = counter_status.get("counters")
+            except Exception as exc:
+                LOG.warning(
+                    "counter_status_refresh_failed host=%s error=%s",
+                    self.host,
+                    exc,
+                )
         try:
             agent_state = self.status_reporter.report(self.runtime_status)
             LOG.info(

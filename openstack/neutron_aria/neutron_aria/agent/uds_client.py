@@ -1123,6 +1123,22 @@ class LocalClient(object):
             self._status_contract_fresh_handshake = False
         return decoded
 
+    def counter_status(self):
+        """Read the optional counters view without latching ACL writes closed."""
+        try:
+            body = self._request(
+                "GET",
+                "/api/v1/neutron/status?include_counters=1",
+                contract_response=True,
+            )
+            return _decode_status(body, self._status_contract_mode)
+        except LocalApiContractError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise LocalApiContractError(
+                "invalid counter status response: %s" % exc
+            )
+
     def readiness(self):
         return self._request(
             "GET",
