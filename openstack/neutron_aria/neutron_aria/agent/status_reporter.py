@@ -390,7 +390,9 @@ class AriaAclPortStatusReporter(object):
         payload.setdefault("status", runtime_status.reason)
         if (
             payload.get("status") == "ready" and
-            not payload.get("effective_action")
+            not payload.get("effective_action") and
+            acl_domain is not None and
+            acl_domain.get("status") == "ready"
         ):
             payload["effective_action"] = "enforce"
         if runtime_status.last_error and not payload.get("reason"):
