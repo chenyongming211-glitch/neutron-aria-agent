@@ -38,6 +38,9 @@ tap interface on br-int
 - ACL 不消费 Neutron Security Group、remote group、port security、allowed address pairs，也不承担 Security Group replacement 语义。
 - ACL 不启用 `OVSHybridIptablesFirewallDriver` 链路，不引入 `qbr/qvo/qvb`。
 - Aria 只增强普通虚机 OVS tap 端口，SR-IOV、LinuxBridge 端口和 Neutron 服务端口不纳入 Aria ACL enforcement。
+- Aria ACL/Conntrack 的受支持 attach 边界是 **OVS `br-int` 上的无标签普通 VM tap**。VLAN/VXLAN 分段由 OVS 在该边界之外完成；物理 uplink/provider trunk 即使承载 802.1Q 标签，也不进入 Aria ACL/Conntrack 的 attach 或 authority 范围。
+- 第一阶段不支持 Neutron trunk/subport、guest VLAN trunk 或任何带标签 VM tap。解析器能够识别 VLAN 头不等于产品支持这种端口形态，也不得据此宣称 VLAN 间 ACL/Conntrack 隔离。
+- 如果未来要支持上述任一 tagged/trunk 场景，必须重新打开 `REVIEW-ACL-103`，把 VLAN 隔离维度一致地加入 policy、conntrack 和 fragment identity，并完成 pinned-map ABI 版本化、迁移/重建和现场验证；不得只给单张 CT key 增加 `vlan_id`。
 
 ## 2. 目标环境约束
 
@@ -52,6 +55,7 @@ tap interface on br-int
 - 镜像内已经存在 Neutron QoS 相关代码，包括 `neutron/extensions/qos.py`、`neutron/services/qos/qos_plugin.py`、`neutron/plugins/ml2/extensions/qos.py` 和 `neutron/agent/l2/extensions/qos.py`。
 - `neutron-openvswitch-agent` 当前 `extensions = mirror`，未启用 `qos` agent extension。
 - 业务 VM tap 口直接挂载到 OVS `br-int`。
+- Aria 的 ACL attach 点看到的是无 802.1Q 标签的普通 VM tap 流量；物理网口上的 provider VLAN/trunk 由 OVS 管理，不是 Aria ACL attach 目标。
 - `br-int` 上的 tap interface 带有 `external_ids:iface-id=<neutron-port-id>`，可用于稳定建立 Neutron port 到 tap 的映射。
 - 平台未启用 Neutron Security Group，`enable_security_group = False`。
 - SR-IOV 端口可以不使用 Aria。

@@ -72,6 +72,7 @@ eBPF datapath               XDP / TC
 - 不迁移 v0.10 Controller / RFC 体系到该分支。
 - 不让用户绕过 Neutron 创建 OpenStack 网络对象。
 - 不替代 OVS 的 L2 bridge、tunnel、local switching、VLAN/VXLAN/GENEVE 管理。
+- 不支持 Neutron trunk/subport、guest VLAN trunk，也不把 ACL/Conntrack 挂载到物理 trunk；第一阶段只管理 OVS `br-int` 上的无标签普通 VM tap。
 - 不实现 Neutron Security Group projection、remote group 展开、anti-spoof 或 port security enforcement。
 - 不新增 `trace`、`drops`、`ssl`、`diagnose`、`service chain` 等功能模块，也不把它们扩成 Neutron tenant API。
 - 不把 Mirror 或 TCPrt 接入 Neutron Agent Mode；Rust 既有 Mirror/TCPrt 本机能力保留，但不进入 Neutron snapshot、translator、feature flag、status domain、smoke 或 PR gate。
@@ -1808,13 +1809,15 @@ Mirror 和 TCPrt 不进入当前 Neutron snapshot 更新路径：
 | OVS agent 重启 | 不把 OVS agent restart 视为 Neutron authority 变化；依靠 Netlink 和 full resync 校准接口 |
 | ovs-vswitchd / ovsdb-server 重启 | 先按 attach boundary 分类：tap 仍存在且 ifindex/XDP/map 健康时 ACL 可保持 ready；tap 消失或 ifindex 改变时才按 tap recreate 处理 |
 | tap 命名模式与预期不同 | N0.5 必须发现目标环境命名；不匹配时不得 attach，返回 `DomainStatus=degraded` |
-| trunk port / VLAN subport | 第一阶段默认只支持目标环境验证过的 port 形态；未验证 subport 标记 `support_disposition=unsupported` 或 `DomainStatus=degraded` |
+| trunk port / VLAN subport / guest tagged tap | 第一阶段不支持，不生成 ACL snapshot、不 attach ACL/Conntrack，也不进入 ready/enforce；统一标记 `support_disposition=unsupported` |
 | SR-IOV / direct / macvtap port | 第一阶段默认不支持 eBPF attach，必须明确 `support_disposition=unsupported`，不允许假 ready |
 | DHCP/router/metadata service port | 不因接口名匹配自动接管；只处理 Neutron 明确绑定且在范围内的 compute VM port |
 
 关键规则：
 
 - attach 点的设计假设是直接挂到 OVS `br-int` 的 tap，但仍必须在目标 OpenStack 环境中实测并记录。
+- 该 attach 点的产品合同是无标签普通 VM tap。物理 uplink/provider trunk 上的 VLAN 标签属于 OVS 转发边界，不进入 Aria ACL/Conntrack identity；解析 VLAN 头只是数据面健壮性能力，不扩大受支持端口类型。
+- 若产品未来支持 Neutron trunk/subport、guest VLAN trunk、带标签 tap 或在物理 trunk 上 attach，必须重新打开 `REVIEW-ACL-103`，统一设计 policy/CT/fragment 的 VLAN identity 和 pinned-map ABI 迁移后才能进入 ready/enforce。
 - OVN、Linux bridge 或 hybrid plug 是否不存在必须由 N0.5 discovery 验证；验证失败时这些模式不进入第一阶段默认路径。
 - 当前阶段 Aria 不能宣称已经独立承担 SG；Aria 未 ready 的 port 默认 `effective_action=bypass`，不得中断业务。
 

@@ -42,7 +42,7 @@ The corrected portfolio for this program:
 | `REVIEW-ACL-105` | P3 | confirmed | Batch 4 |
 | `REVIEW-TXN-036` | P3 (narrowed from P2) | narrowed | Batch 5 |
 | `REVIEW-ACL-100` | P3 | confirmed | Batch 5 |
-| `REVIEW-ACL-103` | P3 | narrowed | excluded |
+| `REVIEW-ACL-103` | P3 | closed-not-supported | excluded |
 
 ## 3. Batch Design
 
@@ -241,9 +241,11 @@ Batch 5 closed 2026-08-15: RED `04f40af` + `355d8bf` / Build
 failed only the two intended Rust contracts and the reporter contract;
 GREEN `3d0d29d` + `7bb97cd` passed exact-head Build
 [31869573028](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31869573028)
-with all jobs green. The thirteen-row program is complete;
-`REVIEW-ACL-103` remains the only open row of the pass as isolation-boundary
-debt with its recorded escalation condition.
+with all jobs green. The thirteen-row program is complete. Product-contract
+clarification closes `REVIEW-ACL-103` as `closed-not-supported`: ACL/CT manages
+only untagged ordinary VM taps, while physical/provider trunks and Neutron
+trunk/subport or guest tagged taps remain outside the supported boundary. The
+pass therefore has no ordinary open row.
 
 The order fixes the two user-visible P2 rows first, then completes the
 same-language Python hardening, then the core error-propagation family, then
@@ -261,16 +263,19 @@ PR, or local Cargo execution is introduced.
   already-stored non-canonical values recover to enforce without data
   migration; the write-side canonicalization then prevents new non-canonical
   rows.
-- `REVIEW-ACL-103` is excluded from all batches. It remains open as pure
-  isolation-boundary debt; the register records the escalation condition
-  (introduction of VLAN-aware policy or trunk port-class support).
+- `REVIEW-ACL-103` is excluded from all batches and is
+  `closed-not-supported`, not deferred implementation debt. Reopen it before
+  introducing VLAN-aware policy, Neutron trunk/subport, guest tagged taps, or
+  ACL/CT attachment to a physical trunk; that future design must version
+  policy, CT, fragment identity, and pinned-map ABI coherently.
 
-## 7. Explicitly Excluded Open Items
+## 7. Explicitly Excluded Items
 
-The following rows remain recorded and open but are not developed by this
-program, continuing the boundary set by the 2026-08-14 ACL-only design:
+The following rows are not developed by this program, continuing the boundary
+set by the 2026-08-14 ACL-only design:
 
-- `REVIEW-ACL-103` (this program's excluded debt row);
+- `REVIEW-ACL-103` (`closed-not-supported` under the untagged-VM-tap product
+  contract, with the support-expansion reopen conditions above);
 - the pre-existing non-ACL rows `REVIEW-ACL-078`, `REVIEW-OPS-039`,
   `REVIEW-ACL-089`, `REVIEW-ACL-093`, `REVIEW-ACL-094`, `REVIEW-ACL-096`,
   `REVIEW-ACL-097`, and the defensive `REVIEW-ACL-088`; and
@@ -284,7 +289,8 @@ The program is complete when:
 - all thirteen in-scope rows have exact RED/GREEN evidence and their register
   rows are marked fixed with Build or field evidence;
 - the three conditional items have honest verified or deferred outcomes;
-- `REVIEW-ACL-103` remains open with its escalation condition intact;
+- `REVIEW-ACL-103` remains `closed-not-supported` with its support-expansion
+  reopen conditions intact;
 - all applicable hosted CI lanes pass at each implementation head, including
   the 448-byte stack budget for Batch 4 and the UDS contract check for
   Batch 5; and
