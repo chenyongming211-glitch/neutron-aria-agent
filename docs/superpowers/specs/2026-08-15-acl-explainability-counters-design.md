@@ -1,6 +1,7 @@
 # ACL Explainability Counter Pipeline Design
 
-**Status:** implementation and hosted CI complete 2026-08-15; privileged field
+**Status:** functional implementation and hosted CI complete 2026-08-15;
+failure-semantics closure `REVIEW-ACL-111..115` in progress; privileged field
 evidence deferred/pending; production gate remains default-off
 
 **Scope:** Phase B of `docs/openstack-ebpf-platform-roadmap.md` — per-rule hit/drop
@@ -279,3 +280,40 @@ flow top-N; kernel-drop integration; Prometheus/OpenTelemetry exporters;
 generic observability API; strict natural key (non-NULL sentinel columns) for
 `aria_acl_port_counters`. The `kind` column and `counters_schema_version` are
 the two extension points reserved for those phases.
+
+## 15. Failure-Semantics Closure (normative amendment)
+
+The first post-implementation review proved that response budgeting and the
+deployed-schema migration are complete, but found five remaining boundaries
+that must close before field enablement. They are tracked as
+`REVIEW-ACL-111..115`; none changes the eBPF verdict path, ACL/CT semantics, or
+the default-off gate.
+
+1. **Strict optional-section contract.** Status v3 accepts either no `counters`
+   member or a complete counters-schema-v1 object. Container and scalar types,
+   non-negative cumulative values, directions, keys, timestamps, and per-port
+   identity are validated before the sample reaches the reporter. A malformed
+   optional section becomes a counters-only error and cannot latch ACL writes
+   or prevent the ordinary heartbeat. Genuine non-counter port-status failures
+   retain their existing ordering and error behavior.
+2. **Truthful Rust collection.** Only `BPF_OBJ_GET` `ENOENT` means a missing
+   optional map. Metadata, permission, conversion, map-iteration, registry-lock,
+   and persisted tap-state errors are surfaced. No such fault may be projected
+   as an empty or partial successful sample.
+3. **Complete reset identity.** Every cumulative summary and detail field is
+   monotonic only within one `(port_id, tap_id)` sample stream. A tap-id change,
+   non-increasing sample timestamp, or decrease in any cumulative component
+   produces `reset_detected=true` and null rates for the complete sample.
+4. **Latest-snapshot repository parity.** A successful sample atomically
+   replaces details; a successful clean no-sample atomically replaces them with
+   an empty set; an explicit `counters_error` retains the last good summary and
+   details. Memory, SQLAlchemy, and stdlib SQLite repositories expose the same
+   behavior and deterministic row order.
+5. **Display isolation.** Raw detail and group-map implementation fields never
+   appear in the default CLI output. `--counters` renders normalized detail;
+   an unknown drop reason remains diagnosable as `UNKNOWN(<numeric-id>)`.
+
+Acceptance remains RED-before-GREEN. Python/database behaviors run locally and
+in hosted CI; Rust behavior is verified only by hosted CI under the repository's
+no-local-Cargo rule. Passing hosted tests does not change field evidence from
+`deferred/pending` or enable `counters_report_enabled`.
