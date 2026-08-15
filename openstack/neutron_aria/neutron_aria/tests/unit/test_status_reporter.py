@@ -994,6 +994,24 @@ class CountersReportTestCase(unittest.TestCase):
         )
         self.assertIsNone(blob)
 
+    def test_port_counters_blob_reports_datapath_error_marker(self):
+        from neutron_aria.agent.status_reporter import port_counters_blob
+        runtime = self._runtime(with_counters=True)
+        runtime.last_counters = {
+            "counters_schema_version": 1,
+            "sampled_at_ms": 2000,
+            "counters_error": "map read failed",
+            "ports": [],
+        }
+        blob = port_counters_blob(runtime, "p1")
+        self.assertEqual(blob, {"counters_error": "map read failed"})
+
+    def test_port_counters_blob_reports_port_not_sampled(self):
+        from neutron_aria.agent.status_reporter import port_counters_blob
+        runtime = self._runtime(with_counters=True)
+        blob = port_counters_blob(runtime, "missing-port")
+        self.assertEqual(blob, {"counters_error": "port_not_sampled"})
+
     def test_port_counters_blob_diffs_drop_pps_from_summary(self):
         from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
         from neutron_aria.agent.status_reporter import port_counters_blob

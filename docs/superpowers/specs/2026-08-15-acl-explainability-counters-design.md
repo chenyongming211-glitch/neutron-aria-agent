@@ -47,15 +47,20 @@ aria-datapath (core/src/monitoring.rs + drop_ops.rs already read these maps)
         │ (same route, same peercred policy)
 neutron-aria-agent
   each heartbeat cycle: fetch status+counters -> difference vs previous cycle
-  -> compute pps/bps -> translate bucket ids to readable group names
-  -> attach counters payload to the existing RPC heartbeat
+  -> compute pps/bps -> carry the datapath-provided group id -> CIDR map
+  -> attach counters payload to the per-port status report
+  (report_aria_acl_port_status, emitted within the same heartbeat cycle)
         │
 neutron-server `aria_acl` plugin
-  aria_acl_port_statuses  += summary columns (latest snapshot)
+  aria_acl_port_statuses  += summary columns + group map (latest snapshot)
   aria_acl_port_counters  new table (bucket + reason rows, latest snapshot only)
         │
 neutron aria-acl-port-status-show <port> [--counters]
 ```
+
+Note: the agent↔server transport in this repo is the per-port status report
+(`report_aria_acl_port_status`), not the `report_state` heartbeat
+`configurations` blob; both are emitted from the same heartbeat cycle.
 
 Principles:
 
@@ -136,8 +141,11 @@ primary key (port_id, kind, src_id, dst_id, proto, direction, reason)
 ```
 
 (If a backend cannot host nullable primary-key columns, use a surrogate
-`id` primary key plus a unique index over the same column set; the constraint
-semantics stay identical.)
+`id` primary key plus a unique index over the same column set. Note the
+constraint is then approximate: most backends treat NULLs as distinct, so
+duplicate rows whose key columns are NULL are not fully excluded. v1 relies
+on the single-writer atomic replace-all upsert for row identity; a strict
+natural key with non-NULL sentinel columns is a deferred hardening item.)
 
 Upsert policy: each report replaces all rows for the port in one transaction
 (latest snapshot only, no history). The generic `kind` column is the future
@@ -241,5 +249,6 @@ plus observed RED/GREEN evidence, per AGENTS.md.
 
 Real-time query channel; rule_id-exact attribution; counter history/trends;
 flow top-N; kernel-drop integration; Prometheus/OpenTelemetry exporters;
-generic observability API. The `kind` column and `counters_schema_version` are
+generic observability API; strict natural key (non-NULL sentinel columns) for
+`aria_acl_port_counters`. The `kind` column and `counters_schema_version` are
 the two extension points reserved for those phases.

@@ -328,13 +328,44 @@ class AriaAclPlugin(object):
             resource_id=binding_id,
         )
 
+    COUNTER_SUMMARY_FIELDS = (
+        "counters_sampled_at",
+        "counters_policy_packets",
+        "counters_policy_bytes",
+        "counters_policy_allow_packets",
+        "counters_policy_dropped_packets",
+        "counters_policy_dropped_bytes",
+        "counters_policy_pps",
+        "counters_drop_packets",
+        "counters_drop_bytes",
+        "counters_drop_pps",
+        "counters_truncated",
+        "counters_reset_detected",
+        "counters_group_map",
+    )
+
     def report_aria_acl_port_status(self, context, aria_acl_port_status):
         payload = dict(
             self._unwrap(aria_acl_port_status, "aria_acl_port_status")
         )
         counter_blobs = payload.pop("counters_rows", None)
         sampled_at_ms = payload.pop("counters_sampled_at_ms", None)
-        self._attach_counter_summary(payload, counter_blobs, sampled_at_ms)
+        counters_error = payload.pop("counters_error", None)
+        if counters_error is not None:
+            # Datapath reported a read failure: keep the last good snapshot
+            # (spec §10); staleness stays visible via counters_sampled_at age.
+            LOG.warning(
+                "aria_acl port counters unavailable port_id=%s error=%s",
+                payload.get("port_id"),
+                counters_error,
+            )
+        elif counter_blobs:
+            self._attach_counter_summary(payload, counter_blobs, sampled_at_ms)
+        else:
+            # No counter sample this cycle and no error: clear the summary so
+            # stale values from a previous cycle are never re-presented.
+            for field in self.COUNTER_SUMMARY_FIELDS:
+                payload[field] = None
         self._persist_counter_rows(context, payload, counter_blobs, sampled_at_ms)
         return self._project_port_status(
             self._repo(context).upsert_port_status(payload)

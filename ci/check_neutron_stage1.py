@@ -129,6 +129,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_port_counters_blob_is_none_without_counters",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
     "test_rest_reporter_attaches_counters_only_when_enabled",
+    "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
+    "test_port_counters_blob_reports_datapath_error_marker",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
     "test_capabilities_validates_required_domains",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
@@ -147,6 +149,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_report_port_status_persists_counter_rows_and_summary",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
     "test_report_port_status_counter_persistence_failure_is_swallowed",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_report_port_status_keeps_last_good_on_counter_error",
 )
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")

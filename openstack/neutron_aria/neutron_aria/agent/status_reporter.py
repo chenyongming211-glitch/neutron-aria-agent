@@ -38,23 +38,27 @@ def _rate_delta(prev, curr, elapsed_seconds):
 def port_counters_blob(runtime_status, port_id):
     """Build the counters blob for one port status payload.
 
-    Returns None when the runtime status carries no counters section for
-    this port. The blob carries the diffed rows, the cumulative summary,
-    the exact drop pps diffed from the summary drop totals, and the
-    reset/truncated flags. Rates are None on the first snapshot and on
-    any negative-delta reset.
+    Returns None when the runtime status carries no counters section (older
+    datapath or feature disabled). Returns an error blob (``counters_error``
+    only) when the datapath reported a read failure or this port was not
+    sampled — the server then keeps the last good snapshot per spec §10.
+    Otherwise returns the diffed rows, the cumulative summary, the exact drop
+    pps diffed from the summary drop totals, and the reset/truncated flags.
+    Rates are None on the first snapshot and on any negative-delta reset.
     """
     counters = getattr(runtime_status, "last_counters", None)
-    if not counters or not counters.get("ports"):
+    if counters is None:
         return None
+    if counters.get("counters_error"):
+        return {"counters_error": counters["counters_error"]}
     sampled_at_ms = counters.get("sampled_at_ms")
     port = None
-    for candidate in counters["ports"]:
+    for candidate in counters.get("ports") or []:
         if candidate.get("port_id") == port_id:
             port = candidate
             break
     if port is None:
-        return None
+        return {"counters_error": "port_not_sampled"}
     port_copy = dict(port)
     port_copy.setdefault("sampled_at_ms", sampled_at_ms)
     previous = _PREVIOUS_COUNTERS.get(port_id)

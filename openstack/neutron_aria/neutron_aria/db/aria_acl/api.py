@@ -534,8 +534,13 @@ class InMemoryAriaAclRepository(object):
         _require(values, ("port_id", "host"), "aria_acl_port_status")
         _stamp_status(values)
         key = (values["port_id"], values["host"])
-        self.port_statuses[key] = values
-        return _clone(values)
+        # Merge like the DB-backed repository: unspecified columns keep their
+        # previous values so e.g. counter-less reports do not wipe the last
+        # good counter snapshot (spec §10).
+        merged = dict(self.port_statuses.get(key) or {})
+        merged.update(values)
+        self.port_statuses[key] = merged
+        return _clone(merged)
 
     @_locked_access
     def get_port_status(self, port_id, host=None):

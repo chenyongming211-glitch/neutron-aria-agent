@@ -2239,7 +2239,43 @@ class AriaAclPluginTestCase(unittest.TestCase):
         )
         self.assertEqual(status["port_id"], "p1")
         self.assertNotIn("counters_rows", status)
+        self.assertIsNone(status["counters_policy_packets"])
+        self.assertIsNone(status["counters_sampled_at"])
         self.assertEqual(repository.get_port_counters("p1", host="h1"), [])
+
+    def test_report_port_status_keeps_last_good_on_counter_error(self):
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        plugin.report_aria_acl_port_status(
+            None,
+            {"aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_sampled_at_ms": 2000000,
+                "counters_rows": [{
+                    "port_id": "p1",
+                    "truncated": False,
+                    "reset_detected": False,
+                    "drop_pps": 10.0,
+                    "summary": {"policy_packets": 100},
+                    "rows": [],
+                }],
+            }},
+        )
+        status = plugin.report_aria_acl_port_status(
+            None,
+            {"aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_error": "map read failed",
+            }},
+        )
+        self.assertEqual(status["port_id"], "p1")
+        # Last good snapshot is preserved, not cleared.
+        self.assertEqual(status["counters_policy_packets"], 100)
+        self.assertIn("counters_sampled_at", status)
 
     def test_report_port_status_counter_persistence_failure_is_swallowed(self):
         class FailingCountersRepository(InMemoryAriaAclRepository):
