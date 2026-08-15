@@ -702,6 +702,49 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
         self.assertEqual([], self.repository.list_policies())
         self.assertEqual([], self.repository.list_address_sets())
 
+    def test_port_counters_table_is_defined(self):
+        self.assertIn("port_counters", self.repository.tables)
+        columns = [
+            column.name
+            for column in self.repository.tables["port_counters"].columns
+        ]
+        for name in ("port_id", "host", "kind", "packets", "bytes",
+                     "sampled_at"):
+            self.assertIn(name, columns)
+
+    def test_port_statuses_has_counter_columns(self):
+        columns = [
+            column.name
+            for column in self.repository.tables["port_statuses"].columns
+        ]
+        self.assertIn("counters_policy_packets", columns)
+        self.assertIn("counters_truncated", columns)
+        self.assertIn("counters_reset_detected", columns)
+
+    def test_port_counters_upsert_replaces_all_rows_atomically(self):
+        first_rows = [{
+            "kind": "bucket",
+            "src_id": 1,
+            "dst_id": 2,
+            "proto": 6,
+            "direction": "ingress",
+            "packets": 100,
+            "bytes": 1000,
+            "dropped_packets": 10,
+            "dropped_bytes": 100,
+            "pps": 50.0,
+            "bps": 500.0,
+        }]
+        self.repository.upsert_port_counters("port-1", "host-1", first_rows)
+        rows = self.repository.get_port_counters("port-1", host="host-1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "bucket")
+        self.assertEqual(rows[0]["packets"], 100)
+
+        self.repository.upsert_port_counters("port-1", "host-1", [])
+        rows = self.repository.get_port_counters("port-1", host="host-1")
+        self.assertEqual([], rows)
+
 
 if __name__ == "__main__":
     unittest.main()

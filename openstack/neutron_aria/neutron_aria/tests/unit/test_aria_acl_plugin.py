@@ -50,6 +50,9 @@ class FakeSqlAlchemy(object):
     def BigInteger(self):
         return ("BigInteger", None)
 
+    def Float(self):
+        return ("Float", None)
+
     def DateTime(self):
         return ("DateTime", None)
 

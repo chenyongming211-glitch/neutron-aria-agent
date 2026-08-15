@@ -246,6 +246,7 @@ class InMemoryAriaAclRepository(object):
         self.address_sets = {}
         self.bindings = {}
         self.port_statuses = {}
+        self.port_counters = {}
 
     def bulk_create(self, resource, values_list):
         creators = {
@@ -263,6 +264,7 @@ class InMemoryAriaAclRepository(object):
                 "address_sets": _clone(self.address_sets),
                 "bindings": _clone(self.bindings),
                 "port_statuses": _clone(self.port_statuses),
+                "port_counters": _clone(self.port_counters),
             }
             try:
                 return [creator(values) for values in values_list]
@@ -272,6 +274,7 @@ class InMemoryAriaAclRepository(object):
                 self.address_sets = snapshot["address_sets"]
                 self.bindings = snapshot["bindings"]
                 self.port_statuses = snapshot["port_statuses"]
+                self.port_counters = snapshot["port_counters"]
                 raise
 
     @_locked_access
@@ -543,6 +546,26 @@ class InMemoryAriaAclRepository(object):
             if status_port_id == port_id
         ]
         return _clone(statuses)
+
+    @_locked_access
+    def upsert_port_counters(self, port_id, host, rows):
+        rows = _clone(rows or [])
+        for row in rows:
+            row.setdefault("id", _new_id())
+            row.setdefault("port_id", port_id)
+            row.setdefault("host", host)
+        self.port_counters[(port_id, host)] = rows
+        return _clone(rows)
+
+    @_locked_access
+    def get_port_counters(self, port_id, host=None):
+        if host is not None:
+            return _clone(self.port_counters.get((port_id, host), []))
+        rows = []
+        for (row_port_id, _host), values in self.port_counters.items():
+            if row_port_id == port_id:
+                rows.extend(_clone(values))
+        return rows
 
     @_locked_access
     def list_port_statuses(
@@ -1020,6 +1043,35 @@ class NeutronDbAriaAclRepository(object):
                 )
             raise AriaAclNotFound("aria_acl_port_status %s not found" % port_id)
 
+    @_neutron_write()
+    def upsert_port_counters(self, port_id, host, rows):
+        table = self.tables["port_counters"]
+        self.session.execute(
+            table.delete().where(
+                (table.c.port_id == port_id) &
+                (table.c.host == host)
+            )
+        )
+        for row in rows or []:
+            values = dict(row)
+            values.setdefault("id", _new_id())
+            values.setdefault("port_id", port_id)
+            values.setdefault("host", host)
+            self.session.execute(
+                table.insert().values(
+                    **self._db_values("port_counters", values)
+                )
+            )
+        return _clone(rows or [])
+
+    def get_port_counters(self, port_id, host=None):
+        table = self.tables["port_counters"]
+        query = table.select().where(table.c.port_id == port_id)
+        if host is not None:
+            query = query.where(table.c.host == host)
+        rows = self.session.execute(query).fetchall()
+        return [self._row_to_dict("port_counters", row) for row in rows]
+
     def get_port_status_resource(self, resource_id):
         if is_port_status_id(resource_id):
             port_id, host = decode_port_status_id(resource_id)
@@ -1255,6 +1307,37 @@ class NeutronDbAriaAclRepository(object):
                 sa.Column("effective_action", sa.String(64)),
                 sa.Column("generation", sa.BigInteger()),
                 sa.Column("updated_at", sa.DateTime()),
+                sa.Column("counters_sampled_at", sa.DateTime()),
+                sa.Column("counters_policy_packets", sa.BigInteger()),
+                sa.Column("counters_policy_bytes", sa.BigInteger()),
+                sa.Column("counters_policy_allow_packets", sa.BigInteger()),
+                sa.Column("counters_policy_dropped_packets", sa.BigInteger()),
+                sa.Column("counters_policy_dropped_bytes", sa.BigInteger()),
+                sa.Column("counters_policy_pps", sa.Float()),
+                sa.Column("counters_drop_packets", sa.BigInteger()),
+                sa.Column("counters_drop_bytes", sa.BigInteger()),
+                sa.Column("counters_drop_pps", sa.Float()),
+                sa.Column("counters_truncated", sa.Boolean()),
+                sa.Column("counters_reset_detected", sa.Boolean()),
+            ),
+            "port_counters": sa.Table(
+                "aria_acl_port_counters", md,
+                sa.Column("id", sa.String(36), primary_key=True),
+                sa.Column("port_id", sa.String(36), nullable=False),
+                sa.Column("host", sa.String(255), nullable=False),
+                sa.Column("kind", sa.String(16), nullable=False),
+                sa.Column("src_id", sa.Integer()),
+                sa.Column("dst_id", sa.Integer()),
+                sa.Column("proto", sa.Integer()),
+                sa.Column("direction", sa.String(16)),
+                sa.Column("reason", sa.Integer()),
+                sa.Column("packets", sa.BigInteger(), nullable=False),
+                sa.Column("bytes", sa.BigInteger(), nullable=False),
+                sa.Column("dropped_packets", sa.BigInteger()),
+                sa.Column("dropped_bytes", sa.BigInteger()),
+                sa.Column("pps", sa.Float()),
+                sa.Column("bps", sa.Float()),
+                sa.Column("sampled_at", sa.DateTime()),
             ),
         }
 
