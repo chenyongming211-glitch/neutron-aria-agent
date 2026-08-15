@@ -71,8 +71,8 @@ class CiLaneContractTests(unittest.TestCase):
         )
 
     def test_javascript_actions_use_pinned_node24_releases(self):
-        self.assertEqual(self.source.count(CHECKOUT_NODE24), 7)
-        self.assertEqual(self.source.count(CACHE_NODE24), 2)
+        self.assertEqual(self.source.count(CHECKOUT_NODE24), 9)
+        self.assertEqual(self.source.count(CACHE_NODE24), 3)
         self.assertNotIn("actions/checkout@v4", self.source)
         self.assertNotIn("actions/cache@v4", self.source)
 
