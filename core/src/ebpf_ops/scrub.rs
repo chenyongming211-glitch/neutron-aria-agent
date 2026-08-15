@@ -58,6 +58,22 @@ impl HasTapId for GlobalMirrorKey {
     }
 }
 
+fn collect_iterated_items<Item, E: std::fmt::Debug>(
+    items: impl IntoIterator<Item = Result<Item, E>>,
+    map_name: &str,
+) -> Result<Vec<Item>, String> {
+    let mut collected = Vec::new();
+    for item in items {
+        match item {
+            Ok(value) => collected.push(value),
+            Err(error) => {
+                return Err(format!("iterate {}: {:?}", map_name, error));
+            }
+        }
+    }
+    Ok(collected)
+}
+
 fn scrub_hash_map<K, V, F>(
     pin_path: &str,
     map_name: &str,
@@ -73,15 +89,24 @@ where
     let map_data =
         MapData::from_pin(&map_path).map_err(|e| format!("open pinned {}: {:?}", map_name, e))?;
     let mut map = open_map(map_data)?;
-    let keys: Vec<K> = map
-        .iter()
-        .filter_map(|item| item.ok().map(|(key, _)| key))
+    let keys: Vec<K> = collect_iterated_items(map.iter(), map_name)?
+        .into_iter()
+        .map(|(key, _)| key)
         .filter(|key| key.tap_id() == tap_id)
         .collect();
     let count = keys.len() as u64;
     for key in keys {
         map.remove(&key)
             .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
+    }
+    let residual = collect_iterated_items(map.iter(), map_name)?
+        .into_iter()
+        .any(|(key, _)| key.tap_id() == tap_id);
+    if residual {
+        return Err(format!(
+            "{} entries remain after scrub for tap {}",
+            map_name, tap_id
+        ));
     }
     Ok(count)
 }
@@ -101,9 +126,8 @@ where
     let map_data =
         MapData::from_pin(&map_path).map_err(|e| format!("open pinned {}: {:?}", map_name, e))?;
     let mut map = open_map(map_data)?;
-    let keys: Vec<K> = map
-        .keys()
-        .filter_map(|item| item.ok())
+    let keys: Vec<K> = collect_iterated_items(map.keys(), map_name)?
+        .into_iter()
         .filter(|key| key.tap_id() == tap_id)
         .collect();
     let count = keys.len() as u64;
@@ -111,15 +135,24 @@ where
         map.remove(&key)
             .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
     }
+    let residual = collect_iterated_items(map.keys(), map_name)?
+        .into_iter()
+        .any(|key| key.tap_id() == tap_id);
+    if residual {
+        return Err(format!(
+            "{} entries remain after scrub for tap {}",
+            map_name, tap_id
+        ));
+    }
     Ok(count)
 }
 
 fn scrub_lpm_v4_map(pin_path: &str, map_name: &str, tap_id: u32) -> Result<u64, String> {
     let mut map = open_pinned_lpm_v4(pin_path, map_name)?;
     let tap_prefix = tap_id.to_be_bytes();
-    let keys: Vec<Key<[u8; 8]>> = map
-        .iter()
-        .filter_map(|item| item.ok().map(|(key, _)| key))
+    let keys: Vec<Key<[u8; 8]>> = collect_iterated_items(map.iter(), map_name)?
+        .into_iter()
+        .map(|(key, _)| key)
         .filter(|key| {
             let data = key.data();
             data[..4] == tap_prefix[..]
@@ -130,15 +163,27 @@ fn scrub_lpm_v4_map(pin_path: &str, map_name: &str, tap_id: u32) -> Result<u64, 
         map.remove(&key)
             .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
     }
+    let residual = collect_iterated_items(map.iter(), map_name)?
+        .into_iter()
+        .any(|(key, _)| {
+            let data = key.data();
+            data[..4] == tap_prefix[..]
+        });
+    if residual {
+        return Err(format!(
+            "{} entries remain after scrub for tap {}",
+            map_name, tap_id
+        ));
+    }
     Ok(count)
 }
 
 fn scrub_lpm_v6_map(pin_path: &str, map_name: &str, tap_id: u32) -> Result<u64, String> {
     let mut map = open_pinned_lpm_v6(pin_path, map_name)?;
     let tap_prefix = tap_id.to_be_bytes();
-    let keys: Vec<Key<[u8; 20]>> = map
-        .iter()
-        .filter_map(|item| item.ok().map(|(key, _)| key))
+    let keys: Vec<Key<[u8; 20]>> = collect_iterated_items(map.iter(), map_name)?
+        .into_iter()
+        .map(|(key, _)| key)
         .filter(|key| {
             let data = key.data();
             data[..4] == tap_prefix[..]
@@ -148,6 +193,18 @@ fn scrub_lpm_v6_map(pin_path: &str, map_name: &str, tap_id: u32) -> Result<u64, 
     for key in keys {
         map.remove(&key)
             .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
+    }
+    let residual = collect_iterated_items(map.iter(), map_name)?
+        .into_iter()
+        .any(|(key, _)| {
+            let data = key.data();
+            data[..4] == tap_prefix[..]
+        });
+    if residual {
+        return Err(format!(
+            "{} entries remain after scrub for tap {}",
+            map_name, tap_id
+        ));
     }
     Ok(count)
 }
@@ -162,15 +219,24 @@ fn scrub_policy_bank_map(pin_path: &str, tap_id: u32, bank: u8) -> Result<u64, S
         MapData::from_pin(&map_path).map_err(|e| format!("open pinned POLICY_TABLE: {:?}", e))?;
     let mut map = HashMap::<_, PolicyKey, PolicyValue>::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert POLICY_TABLE to HashMap: {:?}", e))?;
-    let keys: Vec<PolicyKey> = map
-        .iter()
-        .filter_map(|item| item.ok().map(|(key, _)| key))
+    let keys: Vec<PolicyKey> = collect_iterated_items(map.iter(), "POLICY_TABLE")?
+        .into_iter()
+        .map(|(key, _)| key)
         .filter(|key| policy_key_matches_bank(key, tap_id, bank))
         .collect();
     let count = keys.len() as u64;
     for key in keys {
         map.remove(&key)
             .map_err(|e| format!("remove POLICY_TABLE bank entry: {:?}", e))?;
+    }
+    let residual = collect_iterated_items(map.iter(), "POLICY_TABLE")?
+        .into_iter()
+        .any(|(key, _)| policy_key_matches_bank(&key, tap_id, bank));
+    if residual {
+        return Err(format!(
+            "POLICY_TABLE entries remain after scrub for tap {}",
+            tap_id
+        ));
     }
     Ok(count)
 }
@@ -183,9 +249,8 @@ fn scrub_rule_stats_bank_map(pin_path: &str, tap_id: u32, bank: u8) -> Result<u6
         aya::maps::Map::PerCpuHashMap(map_data),
     )
     .map_err(|e| format!("convert RULE_STATS to PerCpuHashMap: {:?}", e))?;
-    let keys: Vec<PolicyKey> = map
-        .keys()
-        .filter_map(|item| item.ok())
+    let keys: Vec<PolicyKey> = collect_iterated_items(map.keys(), "RULE_STATS")?
+        .into_iter()
         .filter(|key| policy_key_matches_bank(key, tap_id, bank))
         .collect();
     let count = keys.len() as u64;
@@ -193,14 +258,22 @@ fn scrub_rule_stats_bank_map(pin_path: &str, tap_id: u32, bank: u8) -> Result<u6
         map.remove(&key)
             .map_err(|e| format!("remove RULE_STATS bank entry: {:?}", e))?;
     }
+    let residual = collect_iterated_items(map.keys(), "RULE_STATS")?
+        .into_iter()
+        .any(|key| policy_key_matches_bank(&key, tap_id, bank));
+    if residual {
+        return Err(format!(
+            "RULE_STATS entries remain after scrub for tap {}",
+            tap_id
+        ));
+    }
     Ok(count)
 }
 
 fn scrub_iface_ctx_entries(pin_path: &str, tap_id: u32) -> Result<u64, String> {
     let mut map = open_pinned_iface_ctx(pin_path)?;
-    let keys: Vec<u32> = map
-        .iter()
-        .filter_map(|item| item.ok())
+    let keys: Vec<u32> = collect_iterated_items(map.iter(), "IFACE_CTX_MAP")?
+        .into_iter()
         .filter_map(|(ifindex, ctx)| (ctx.tap_id == tap_id).then_some(ifindex))
         .collect();
     let count = keys.len() as u64;
@@ -212,20 +285,38 @@ fn scrub_iface_ctx_entries(pin_path: &str, tap_id: u32) -> Result<u64, String> {
             )
         })?;
     }
+    let residual = collect_iterated_items(map.iter(), "IFACE_CTX_MAP")?
+        .into_iter()
+        .any(|(_, ctx)| ctx.tap_id == tap_id);
+    if residual {
+        return Err(format!(
+            "IFACE_CTX_MAP entries remain after scrub for tap {}",
+            tap_id
+        ));
+    }
     Ok(count)
 }
 
 fn scrub_tap_config_entries(pin_path: &str, tap_id: u32) -> Result<u64, String> {
     let mut map = open_pinned_tap_config(pin_path)?;
-    let keys: Vec<u32> = map
-        .iter()
-        .filter_map(|item| item.ok().map(|(key, _)| key))
+    let keys: Vec<u32> = collect_iterated_items(map.iter(), "TAP_CONFIG_MAP")?
+        .into_iter()
+        .map(|(key, _)| key)
         .filter(|key| *key == tap_id)
         .collect();
     let count = keys.len() as u64;
     for key in keys {
         map.remove(&key)
             .map_err(|e| format!("remove TAP_CONFIG_MAP entry for tap_id {}: {:?}", key, e))?;
+    }
+    let residual = collect_iterated_items(map.iter(), "TAP_CONFIG_MAP")?
+        .into_iter()
+        .any(|(key, _)| key == tap_id);
+    if residual {
+        return Err(format!(
+            "TAP_CONFIG_MAP entries remain after scrub for tap {}",
+            tap_id
+        ));
     }
     Ok(count)
 }
