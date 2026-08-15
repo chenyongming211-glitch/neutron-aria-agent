@@ -1,6 +1,6 @@
 # New-Findings Remediation Program Design
 
-Status: approved plan; implementation not started
+Status: approved plan; Batch 1 complete (2026-08-15), Batches 2-5 pending
 
 Date: 2026-08-15
 
@@ -195,12 +195,20 @@ baseline established by Batches 1–4:
 ## 5. Delivery Order
 
 ```text
-Batch 1  ACL-106 + ACL-107   Python agent, user-visible P2 fast wins
+Batch 1  ACL-106 + ACL-107   Python agent, user-visible P2 fast wins   DONE
 Batch 2  ACL-108 + ACL-109 + ACL-110 + TXN-038   Python robustness
 Batch 3  ACL-101 + ACL-102 + TXN-037             Rust core ERROR-EXACT
 Batch 4  ACL-104 + ACL-105                       eBPF fragment attribution
 Batch 5  TXN-036 + ACL-100                       transaction/status projection
 ```
+
+Batch 1 closed 2026-08-15: RED `8b34f26` / Build
+[31853208120](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31853208120)
+failed only the five intended behaviors; GREEN `7feda2d` + `774158c` passed
+exact-head Build
+[31853325569](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31853325569)
+and the local full Python suite (645 tests OK). The compile-side ethertype
+repair recovers stored non-canonical rules without a data migration.
 
 The order fixes the two user-visible P2 rows first, then completes the
 same-language Python hardening, then the core error-propagation family, then
