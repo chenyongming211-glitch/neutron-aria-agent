@@ -116,8 +116,8 @@ not modify their tests or production paths:
 - `REVIEW-OPS-039`: generic pinned-map authority, currently demonstrated by
   QoS and generic conntrack query paths;
 - `REVIEW-ACL-089`: QoS and Mirror deletion;
-- `REVIEW-ACL-093`: generic trace-filter deletion;
-- `REVIEW-ACL-094`: trace/drop/monitoring flush accounting;
+- the non-ACL remainder of `REVIEW-ACL-094`: global kernel-drop, QoS and
+  unrelated monitoring flush accounting;
 - `REVIEW-ACL-096` and `REVIEW-ACL-097`: TCP-RT queries; and
 - `REVIEW-ACL-088`: defensive general network-map ownership debt whose current
   ACL production callers already retain owner-preimage protection.

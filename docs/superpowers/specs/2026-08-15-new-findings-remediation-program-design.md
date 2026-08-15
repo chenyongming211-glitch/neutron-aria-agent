@@ -277,8 +277,9 @@ set by the 2026-08-14 ACL-only design:
 - `REVIEW-ACL-103` (`closed-not-supported` under the untagged-VM-tap product
   contract, with the support-expansion reopen conditions above);
 - the pre-existing non-ACL rows `REVIEW-ACL-078`, `REVIEW-OPS-039`,
-  `REVIEW-ACL-089`, `REVIEW-ACL-093`, `REVIEW-ACL-094`, `REVIEW-ACL-096`,
-  `REVIEW-ACL-097`, and the defensive `REVIEW-ACL-088`; and
+  `REVIEW-ACL-089`, the non-ACL remainder of `REVIEW-ACL-094`,
+  `REVIEW-ACL-096`, `REVIEW-ACL-097`, and the defensive
+  `REVIEW-ACL-088`; and
 - `REVIEW-ACL-086`, which remains the separate target-kernel verification
   gate and is not called fixed without target-kernel evidence.
 
