@@ -1,11 +1,11 @@
 use aria_ebpf_abi::{
     fragment_context_disposition, fragment_context_flags_for_l4, fragment_context_l4_proto,
     fragment_ct_create_point, fragment_first_observation_metric, fragment_install_result,
-    fragment_resolve_decision, fragment_tracking_required, FragmentConfig,
-    FragmentContextDisposition, FragmentContextKey4, FragmentContextValue, FragmentCtCreatePoint,
-    FragmentEpochValue, FragmentInstallDecision, FragmentKind, FragmentResolveDecision,
-    set_fragment_resolve_drop_ids, PipelineCtx, TraceEvent, TraceEventV6, TraceStreamEvent,
-    DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_CONTEXT_EXPIRED,
+    fragment_resolve_decision, fragment_resolved_l4_fields, fragment_tracking_required,
+    FragmentConfig, FragmentContextDisposition, FragmentContextKey4, FragmentContextValue,
+    FragmentCtCreatePoint, FragmentEpochValue, FragmentInstallDecision, FragmentKind,
+    FragmentResolveDecision, set_fragment_resolve_drop_ids, PipelineCtx, TraceEvent,
+    TraceEventV6, TraceStreamEvent, DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_CONTEXT_EXPIRED,
     DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
     DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
     FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP, FRAGMENT_CONTEXT_VERSION,
@@ -55,6 +55,26 @@ fn current_value() -> FragmentContextValue {
         epoch: 7,
         expires_at_ns: 30_000_000_000,
     }
+}
+
+#[test]
+fn fragment_resolved_l4_fields_recovers_tcp_proto_and_ports() {
+    let value = FragmentContextValue {
+        flags: FRAGMENT_CONTEXT_FLAG_TCP,
+        ..current_value()
+    };
+
+    assert_eq!(
+        Some((IPPROTO_TCP, 40000u16, 53u16)),
+        fragment_resolved_l4_fields(&value),
+    );
+}
+
+#[test]
+fn fragment_resolved_l4_fields_is_none_without_l4_flags() {
+    let value = current_value();
+
+    assert_eq!(None, fragment_resolved_l4_fields(&value));
 }
 
 #[test]
