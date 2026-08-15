@@ -764,6 +764,13 @@ duplicate coverage. Result: 11 confirmed, 3 narrowed, 0 withdrawn,
 | `REVIEW-ACL-110` | confirmed | Conditional confirmed: a single agent cannot double-write in the same second (≥1s report interval); a second writer on the same `(port_id, host)` is required. Residual window of the `REVIEW-ACL-040` repair. |
 | `REVIEW-TXN-038` | confirmed | Lowest-impact of the fourteen: only a power loss inside the rename window, bounded by restart alignment against the Rust (generation, hash) identity. |
 
+The repair program for these rows is recorded in
+`docs/superpowers/specs/2026-08-15-new-findings-remediation-program-design.md`:
+five batches (B1 `ACL-106/107`, B2 `ACL-108/109/110`+`TXN-038`, B3
+`ACL-101/102`+`TXN-037`, B4 `ACL-104/105`, B5 `TXN-036`+`ACL-100`),
+thirteen in-scope rows, and `REVIEW-ACL-103` excluded as isolation-boundary
+debt with a recorded escalation condition. Implementation has not started.
+
 ## Verification At Time Of Recording
 
 - `python -m unittest discover -s openstack/neutron_aria/neutron_aria/tests/unit -v`: 214 tests passed.
