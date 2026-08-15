@@ -1,6 +1,6 @@
 # REVIEW-ACL-093/094 ACL Observability Delete Semantics Design
 
-**Status:** design complete; RED evidence pending
+**Status:** ACL-specific source implementation and hosted CI complete
 
 **Scope:** ACL-facing trace filters/logs, `DROP_REASON_STATS`, and ACL
 rule/group statistics cleanup
@@ -99,7 +99,24 @@ RED Rust fault-model tests must prove:
 - multiple real failures are aggregated; and
 - iterator faults abort rather than yielding a partial candidate set.
 
-GREEN requires the selected Rust behavior lane and the full hosted build. No
-local Cargo command is run. No privileged evidence is required because this
-batch changes userspace error reporting only and does not alter packet or map
-ABI behavior.
+RED commit `2be6c1a` added the fault-model contracts without the required
+production helpers. Build
+[31882657298](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31882657298)
+failed only in `rust-behavior` on the missing
+`execute_counted_map_delete_batch` and `delete_trace_filter_entry` symbols;
+the same run's full Rust/eBPF build passed.
+
+GREEN commit `26d5077` implemented the direct trace-filter delete classifier,
+strict trace/drop candidate enumeration, actual-removal counting, all-attempt
+error aggregation, precise optional IPv6 pin handling, and error propagation
+for ACL rule/group statistics cleanup. Commit `6770fce` connected the
+trace-filter contract to the existing required `map_delete_` Rust filter
+without adding a duplicate test lane. Exact-head Build
+[31883377443](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31883377443)
+passed the Rust behavior lane, warning-denied eBPF/userspace/agent builds, the
+legacy 448-byte stack gate, fast contracts, database contracts and clean
+install.
+
+No local Cargo command was run. No privileged evidence is required because
+this batch changes userspace error reporting only and does not alter packet or
+map ABI behavior. The explicitly excluded non-ACL debt remains open.

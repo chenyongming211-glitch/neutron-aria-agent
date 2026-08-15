@@ -261,12 +261,15 @@ boundary in
 RED/GREEN hosted evidence. `REVIEW-ACL-083` is also fixed after its conditional
 path produced exact RED evidence. `REVIEW-ACL-084` and `REVIEW-TXN-035` are
 closed after their GREEN probes disproved the claimed consequences. No
-confirmed ACL production-fix batch remains in this narrowed line;
+confirmed ACL production-fix batch remains in this narrowed line. A later
+ACL-specific observability continuation fixed `REVIEW-ACL-093` and the ACL
+portion of `REVIEW-ACL-094` with exact RED/GREEN hosted evidence;
 `REVIEW-ACL-086` alone remains a target-kernel evidence gate.
 
 The former steps containing `REVIEW-ACL-078`, `REVIEW-OPS-039`,
-`REVIEW-ACL-089`, `REVIEW-ACL-093/094`, and `REVIEW-ACL-096/097` remain valid
+`REVIEW-ACL-089`, the non-ACL remainder of `REVIEW-ACL-094`, and
+`REVIEW-ACL-096/097` remain valid
 backlog records but are outside this ACL-only execution line because their
-product owners are QoS, Mirror, generic trace/drop monitoring, or TCP-RT.
+product owners are QoS, Mirror, global kernel-drop monitoring, or TCP-RT.
 `REVIEW-ACL-088` also remains separate defensive general-map debt. None of
 these exclusions changes an item to fixed or verification-complete.

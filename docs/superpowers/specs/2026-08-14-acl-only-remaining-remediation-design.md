@@ -133,6 +133,7 @@ Gate 3   ACL-086                      source + hosted RED/GREEN complete; field 
 Gate 4   ACL-083                      fixed after RED missing-session reproduction
          ACL-084                      closed by GREEN outer-owner rollback probe
          TXN-035                      closed by GREEN combined restart projection
+Batch 5  ACL-093 + ACL-094 ACL scope  fixed with exact RED/GREEN hosted CI
 ```
 
 Each production batch uses behavior-level RED tests, one or more narrow GREEN
@@ -144,7 +145,8 @@ execution is introduced.
 
 The ACL-only program is complete when:
 
-- the five confirmed ACL defects have exact RED/GREEN evidence;
+- the original five confirmed ACL defects and the later ACL observability
+  continuation have exact RED/GREEN evidence;
 - every conditional item has an honest verified or deferred outcome;
 - `REVIEW-ACL-086` keeps privileged target-kernel stress explicitly pending;
 - excluded non-ACL rows remain open and are not counted as ACL delivery gaps;
