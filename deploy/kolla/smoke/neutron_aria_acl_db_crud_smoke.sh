@@ -21,10 +21,10 @@ if [ -z "${ADMIN_RC_FILE}" ]; then
         ADMIN_RC_FILE=/etc/kolla/.adminrc
     fi
 fi
-[ -n "${ADMIN_RC_FILE}" ] && [ -r "${ADMIN_RC_FILE}" ] || {
+if [ -z "${ADMIN_RC_FILE}" ] || [ ! -r "${ADMIN_RC_FILE}" ]; then
     echo "No readable adminrc found for Neutron API smoke." >&2
     exit 1
-}
+fi
 # shellcheck disable=SC1090
 . "${ADMIN_RC_FILE}"
 

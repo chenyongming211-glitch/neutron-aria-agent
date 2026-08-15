@@ -186,7 +186,7 @@ cleanup_all() {
     cleanup_case_objects
     cleanup_vms
     cleanup_owned_vms
-    checkpoint cleanup "" "" done
+    checkpoint cleanup "" "" "done"
 }
 
 owned_vm_ids() {
@@ -208,8 +208,8 @@ finalize_run() {
     cleanup_all
     local remaining=0
     if [ -f "${WORK_DIR}/vms.tsv" ] || [ -f "${WORK_DIR}/owned.tsv" ]; then
-        local attempt server_id all_gone
-        for attempt in $(seq 1 30); do
+        local server_id all_gone
+        for _ in $(seq 1 30); do
             all_gone=true
             while read -r server_id; do
                 if ! nova_server_is_cleaned "${server_id}"; then
@@ -367,7 +367,9 @@ provision_vms() {
         identity="$(port_identity "${server_id}")"
         port_id="${identity%%$'\t'*}"
         ip="${identity#*$'\t'}"
-        [ -n "${port_id}" ] && [ -n "${ip}" ] || die "failed to resolve VM port/IP"
+        if [ -z "${port_id}" ] || [ -z "${ip}" ]; then
+            die "failed to resolve VM port/IP"
+        fi
         ifname="tap${port_id:0:11}"
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
             "${alias}" "${server_id}" "${port_id}" "${ip}" "${host}" "${ifname}" \
@@ -407,8 +409,7 @@ start_host_listener() {
         >>"${WORK_DIR}/host-listeners.log" 2>&1 &
     local pid=$!
     printf 'host-listener\t%s\t%s:%s\n' "${pid}" "${protocol}" "${port}" >>"${WORK_DIR}/pids.tsv"
-    local i
-    for i in $(seq 1 40); do [ -f "${ready}" ] && return 0; sleep 0.1; done
+    for _ in $(seq 1 40); do [ -f "${ready}" ] && return 0; sleep 0.1; done
     die "host ${protocol}/${port} listener did not become ready"
 }
 
@@ -461,7 +462,7 @@ run_matrix() {
         CURRENT_CYCLE=$((CURRENT_CYCLE + 1))
         checkpoint cycle_start "" "" pass
         while IFS=$'\t' read -r direction protocol stateful selector min_port max_port nonmatch; do
-            while IFS=$'\t' read -r alias server port_id ip host ifname; do
+            while IFS=$'\t' read -r alias _server port_id ip host ifname; do
                 if [ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]; then
                     event deadline pass "before_next_case"
                     return 0

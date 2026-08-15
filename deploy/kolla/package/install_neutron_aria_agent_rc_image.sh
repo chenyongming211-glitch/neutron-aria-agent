@@ -82,8 +82,7 @@ assert DEFAULT_HEARTBEAT_DETAIL_MODE == "summary_only"
 }
 
 wait_candidate_ready() {
-    local attempt
-    for attempt in $(seq 1 "${READY_TIMEOUT}"); do
+    for _ in $(seq 1 "${READY_TIMEOUT}"); do
         if container_running "${SERVICE_NAME}" &&
             docker exec "${SERVICE_NAME}" python -c '
 from neutron_aria.agent.config import load_config

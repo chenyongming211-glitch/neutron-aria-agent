@@ -61,10 +61,11 @@ exit 77
 EOF
 chmod +x "${ROOT}/bin/id" "${ROOT}/bin/docker" "${ROOT}/bin/curl"
 
+admin_rc_file="${ADMIN_RC_FILE}"
 set +e
 output="$(PATH="${ROOT}/bin:${PATH}" \
-    ADMIN_RC_FILE="${ADMIN_RC_FILE}" \
-    EXPECTED_ADMIN_RC="${ADMIN_RC_FILE}" \
+    ADMIN_RC_FILE="${admin_rc_file}" \
+    EXPECTED_ADMIN_RC="${admin_rc_file}" \
     ADMINRC_RECORD="${ADMINRC_RECORD}" \
     bash "${SMOKE}" 2>&1)"
 rc=$?

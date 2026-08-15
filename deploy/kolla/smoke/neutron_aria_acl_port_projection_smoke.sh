@@ -130,8 +130,8 @@ wait_for_status() {
 wait_for_projection() {
     local expected_status="$1"
     local expected_reason="$2"
-    local i status reason
-    for i in $(seq 1 "${CONVERGENCE_TIMEOUT}"); do
+    local status reason
+    for _ in $(seq 1 "${CONVERGENCE_TIMEOUT}"); do
         status="$(port_field aria_acl_runtime_status)"
         reason="$(port_field aria_acl_runtime_reason)"
         if [ "${status}" = "${expected_status}" ] && \

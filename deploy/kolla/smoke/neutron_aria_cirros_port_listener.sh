@@ -54,8 +54,9 @@ validate_port() {
     case "${PORT}" in
         *[!0-9]*|"") die "PORT must be numeric" ;;
     esac
-    [ "${PORT}" -ge 1 ] && [ "${PORT}" -le 65535 ] || \
+    if [ "${PORT}" -lt 1 ] || [ "${PORT}" -gt 65535 ]; then
         die "PORT must be in range 1..65535"
+    fi
 }
 
 ssh_base_args() {
@@ -82,6 +83,8 @@ guest_ssh() {
 }
 
 install_remote_helper() {
+    # The state/helper paths are deliberately expanded locally into remote assignments.
+    # shellcheck disable=SC2029
     guest_ssh "STATE_DIR='${REMOTE_STATE_DIR}' HELPER='${REMOTE_HELPER}' sh -s" <<'REMOTE'
 set -eu
 mkdir -p "${STATE_DIR}"

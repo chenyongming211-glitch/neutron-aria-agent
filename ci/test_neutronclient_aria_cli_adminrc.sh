@@ -55,10 +55,11 @@ esac
 EOF
 chmod +x "${ROOT}/bin/id" "${ROOT}/bin/docker"
 
+admin_rc_file="${ADMIN_RC_FILE}"
 set +e
 PATH="${ROOT}/bin:${PATH}" \
-    ADMIN_RC_FILE="${ADMIN_RC_FILE}" \
-    EXPECTED_ADMIN_RC="${ADMIN_RC_FILE}" \
+    ADMIN_RC_FILE="${admin_rc_file}" \
+    EXPECTED_ADMIN_RC="${admin_rc_file}" \
     ADMINRC_RECORD="${ADMINRC_RECORD}" \
     bash "${INSTALLER}" smoke >"${ROOT}/smoke.log" 2>&1
 smoke_rc=$?

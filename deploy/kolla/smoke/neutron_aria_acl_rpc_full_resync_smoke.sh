@@ -70,7 +70,7 @@ ping_ok() {
 
 status_brief() {
     neutron_cli aria-acl-port-status-show "${TARGET_PORT_ID}" |
-        egrep 'binding_id|effective_policy_id|effective_action|generation|runtime_status|status|reason|updated_at|host' ||
+        grep -E 'binding_id|effective_policy_id|effective_action|generation|runtime_status|status|reason|updated_at|host' ||
         true
 }
 
@@ -255,7 +255,7 @@ status_brief
 
 echo "agent_event_evidence:"
 agent_logs_since_start |
-    egrep 'event_batch_drained|service_result action=event_batch|full_resync_complete|acl_delivery_profile' |
+    grep -E 'event_batch_drained|service_result action=event_batch|full_resync_complete|acl_delivery_profile' |
     tail -n 80 || true
 
 echo "neutron_aria_acl_rpc_full_resync_smoke=pass"

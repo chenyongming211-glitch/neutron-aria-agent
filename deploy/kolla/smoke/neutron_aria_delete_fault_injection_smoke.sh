@@ -176,8 +176,7 @@ cleanup() {
 trap cleanup EXIT
 
 wait_for_uds() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         if curl --silent --show-error --fail \
             --unix-socket "${SOCKET_PATH}" \
             "http://localhost/api/v1/neutron/status" >/dev/null 2>&1; then
@@ -343,6 +342,7 @@ PY
 start_datapath_with_fault() {
     local point="$1"
     local marker="$2"
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
 
     IMAGE="${DATAPATH_IMAGE}" \
         BUILD_IMAGE="${BUILD_DATAPATH_IMAGE}" \
@@ -361,10 +361,11 @@ start_datapath_with_fault() {
         FAULT_ACTION="${FAULT_ACTION}" \
         FAULT_AFTER_HITS="${FAULT_AFTER_HITS}" \
         FAULT_ONCE_FILE="${marker}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        bash "${smoke_script}"
 }
 
 start_datapath_without_fault() {
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
     IMAGE="${DATAPATH_IMAGE}" \
         BUILD_IMAGE=false \
         SERVICE_NAME="${DATAPATH_SERVICE_NAME}" \
@@ -377,7 +378,7 @@ start_datapath_without_fault() {
         STATE_DIR="${DATAPATH_STATE_DIR:-/var/lib/aria-agent-smoke}" \
         PIN_PATH="${DATAPATH_PIN_PATH}" \
         LISTEN_ADDR="${DATAPATH_LISTEN_ADDR}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        bash "${smoke_script}"
 }
 
 submit_direct_acl_snapshot() {
@@ -481,6 +482,7 @@ PY
 
 apply_acl_snapshot_without_rollback() {
     local acl_fixture_json="$1"
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh"
 
     if [ "${DIRECT_SNAPSHOT_MODE}" = "true" ]; then
         submit_direct_acl_snapshot "${acl_fixture_json}"
@@ -494,7 +496,7 @@ apply_acl_snapshot_without_rollback() {
         EXPECTED_IFNAME="${EXPECTED_IFNAME}" \
         REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE}" \
         REPO_ROOT="${REPO_ROOT}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh"
+        bash "${smoke_script}"
 }
 
 record_cleanup_error() {
@@ -506,8 +508,8 @@ restore_renamed_pins() {
     local index record source destination expected_id actual_id rc=0 separator=$'\x1f'
     for ((index=${#renamed_pin_records[@]}-1; index>=0; index--)); do
         record="${renamed_pin_records[index]}"
-        source="${record%%${separator}*}"
-        destination="${record#*${separator}}"
+        source="${record%%"${separator}"*}"
+        destination="${record#*"${separator}"}"
         if [ "${source}" = "${record}" ] || [ -z "${source}" ] || [ -z "${destination}" ]; then
             echo "invalid pin restoration record" >&2
             rc=1
@@ -629,7 +631,7 @@ capture_tc_filter() {
 }
 
 capture_tc_identity() {
-    local directory="$1" ifindex attach_mode ingress_link egress_link direction net_rc=0
+    local directory="$1" ifindex ingress_link egress_link direction net_rc=0
     ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")" || return 1
     ip -details link show dev "${EXPECTED_IFNAME}" >"${directory}/link.txt" || return 1
     capture_tc_filter ingress "${directory}/tc-ingress.json" || return 1
@@ -642,13 +644,11 @@ capture_tc_identity() {
     ingress_link="${PIN_ROOT}/${EXPECTED_IFNAME}_tc_ingress_link"
     egress_link="${PIN_ROOT}/${EXPECTED_IFNAME}_tc_egress_link"
     if [ -e "${ingress_link}" ] && [ -e "${egress_link}" ]; then
-        attach_mode="tcx"
         bpftool -j link show pinned "${ingress_link}" \
             >"${directory}/pinned-ingress-link.json" || return 1
         bpftool -j link show pinned "${egress_link}" \
             >"${directory}/pinned-egress-link.json" || return 1
     elif [ ! -e "${ingress_link}" ] && [ ! -e "${egress_link}" ]; then
-        attach_mode="legacy"
         for direction in ingress egress; do
             bpftool -j prog show pinned "${PIN_ROOT}/tc_${direction}" \
                 >"${directory}/pinned-${direction}-prog.json" || return 1
@@ -759,6 +759,8 @@ import struct,sys
 print(" ".join("%02x" % b for b in struct.pack("=I", int(sys.argv[1]))))
 PY
     )" || return 1
+    # Hex bytes must be separate bpftool argv entries.
+    # shellcheck disable=SC2086
     bpftool -j map lookup pinned "${PIN_ROOT}/IFACE_CTX_MAP" key hex ${key_hex} \
         >"${directory}/iface-ctx.json" || return 1
     tap_id="$("${PYTHON_BIN}" - "${directory}/iface-ctx.json" <<'PY'
@@ -781,6 +783,8 @@ import struct,sys
 print(" ".join("%02x" % b for b in struct.pack("=I", int(sys.argv[1]))))
 PY
     )" || return 1
+    # Hex bytes must be separate bpftool argv entries.
+    # shellcheck disable=SC2086
     bpftool -j map lookup pinned "${PIN_ROOT}/TAP_CONFIG_MAP" key hex ${config_hex} \
         >"${directory}/tap-config.json" || return 1
     "${PYTHON_BIN}" - "${directory}/tap-config.json" "${tap_id}" >"${directory}/bank.json" <<'PY' || return 1

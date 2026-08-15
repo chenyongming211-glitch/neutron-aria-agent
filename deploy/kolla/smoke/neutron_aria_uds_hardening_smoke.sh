@@ -219,6 +219,8 @@ write_summary() {
         if [ "${disposition}" = "fail" ]; then
             fail_count=$((fail_count + 1))
         fi
+        # Backticks are literal Markdown delimiters, not command substitution.
+        # shellcheck disable=SC2016
         printf '| %s | %s | `%s` | %s | `%s` | %s |\n' \
             "$(escape_md "${fact}")" \
             "$(escape_md "${expected}")" \

@@ -42,7 +42,6 @@ FRAGMENT_PEER_VLAN_B_IFNAME="${FRAGMENT_PEER_VLAN_B_IFNAME:-}"
 FRAGMENT_EXPECTED_CAPACITY="${FRAGMENT_EXPECTED_CAPACITY:-8192}"
 
 ACL_INGRESS_HOOK_TC=1
-TRACE_FILTER="controlled_icmp_flow"
 XDP_NO_ACL_CT=false
 TC_INGRESS_HIT=false
 TC_EGRESS_HIT=false
@@ -438,6 +437,8 @@ import struct,sys
 print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))
 PY
     )" || return 1
+    # Hex bytes must be separate bpftool argv entries.
+    # shellcheck disable=SC2086
     bpftool -j map lookup pinned "${PIN_ROOT}/IFACE_CTX_MAP" key hex ${key_hex} \
         >"${WORK_DIR}/${label}-iface-ctx.json" || return 1
     tap_id="$(python3 - "${WORK_DIR}/${label}-iface-ctx.json" <<'PY'
@@ -453,6 +454,8 @@ import struct,sys
 print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))
 PY
     )" || return 1
+    # Hex bytes must be separate bpftool argv entries.
+    # shellcheck disable=SC2086
     bpftool -j map lookup pinned "${PIN_ROOT}/TAP_CONFIG_MAP" key hex ${config_hex} \
         >"${WORK_DIR}/${label}-tap-config.json" || return 1
     python3 - "${WORK_DIR}/${label}-tap-config.json" "${ACL_INGRESS_HOOK_TC}" <<'PY'
@@ -551,10 +554,18 @@ assert_stateful_evidence() {
     read -r initial_count initial_packets initial_bytes < <(flow_conntrack_totals "${WORK_DIR}/stateful-ready-conntrack.json")
     read -r first_count first_packets first_bytes < <(flow_conntrack_totals "${WORK_DIR}/stateful-egress-after-conntrack.json")
     read -r final_count packet_delta byte_delta < <(flow_conntrack_totals "${WORK_DIR}/stateful-ingress-after-conntrack.json")
-    [ "${initial_count}" -eq 0 ] && [ "${initial_packets}" -eq 0 ] && [ "${initial_bytes}" -eq 0 ] || die "stateful transition did not start with zero controlled-flow CT"
-    [ "${first_count}" -eq 1 ] && [ "${first_packets}" -eq "${expected_per_batch}" ] || die "first controlled batch has duplicate CT observations"
-    [ "${first_bytes}" -gt 0 ] && [ $((first_bytes % expected_per_batch)) -eq 0 ] || die "first controlled batch CT byte observations are inconsistent"
-    [ "${final_count}" -eq 1 ] && [ "${packet_delta}" -eq "${expected_total}" ] || die "NO_INGRESS_DOUBLE_COUNT expected flow packets=${expected_total}, got ${packet_delta}"
+    if ! { [ "${initial_count}" -eq 0 ] && [ "${initial_packets}" -eq 0 ] && [ "${initial_bytes}" -eq 0 ]; }; then
+        die "stateful transition did not start with zero controlled-flow CT"
+    fi
+    if ! { [ "${first_count}" -eq 1 ] && [ "${first_packets}" -eq "${expected_per_batch}" ]; }; then
+        die "first controlled batch has duplicate CT observations"
+    fi
+    if ! { [ "${first_bytes}" -gt 0 ] && [ $((first_bytes % expected_per_batch)) -eq 0 ]; }; then
+        die "first controlled batch CT byte observations are inconsistent"
+    fi
+    if ! { [ "${final_count}" -eq 1 ] && [ "${packet_delta}" -eq "${expected_total}" ]; }; then
+        die "NO_INGRESS_DOUBLE_COUNT expected flow packets=${expected_total}, got ${packet_delta}"
+    fi
     [ "${byte_delta}" -eq $((first_bytes * 2)) ] || die "controlled CT byte observations are not exactly one TC observation per packet"
 
     egress_rule_before="$(rule_counter_sum "${WORK_DIR}/stateful-egress-before-rules.json" egress packets)"
@@ -595,10 +606,18 @@ assert_bank_evidence() {
     read -r before_ct_count before_ct_packets before_ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/bank-before-conntrack.json")
     read -r ct_count ct_packets ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/bank-after-conntrack.json")
     expected=$((TRAFFIC_PACKETS * 2))
-    [ "${reference_ct_count}" -eq 1 ] && [ "${reference_ct_packets}" -eq "${expected}" ] && [ "${reference_ct_bytes}" -gt 0 ] || die "stateful first batch did not provide an exact byte reference for bank traffic"
-    [ "${pre_resync_ct_count}" -eq 1 ] && [ "${pre_resync_ct_packets}" -gt 0 ] && [ "${pre_resync_ct_bytes}" -gt 0 ] || die "bank transition did not capture the live controlled-flow CT before resync"
-    [ "${before_ct_count}" -eq 0 ] && [ "${before_ct_packets}" -eq 0 ] && [ "${before_ct_bytes}" -eq 0 ] || die "Neutron strict CT flush did not clear the controlled flow before bank traffic"
-    [ "${ct_count}" -eq 1 ] && [ "${ct_packets}" -eq "${expected}" ] && [ "${ct_bytes}" -eq "${reference_ct_bytes}" ] || die "bank flow was not recreated after strict flush with exact controlled-flow packet/byte counters"
+    if ! { [ "${reference_ct_count}" -eq 1 ] && [ "${reference_ct_packets}" -eq "${expected}" ] && [ "${reference_ct_bytes}" -gt 0 ]; }; then
+        die "stateful first batch did not provide an exact byte reference for bank traffic"
+    fi
+    if ! { [ "${pre_resync_ct_count}" -eq 1 ] && [ "${pre_resync_ct_packets}" -gt 0 ] && [ "${pre_resync_ct_bytes}" -gt 0 ]; }; then
+        die "bank transition did not capture the live controlled-flow CT before resync"
+    fi
+    if ! { [ "${before_ct_count}" -eq 0 ] && [ "${before_ct_packets}" -eq 0 ] && [ "${before_ct_bytes}" -eq 0 ]; }; then
+        die "Neutron strict CT flush did not clear the controlled flow before bank traffic"
+    fi
+    if ! { [ "${ct_count}" -eq 1 ] && [ "${ct_packets}" -eq "${expected}" ] && [ "${ct_bytes}" -eq "${reference_ct_bytes}" ]; }; then
+        die "bank flow was not recreated after strict flush with exact controlled-flow packet/byte counters"
+    fi
     rule_before="$(rule_counter_sum "${WORK_DIR}/bank-before-rules.json" egress packets)"
     rule_after="$(rule_counter_sum "${WORK_DIR}/bank-after-rules.json" egress packets)"
     [ $((rule_after - rule_before)) -eq "${expected}" ] || die "bank ACL rule evidence does not match controlled TC observations"
@@ -616,8 +635,12 @@ assert_stateless_evidence() {
     read -r ct_count ct_packets ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/stateless-after-conntrack.json")
     stateless_hit_delta=$(( $(metric_sum "${WORK_DIR}/stateless-after-metrics.prom" tc_egress ct_hit "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/stateless-before-metrics.prom" tc_egress ct_hit "${METRIC_FAMILY}") ))
     stateless_disabled_delta=$(( $(metric_sum "${WORK_DIR}/stateless-after-metrics.prom" tc_egress ct_disabled "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/stateless-before-metrics.prom" tc_egress ct_disabled "${METRIC_FAMILY}") ))
-    [ "${ct_count}" -eq 0 ] && [ "${ct_packets}" -eq 0 ] && [ "${ct_bytes}" -eq 0 ] || die "STATELESS_ZERO_CT controlled flow retained CT"
-    [ "${stateless_hit_delta}" -eq 0 ] && [ "${stateless_disabled_delta}" -ge "${TRAFFIC_PACKETS}" ] || die "stateless CT contract evidence is invalid"
+    if ! { [ "${ct_count}" -eq 0 ] && [ "${ct_packets}" -eq 0 ] && [ "${ct_bytes}" -eq 0 ]; }; then
+        die "STATELESS_ZERO_CT controlled flow retained CT"
+    fi
+    if ! { [ "${stateless_hit_delta}" -eq 0 ] && [ "${stateless_disabled_delta}" -ge "${TRAFFIC_PACKETS}" ]; }; then
+        die "stateless CT contract evidence is invalid"
+    fi
     egress_before="$(rule_counter_sum "${WORK_DIR}/stateless-before-rules.json" egress packets)"
     egress_after="$(rule_counter_sum "${WORK_DIR}/stateless-after-rules.json" egress packets)"
     ingress_before="$(rule_counter_sum "${WORK_DIR}/stateless-before-rules.json" ingress packets)"
@@ -636,7 +659,9 @@ run_stateless_evidence() {
 assert_deny_evidence() {
     local ct_count ct_packets ct_bytes drop_before drop_after deny_packets=2
     read -r ct_count ct_packets ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/deny-after-conntrack.json")
-    [ "${ct_count}" -eq 0 ] && [ "${ct_packets}" -eq 0 ] && [ "${ct_bytes}" -eq 0 ] || die "deny ACL created controlled-flow CT"
+    if ! { [ "${ct_count}" -eq 0 ] && [ "${ct_packets}" -eq 0 ] && [ "${ct_bytes}" -eq 0 ]; }; then
+        die "deny ACL created controlled-flow CT"
+    fi
     drop_before="$(rule_counter_sum "${WORK_DIR}/deny-before-rules.json" egress dropped_packets)"
     drop_after="$(rule_counter_sum "${WORK_DIR}/deny-after-rules.json" egress dropped_packets)"
     deny_drop_delta=$((drop_after - drop_before))
@@ -1032,6 +1057,8 @@ print(" ".join("%02x" % byte for byte in key)+"|"+
       " ".join("%02x" % byte for byte in value))
 PY
     )
+    # Both encoded keys/values intentionally expand into one argv entry per byte.
+    # shellcheck disable=SC2086
     if command bpftool map update pinned "${PIN_ROOT}/ACL_SRC_IPV4_TRIE" \
         key hex ${active_selector_key_hex} value hex ${legacy_local_group_id_hex}; then
         injection_rc=0
@@ -1481,7 +1508,7 @@ PY
 
 assert_legacy_repair_evidence() {
     local injected_bank polluted_bank repaired_bank equal_before_bank equal_bank restart_bank
-    local repaired_ct_count repaired_ct_packets repaired_ct_bytes
+    local repaired_ct_count _repaired_ct_packets _repaired_ct_bytes
     local repaired_drop_before repaired_drop_after repaired_drop_delta
     injected_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-polluted-after-runtime-compatibility.txt")"
     polluted_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-before-repair-runtime-compatibility.txt")"
@@ -1489,7 +1516,7 @@ assert_legacy_repair_evidence() {
     equal_before_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-before-equal-runtime-compatibility.txt")"
     equal_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-after-equal-runtime-compatibility.txt")"
     restart_bank="$(awk '{print $1}' "${WORK_DIR}/legacy-clean-restart-runtime-compatibility.txt")"
-    read -r repaired_ct_count repaired_ct_packets repaired_ct_bytes < <(
+    read -r repaired_ct_count _repaired_ct_packets _repaired_ct_bytes < <(
         flow_conntrack_totals "${WORK_DIR}/legacy-repaired-deny-after-conntrack.json"
     )
     repaired_drop_before="$(rule_counter_sum "${WORK_DIR}/legacy-repaired-deny-before-rules.json" egress dropped_packets)"

@@ -30,8 +30,7 @@ restart_agent_if_requested() {
     [ "${enabled}" = "true" ] || return 0
     log "Restarting ${SERVICE_NAME} to load installed agent egg"
     docker restart "${SERVICE_NAME}" >/dev/null
-    local i
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
         if docker ps --format '{{.Names}}' | grep -qx "${SERVICE_NAME}"; then
             return 0
         fi

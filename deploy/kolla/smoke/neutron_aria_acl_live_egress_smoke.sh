@@ -271,8 +271,8 @@ create_temp_vm() {
     server_id="$(printf '%s\n' "${boot_output}" | table_field id)"
     [ -n "${server_id}" ] || die "failed to create temporary VM"
 
-    local i status host ip port
-    for i in $(seq 1 100); do
+    local status host ip port
+    for _ in $(seq 1 100); do
         show_output="$(docker exec -u root --env-file "${ADMIN_RC_FILE}" \
             openstack_client nova show "${server_id}" || true)"
         status="$(printf '%s\n' "${show_output}" | table_field status)"

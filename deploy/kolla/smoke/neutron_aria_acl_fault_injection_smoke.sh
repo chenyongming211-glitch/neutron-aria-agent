@@ -84,8 +84,7 @@ cleanup() {
 trap cleanup EXIT
 
 wait_for_uds() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         if curl --silent --show-error --fail \
             --unix-socket "${SOCKET_PATH}" \
             "http://localhost/api/v1/neutron/status" >/dev/null 2>&1; then
@@ -240,6 +239,7 @@ PY
 start_datapath_with_fault() {
     local point="$1"
     local marker="$2"
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
 
     IMAGE="${DATAPATH_IMAGE}" \
         BUILD_IMAGE="${BUILD_DATAPATH_IMAGE}" \
@@ -252,20 +252,22 @@ start_datapath_with_fault() {
         FAULT_ACTION="${FAULT_ACTION}" \
         FAULT_AFTER_HITS="${FAULT_AFTER_HITS}" \
         FAULT_ONCE_FILE="${marker}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        bash "${smoke_script}"
 }
 
 start_datapath_without_fault() {
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
     IMAGE="${DATAPATH_IMAGE}" \
         BUILD_IMAGE=false \
         SERVICE_NAME="${DATAPATH_SERVICE_NAME}" \
         REPO_ROOT="${REPO_ROOT}" \
         ARTIFACT_DIR="${ARTIFACT_DIR}" \
         REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        bash "${smoke_script}"
 }
 
 run_acl_smoke() {
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_full_resync_smoke.sh"
     REPO_ROOT="${REPO_ROOT}" \
         VM_IP="${VM_IP}" \
         EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" \
@@ -277,7 +279,7 @@ run_acl_smoke() {
         PING_TIMEOUT="${PING_TIMEOUT}" \
         REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE}" \
         ALLOW_EXISTING_MANAGED_PORTS="${ALLOW_EXISTING_MANAGED_PORTS:-false}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_full_resync_smoke.sh"
+        bash "${smoke_script}"
 }
 
 need_command docker

@@ -79,7 +79,8 @@ do
 done
 
 mkdir -p "${STAGING_DIR}/dist/kolla"
-EGG_PATH="${OUT_DIR}/${EGG_NAME}" \
+egg_path="${OUT_DIR}/${EGG_NAME}"
+EGG_PATH="${egg_path}" \
     OUT_DIR="${OUT_DIR}" \
     REPO_ROOT="${STAGING_DIR}" \
     SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \

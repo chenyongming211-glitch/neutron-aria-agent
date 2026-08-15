@@ -872,9 +872,13 @@ exercise_legacy_zero_compatibility() {
     local map="${PIN_ROOT}/global-v2/TAP_CONFIG_MAP" ifindex ifindex_key tap_id key value
     ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
     ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
+    # Encoded keys intentionally expand into one helper argv entry per byte.
+    # shellcheck disable=SC2086
     tap_id="$(bpftool_map_lookup_json "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
         ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(int(x,0) if isinstance(x,str) else x for x in v[:4]))[0])')"
     key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${tap_id}")"
+    # Encoded keys intentionally expand into one helper argv entry per byte.
+    # shellcheck disable=SC2086
     bpftool_map_lookup_json "${map}" ${key} >"${WORK_DIR}/tap-config-original.json"
     value="$(python3 - "${WORK_DIR}/tap-config-original.json" <<'PY'
 import json,sys
@@ -884,6 +888,8 @@ v[7]=0
 print(" ".join("%02x"%b for b in v))
 PY
     )"
+    # Encoded keys/values intentionally expand into one bpftool argv entry per byte.
+    # shellcheck disable=SC2086
     bpftool map update pinned "${map}" key hex ${key} value hex ${value}
     set_trace_filter "" ""
     capture_acl_counters legacy-zero-before
@@ -894,6 +900,8 @@ PY
     curl --fail -sS -H 'Content-Type: application/json' -X PUT \
         -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
         "${HTTP}/api/v1/${INSTANCE}/config" >/dev/null
+    # Encoded keys intentionally expand into one helper argv entry per byte.
+    # shellcheck disable=SC2086
     bpftool_map_lookup_json "${map}" ${key} | python3 -c '
 import json,sys
 value=[int(x,0) if isinstance(x,str) else x for x in json.load(sys.stdin)["value"]]
@@ -975,10 +983,14 @@ PY
         map="${PIN_ROOT}/global-v2/TAP_CONFIG_MAP"
         ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
         ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
+        # Encoded keys intentionally expand into one helper argv entry per byte.
+        # shellcheck disable=SC2086
         tap_id="$(bpftool_map_lookup_json "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
             ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(int(x,0) if isinstance(x,str) else x for x in v[:4]))[0])')"
         key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${tap_id}")"
     fi
+    # Encoded keys intentionally expand into one helper argv entry per byte.
+    # shellcheck disable=SC2086
     bpftool_map_lookup_json "${map}" ${key} >"${WORK_DIR}/incomplete-restart-gate.json"
     python3 - "${WORK_DIR}/incomplete-restart-gate.json" "${MODE}" <<'PY'
 import json,sys
@@ -1002,6 +1014,8 @@ assert_standalone_all_group_projection() {
             bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"
             ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
             ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
+            # Encoded keys intentionally expand into one helper argv entry per byte.
+            # shellcheck disable=SC2086
             expected_tap_id="$(bpftool_map_lookup_json "${map_root}/IFACE_CTX_MAP" \
                 ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(int(x,0) if isinstance(x,str) else x for x in v[:4]))[0])')"
             ;;

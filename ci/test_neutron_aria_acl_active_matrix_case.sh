@@ -53,11 +53,15 @@ for marker in \
     grep -q "${marker}" "${CASE_SCRIPT}" || fail "missing contract marker: ${marker}"
 done
 grep -q 'item.get("Field")' "${CASE_SCRIPT}" || fail "missing legacy neutron JSON adapter"
+# This contract searches for literal generated shell source, including `$1`.
+# shellcheck disable=SC2016
 if grep -Fq 'awk '\''NF {print $1; exit}'\''' "${CASE_SCRIPT}"; then
     fail "legacy create output must extract a UUID instead of its first word"
 fi
 grep -q 'uuid_re' "${CASE_SCRIPT}" || \
     fail "resource ID parser must recognize UUIDs in legacy create messages"
+# This contract searches for literal generated shell variable references.
+# shellcheck disable=SC2016
 grep -Fq '"${PYTHON_BIN}" "${GUEST_EXEC_FILE}" "${VM_IP}" "$1"' "${CASE_SCRIPT}" || \
     fail "guest execution must use the selected Python interpreter"
 grep -q 'last_nonempty_line' "${CASE_SCRIPT}" || \
@@ -66,9 +70,11 @@ grep -q 'last_nonempty_line' "${CASE_SCRIPT}" || \
 binding_line="$(grep -n 'delete_owned_type binding' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
 rule_line="$(grep -n 'delete_owned_type rule' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
 policy_line="$(grep -n 'delete_owned_type policy' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
-[ -n "${binding_line}" ] && [ -n "${rule_line}" ] && [ -n "${policy_line}" ] || \
+if [ -z "${binding_line}" ] || [ -z "${rule_line}" ] || [ -z "${policy_line}" ]; then
     fail "cleanup order calls are missing"
-[ "${binding_line}" -lt "${rule_line}" ] && [ "${rule_line}" -lt "${policy_line}" ] || \
+fi
+if [ "${binding_line}" -ge "${rule_line}" ] || [ "${rule_line}" -ge "${policy_line}" ]; then
     fail "cleanup must delete binding, then rule, then policy"
+fi
 
 echo "neutron aria ACL active matrix case contract passed"

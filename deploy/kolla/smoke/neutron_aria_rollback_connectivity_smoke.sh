@@ -153,6 +153,7 @@ ping_vm() {
 }
 
 acl_rollback_drill() {
+    local smoke_script="${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_full_resync_smoke.sh"
     VM_IP="${VM_IP}" \
         EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" \
         EXPECTED_IFNAME="${EXPECTED_IFNAME}" \
@@ -167,7 +168,7 @@ acl_rollback_drill() {
         SERVICE_NAME="${SERVICE_NAME}" \
         SOCKET_PATH="${SOCKET_PATH}" \
         EXEC_USER="${EXEC_USER}" \
-        bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_full_resync_smoke.sh"
+        bash "${smoke_script}"
 }
 
 wait_agent_running() {
@@ -183,8 +184,7 @@ wait_agent_running() {
 }
 
 wait_datapath_ready() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_DATAPATH_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_DATAPATH_SECONDS}"); do
         if docker ps --format '{{.Names}}' | grep -qx "${DATAPATH_SERVICE_NAME}" && \
             [ -S "${SOCKET_PATH}" ]; then
             return 0
@@ -261,6 +261,8 @@ write_summary() {
         else
             fail_count=$((fail_count + 1))
         fi
+        # Backticks are literal Markdown delimiters, not command substitution.
+        # shellcheck disable=SC2016
         printf '| %s | %s | `%s` | %s | `%s` | %s |\n' \
             "$(escape_md "${fact}")" \
             "$(escape_md "${expected}")" \

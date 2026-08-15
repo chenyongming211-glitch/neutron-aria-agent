@@ -351,8 +351,7 @@ restart_service() {
         exit 1
     fi
 
-    local attempt
-    for attempt in {1..15}; do
+    for _ in {1..15}; do
         if "$INSTALL_BIN_DIR/ariactl" health >/dev/null 2>&1; then
             log "aria-agent 已启动并通过健康检查"
             return 0

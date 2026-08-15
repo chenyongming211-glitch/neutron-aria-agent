@@ -335,8 +335,7 @@ wait_tap_absent() {
 }
 
 wait_ping() {
-    local attempt
-    for attempt in $(seq 1 "${MIGRATION_WAIT_SECONDS}"); do
+    for _ in $(seq 1 "${MIGRATION_WAIT_SECONDS}"); do
         if ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null 2>&1; then
             return 0
         fi

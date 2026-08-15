@@ -111,8 +111,7 @@ check_ovs_identity() {
 }
 
 wait_ready() {
-    local attempt
-    for attempt in $(seq 1 "${READY_TIMEOUT}"); do
+    for _ in $(seq 1 "${READY_TIMEOUT}"); do
         if container_running "${SERVICE_NAME}" &&
             curl -fsS "${HEALTH_URL}" >/dev/null 2>&1 &&
             docker exec -u neutron "${AGENT_SERVICE}" curl -fsS \

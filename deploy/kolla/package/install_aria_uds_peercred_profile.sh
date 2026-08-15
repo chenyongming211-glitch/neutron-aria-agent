@@ -225,8 +225,7 @@ wait_for_socket() {
 }
 
 wait_for_authorized_uds() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         if container_running "${DATAPATH_SERVICE}" &&
             [ -S "${SOCKET_PATH}" ] &&
             authorized_probe >/dev/null 2>&1; then
@@ -375,10 +374,10 @@ restart_datapath() {
 restore_latest() {
     local config_link="${STATE_DIR}/aria-agent-openstack.latest.bak"
     local metadata_link="${STATE_DIR}/run-aria.latest.meta"
-    [ -e "${config_link}" ] && [ -e "${metadata_link}" ] || {
+    if [ ! -e "${config_link}" ] || [ ! -e "${metadata_link}" ]; then
         echo "missing rollback preimage in ${STATE_DIR}" >&2
         return 1
-    }
+    fi
     local config_backup metadata uid gid mode temp_config
     local tmpfiles_present tmpfiles_backup temp_tmpfiles
     config_backup="$(readlink -f "${config_link}")"

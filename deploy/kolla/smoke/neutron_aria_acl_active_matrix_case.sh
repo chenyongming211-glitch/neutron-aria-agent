@@ -56,8 +56,9 @@ validate_port() {
     case "${value}" in
         ''|*[!0-9]*) die "${name} must be numeric" ;;
     esac
-    [ "${value}" -ge 1 ] && [ "${value}" -le 65535 ] || \
+    if [ "${value}" -lt 1 ] || [ "${value}" -gt 65535 ]; then
         die "${name} must be in range 1..65535"
+    fi
 }
 
 select_python() {
@@ -332,7 +333,8 @@ wait_verdict() {
     local label="$4"
     local deadline=$((SECONDS + CONVERGENCE_TIMEOUT))
     local consecutive=0
-    local started="$(now_ms)"
+    local started
+    started="$(now_ms)"
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         if probe_once "${protocol}" "${DIRECTION}" "${port}" "${label}"; then
             if [ "${expected}" = allow ]; then

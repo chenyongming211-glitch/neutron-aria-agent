@@ -37,9 +37,12 @@ grep -q 'SOFT_DELETED' "${SOAK}" || \
     fail "legacy Nova soft-deleted records must count as cleaned resources"
 grep -q 'nova_cli force-delete' "${SOAK}" || \
     fail "owned test VMs must be hard-deleted so Neutron ports do not linger"
+# These patterns intentionally match literal variable references in generated shell source.
+# shellcheck disable=SC2016
 if grep -q 'local protocol="\$1" port="\$2" ready=.*\${protocol}' "${SOAK}"; then
     fail "nounset-sensitive host listener locals must be initialized separately"
 fi
+# shellcheck disable=SC2016
 grep -q 'while \[ "$(date +%s)" -lt "${DEADLINE_EPOCH}" \]' "${SOAK}" || \
     fail "matrix must repeat until the absolute deadline"
 
