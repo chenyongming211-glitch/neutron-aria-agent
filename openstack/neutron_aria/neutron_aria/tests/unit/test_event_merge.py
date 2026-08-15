@@ -90,6 +90,43 @@ class EventMergerTestCase(unittest.TestCase):
         self.assertIn(EVENT_QUEUE_OVERFLOW, batch.reasons)
         self.assertEqual({}, batch.port_updates)
 
+    def test_sustained_events_drain_after_max_merge_delay(self):
+        clock = FakeClock()
+        merger = EventMerger(clock=clock)
+
+        for index in range(50):
+            merger.record_port_update("p%s" % index)
+            self.assertFalse(merger.ready(0.2, max_merge_delay=5.0))
+            clock.advance(0.1)
+
+        # The silence window never opened; the absolute deadline fires.
+        self.assertTrue(merger.ready(0.2, max_merge_delay=5.0))
+
+    def test_max_merge_delay_is_measured_from_first_pending_event(self):
+        clock = FakeClock()
+        merger = EventMerger(clock=clock)
+
+        merger.record_port_update("p1")
+        clock.advance(4.9)
+        merger.record_port_update("p2")
+
+        self.assertFalse(merger.ready(0.2, max_merge_delay=5.0))
+        clock.advance(0.1)
+        self.assertTrue(merger.ready(0.2, max_merge_delay=5.0))
+
+    def test_queue_overflow_preserves_deleted_ports(self):
+        merger = EventMerger(max_pending_ports=1)
+
+        merger.record_port_delete("p1")
+        merger.record_port_update("p2")
+
+        batch = merger.drain()
+
+        self.assertTrue(batch.full_resync)
+        self.assertTrue(batch.overflowed)
+        self.assertEqual(["p1"], batch.deleted_ports)
+        self.assertEqual({}, batch.port_updates)
+
     def test_aria_acl_domain_update_requests_full_resync(self):
         merger = EventMerger()
 

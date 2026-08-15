@@ -312,6 +312,35 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual([], sync.delete_calls)
         self.assertEqual(EVENTS_WITHOUT_RESYNC_REASON, result["status"]["reason"])
 
+    def test_sustained_events_drain_after_max_merge_delay(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=300,
+            resync_interval=600,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        for index in range(50):
+            merger.record_port_update(
+                "p%s" % index,
+                binding_host="compute-1.example.test",
+            )
+            self.assertEqual(None, service.run_once())
+            clock.advance(0.1)
+
+        result = service.run_once()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(50, len(result["events"]["port_updates"]))
+
     def test_local_port_update_event_triggers_one_full_resync_after_window(self):
         clock = FakeClock()
         sync = FakeSynchronizer()

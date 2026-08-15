@@ -101,6 +101,77 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
         self.assertEqual(1, len(self.statements))
         self.assertNotIn("members", without_members[0])
 
+    def test_address_set_name_only_update_does_not_rewrite_members(self):
+        self.repository.create_address_set({
+            "id": "set-1",
+            "project_id": "project-1",
+            "enabled": True,
+            "members": [
+                {"address": "10.0.0.1/32"},
+                {"address": "10.0.1.1/32"},
+            ],
+        })
+
+        self.statements[:] = []
+        updated = self.repository.update_address_set(
+            "set-1",
+            {"name": "renamed"},
+        )
+
+        member_statements = [
+            statement for statement in self.statements
+            if (
+                "aria_acl_address_set_members" in statement and
+                statement.lstrip().upper().startswith(("DELETE", "INSERT"))
+            )
+        ]
+        self.assertEqual([], member_statements)
+        self.assertEqual(
+            ["10.0.0.1/32", "10.0.1.1/32"],
+            [
+                member["address"]
+                for member in updated["members"]
+            ],
+        )
+
+    def test_upsert_port_status_unchanged_write_succeeds_on_zero_affected_rows(self):
+        values = {
+            "port_id": "port-1",
+            "host": "compute-1",
+            "status": "ready",
+        }
+        self.repository.upsert_port_status(values)
+
+        class ZeroRowcount(object):
+            def __init__(self):
+                self.rowcount = 0
+
+        original_execute = self.repository.session.execute
+
+        def forced_execute(statement, *args, **kwargs):
+            text = str(statement).upper()
+            if (
+                text.startswith("UPDATE") and
+                "ARIA_ACL_PORT_STATUSES" in text
+            ):
+                original_execute(statement, *args, **kwargs)
+                return ZeroRowcount()
+            return original_execute(statement, *args, **kwargs)
+
+        self.repository.session.execute = forced_execute
+        error = None
+        try:
+            try:
+                self.repository.upsert_port_status(values)
+            except Exception as exc:
+                error = exc
+        finally:
+            self.repository.session.execute = original_execute
+
+        self.assertIsNone(error)
+        row = self.repository.get_port_status("port-1", host="compute-1")
+        self.assertEqual("ready", row["status"])
+
     def test_repository_query_parity(self):
         self._require_list_contract(self.repository.list_policies)
         self._create_policy("p3", "same", 3)

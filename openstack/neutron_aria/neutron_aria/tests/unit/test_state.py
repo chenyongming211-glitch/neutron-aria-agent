@@ -31,6 +31,35 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
             }],
         }
 
+    def test_write_fsyncs_state_directory_after_replace(self):
+        store = SnapshotStateStore(state_dir=self.state_dir)
+        fsynced = []
+        dir_fd = 987654
+        real_fsync = os.fsync
+        real_open = os.open
+
+        def recording_fsync(fd):
+            fsynced.append(fd)
+            if fd == dir_fd:
+                return None
+            return real_fsync(fd)
+
+        def recording_open(path, flags, *args, **kwargs):
+            if path == self.state_dir:
+                return dir_fd
+            return real_open(path, flags, *args, **kwargs)
+
+        os.fsync = recording_fsync
+        os.open = recording_open
+        try:
+            store.prepare_snapshot(self._snapshot())
+        finally:
+            os.fsync = real_fsync
+            os.open = real_open
+
+        self.assertEqual(2, len(fsynced))
+        self.assertEqual(dir_fd, fsynced[1])
+
     def test_desired_hash_ignores_generation_and_sorts_ports(self):
         left = self._snapshot("p1")
         right = self._snapshot("p1")

@@ -50,6 +50,7 @@ rpc_events_enabled = true
 incremental_rpc_enabled = false
 revisionless_incremental_mode = disabled
 event_merge_interval = 0.3
+event_max_merge_delay = 6
 event_queue_max_ports = 42
 event_queue_max_networks = 7
 
@@ -77,6 +78,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertFalse(config.incremental_rpc_enabled)
             self.assertEqual("disabled", config.revisionless_incremental_mode)
             self.assertEqual(0.3, config.event_merge_interval)
+            self.assertEqual(6.0, config.event_max_merge_delay)
             self.assertEqual(42, config.event_queue_max_ports)
             self.assertEqual(7, config.event_queue_max_networks)
             self.assertEqual("fixture", config.acl_source)
