@@ -100,6 +100,7 @@ ARIA_ACL_TABLES = {
         "counters_drop_pps",
         "counters_truncated",
         "counters_reset_detected",
+        "counters_group_map",
     ),
     "aria_acl_port_counters": (
         "id",
@@ -215,6 +216,7 @@ _TABLE_DEFINITIONS = {
         ("counters_drop_pps", "float", True, False),
         ("counters_truncated", "bool", True, False),
         ("counters_reset_detected", "bool", True, False),
+        ("counters_group_map", "text", True, False),
     ),
     "aria_acl_port_counters": (
         ("id", "uuid", False, True),

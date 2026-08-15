@@ -84,6 +84,7 @@ def port_counters_blob(runtime_status, port_id):
             "truncated": port.get("truncated", False),
             "reset_detected": reset,
             "drop_pps": drop_pps,
+            "groups": port.get("groups") or [],
             "summary": {
                 "policy_packets": port_copy.get("policy_packets"),
                 "policy_bytes": port_copy.get("policy_bytes"),

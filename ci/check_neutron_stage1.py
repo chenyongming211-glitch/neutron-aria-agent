@@ -581,6 +581,22 @@ def check_status_v1_contract():
             raise SystemExit("ERROR: Status V3 scenario status schema drifted")
         if status.get("status_contract_hash") != "v0.9-neutron-status-3":
             raise SystemExit("ERROR: Status V3 scenario status hash drifted")
+    counters_scenario = next(
+        (s for s in v3_scenarios if s.get("id") == "counters-present-single-port"),
+        None,
+    )
+    if counters_scenario is None:
+        raise SystemExit("ERROR: Status V3 counters scenario missing")
+    counters = counters_scenario.get("status", {}).get("counters")
+    if not isinstance(counters, dict) or counters.get("counters_schema_version") != 1:
+        raise SystemExit("ERROR: Status V3 counters section metadata drifted")
+    sample_port = (counters.get("ports") or [{}])[0]
+    if not isinstance(sample_port.get("groups"), list) or not (
+        sample_port["groups"]
+        and set(sample_port["groups"][0]) == {"id", "cidrs"}
+        and isinstance(sample_port["groups"][0]["cidrs"], list)
+    ):
+        raise SystemExit("ERROR: Status V3 counters group map shape drifted")
     expected_enums = {
         "NeutronStatusTransactionState": ("Idle", "Pending", "Classified", "Blocked", "Recovery"),
         "NeutronStatusOverallReadiness": ("Ready", "Degraded", "Blocked", "Unknown"),

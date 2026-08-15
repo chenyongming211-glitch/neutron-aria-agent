@@ -429,6 +429,12 @@ pub struct NeutronCounterReasonV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronCounterGroupV1 {
+    pub id: u32,
+    pub cidrs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct NeutronPortCountersV1 {
     pub port_id: String,
     pub tap_id: u32,
@@ -445,6 +451,9 @@ pub struct NeutronPortCountersV1 {
     pub buckets: Vec<NeutronCounterBucketV1>,
     #[serde(default)]
     pub reasons: Vec<NeutronCounterReasonV1>,
+    /// Group id -> CIDR mapping for display-layer translation of bucket ids.
+    #[serde(default)]
+    pub groups: Vec<NeutronCounterGroupV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

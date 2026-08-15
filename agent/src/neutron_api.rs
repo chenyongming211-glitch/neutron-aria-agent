@@ -1,13 +1,13 @@
 use aria_api::{
     action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
     NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronCounterBucketV1,
-    NeutronCounterReasonV1, NeutronDeleteResponse, NeutronDomainStatus, NeutronPortApplyResult,
-    NeutronPortCountersV1, NeutronPortSnapshot, NeutronPortStatus, NeutronSnapshotRequest,
-    NeutronSnapshotResponse, NeutronStatusCountersV1, NeutronStatusDomainEvidence,
-    NeutronStatusDomainState, NeutronStatusEffectiveAction, NeutronStatusOverallReadiness,
-    NeutronStatusPortEvidence, NeutronStatusRecoveryCause, NeutronStatusRequiredAction,
-    NeutronStatusSupportDisposition, NeutronStatusTransactionState, NeutronStatusV1Response,
-    NEUTRON_COUNTERS_SCHEMA_VERSION, NEUTRON_STATUS_CONTRACT_HASH,
+    NeutronCounterGroupV1, NeutronCounterReasonV1, NeutronDeleteResponse, NeutronDomainStatus,
+    NeutronPortApplyResult, NeutronPortCountersV1, NeutronPortSnapshot, NeutronPortStatus,
+    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusCountersV1,
+    NeutronStatusDomainEvidence, NeutronStatusDomainState, NeutronStatusEffectiveAction,
+    NeutronStatusOverallReadiness, NeutronStatusPortEvidence, NeutronStatusRecoveryCause,
+    NeutronStatusRequiredAction, NeutronStatusSupportDisposition, NeutronStatusTransactionState,
+    NeutronStatusV1Response, NEUTRON_COUNTERS_SCHEMA_VERSION, NEUTRON_STATUS_CONTRACT_HASH,
     NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
     NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
@@ -2107,6 +2107,30 @@ fn counters_tap_mapping(
     (tap_to_port, tap_list)
 }
 
+/// Read the per-tap group registry for display-layer translation.
+///
+/// Group names are machine-generated selectors; operators need the CIDRs.
+/// A missing/unreadable state file yields an empty list (translation is
+/// display-only and must never degrade counters).
+fn counters_groups(state_path: &str) -> Vec<NeutronCounterGroupV1> {
+    let mut groups: Vec<NeutronCounterGroupV1> = match aria_core::state::StateManager::new(
+        state_path,
+    )
+    .list_groups()
+    {
+        Ok(groups) => groups
+            .into_iter()
+            .map(|group| NeutronCounterGroupV1 {
+                id: group.id,
+                cidrs: group.cidrs,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    groups.sort_by_key(|group| group.id);
+    groups
+}
+
 /// Build the optional counters v1 section for a status response.
 ///
 /// Best-effort by design: reads the shared managed pin path maps once and maps
@@ -2118,6 +2142,7 @@ fn build_neutron_counters_section(
     pin_path: &str,
     ports: &BTreeMap<String, ManagedNeutronPort>,
     tap_ids: &std::collections::HashMap<String, u32>,
+    state_paths: &std::collections::HashMap<String, std::path::PathBuf>,
 ) -> Option<NeutronStatusCountersV1> {
     let sampled_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2174,6 +2199,12 @@ fn build_neutron_counters_section(
                 bytes: r.bytes,
             })
             .collect();
+        let groups = ports
+            .get(port_id)
+            .and_then(|port| state_paths.get(&port.ifname))
+            .and_then(|state_path| state_path.to_str())
+            .map(counters_groups)
+            .unwrap_or_default();
         counter_ports.push(NeutronPortCountersV1 {
             port_id: port_id.clone(),
             tap_id: summary.tap_id,
@@ -2187,6 +2218,7 @@ fn build_neutron_counters_section(
             truncated: summary.truncated,
             buckets,
             reasons,
+            groups,
         });
     }
     Some(NeutronStatusCountersV1 {
@@ -2227,8 +2259,14 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
     let registry = state.registry.clone();
     let pin_path = state.control_plane.managed_pin_path();
     let counters = tokio::task::spawn_blocking(move || {
-        let tap_ids = registry.tap_ids_by_ifname_now();
-        build_neutron_counters_section(&pin_path, &counters_ports, &tap_ids)
+        let runtimes = registry.tap_runtimes_now();
+        let mut tap_ids = std::collections::HashMap::new();
+        let mut state_paths = std::collections::HashMap::new();
+        for (ifname, (tap_id, state_path)) in runtimes {
+            tap_ids.insert(ifname.clone(), tap_id);
+            state_paths.insert(ifname, state_path);
+        }
+        build_neutron_counters_section(&pin_path, &counters_ports, &tap_ids, &state_paths)
     })
     .await
     .unwrap_or_else(|join_error| {
@@ -8175,12 +8213,30 @@ mod tests {
     fn counters_section_is_empty_without_registered_taps() {
         let ports = BTreeMap::new();
         let tap_ids = std::collections::HashMap::new();
+        let state_paths = std::collections::HashMap::new();
         let section =
-            build_neutron_counters_section("/nonexistent", &ports, &tap_ids);
+            build_neutron_counters_section("/nonexistent", &ports, &tap_ids, &state_paths);
         let section = section.expect("empty section must be present");
         assert_eq!(section.counters_schema_version, 1);
         assert!(section.counters_error.is_none());
         assert!(section.ports.is_empty());
+    }
+
+    #[test]
+    fn counters_groups_reads_cidrs_and_sorts_by_id() {
+        let root = temp_root("counters-groups");
+        let state_path = root.join("tap-groups");
+        let state_path = state_path.to_str().expect("valid test path");
+        let manager = aria_core::state::StateManager::new(state_path);
+        let second = manager.add_group("src-b", "10.1.0.0/24").unwrap();
+        let first = manager.add_group("src-a", "10.0.0.0/24").unwrap();
+        assert!(first < second);
+        let groups = counters_groups(state_path);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].id, first);
+        assert_eq!(groups[0].cidrs, vec!["10.0.0.0/24".to_string()]);
+        assert_eq!(groups[1].cidrs, vec!["10.1.0.0/24".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

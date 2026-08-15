@@ -647,6 +647,7 @@ class AriaAclPortStatusShow(_AriaAclShow):
         if getattr(parsed_args, "counters", False):
             status = data.get(self.resource) or {}
             status = dict(status)
+            group_map = status.get("aria_acl_port_group_map") or {}
             counter_rows = status.get("aria_acl_port_counters") or []
             bucket_index = 0
             reason_index = 0
@@ -655,7 +656,7 @@ class AriaAclPortStatusShow(_AriaAclShow):
                 if kind == "bucket":
                     bucket_index += 1
                     key = "counters.bucket[%d]" % bucket_index
-                    value = self._format_bucket(row)
+                    value = self._format_bucket(row, group_map)
                 elif kind == "reason":
                     reason_index += 1
                     key = "counters.reason[%d]" % reason_index
@@ -664,6 +665,7 @@ class AriaAclPortStatusShow(_AriaAclShow):
                     continue
                 status[key] = value
             status.pop("aria_acl_port_counters", None)
+            status.pop("aria_acl_port_group_map", None)
             data[self.resource] = status
         self.format_output_data(data)
         return self._show_rows(data)
@@ -677,13 +679,26 @@ class AriaAclPortStatusShow(_AriaAclShow):
         return str(direction)
 
     @classmethod
-    def _format_bucket(cls, row):
+    def _group_label(cls, group_id, group_map):
+        if group_id is None:
+            return None
+        cidrs = (
+            group_map.get(group_id)
+            or group_map.get(str(group_id))
+        )
+        if cidrs:
+            return ",".join(str(cidr) for cidr in cidrs)
+        return str(group_id)
+
+    @classmethod
+    def _format_bucket(cls, row, group_map=None):
+        group_map = group_map or {}
         return (
-            "src_id=%s dst_id=%s proto=%s dir=%s pkts=%s bytes=%s "
+            "src=%s dst=%s proto=%s dir=%s pkts=%s bytes=%s "
             "dropped=%s pps=%s bps=%s"
             % (
-                row.get("src_id"),
-                row.get("dst_id"),
+                cls._group_label(row.get("src_id"), group_map),
+                cls._group_label(row.get("dst_id"), group_map),
                 row.get("proto"),
                 cls._direction_name(row.get("direction")),
                 row.get("packets"),

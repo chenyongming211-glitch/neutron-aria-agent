@@ -2156,6 +2156,10 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "truncated": False,
                 "reset_detected": False,
                 "drop_pps": 10.0,
+                "groups": [
+                    {"id": 1, "cidrs": ["10.0.0.0/24"]},
+                    {"id": 2, "cidrs": ["10.1.0.0/24"]},
+                ],
                 "summary": {
                     "policy_packets": 200,
                     "policy_bytes": 2000,
@@ -2215,6 +2219,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual(status["counters_drop_pps"], 10.0)
         self.assertFalse(status["counters_truncated"])
         self.assertFalse(status["counters_reset_detected"])
+        self.assertIn('"cidrs"', status["counters_group_map"])
         rows = repository.get_port_counters("p1", host="h1")
         self.assertEqual(len(rows), 3)
         bucket = [r for r in rows if r["kind"] == "bucket"][0]
@@ -2317,6 +2322,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                     "port_id": "p1",
                     "truncated": False,
                     "reset_detected": False,
+                    "groups": [{"id": 1, "cidrs": ["10.0.0.0/24"]}],
                     "summary": {"policy_packets": 100},
                     "rows": [{
                         "kind": "bucket",
@@ -2334,6 +2340,10 @@ class AriaAclPluginTestCase(unittest.TestCase):
         )
         status = plugin.get_aria_acl_port_status(None, "p1")
         self.assertIn("aria_acl_port_counters", status)
+        self.assertEqual(
+            status.get("aria_acl_port_group_map"),
+            {1: ["10.0.0.0/24"]},
+        )
         self.assertEqual(len(status["aria_acl_port_counters"]), 1)
         self.assertEqual(
             status["aria_acl_port_counters"][0]["kind"], "bucket"

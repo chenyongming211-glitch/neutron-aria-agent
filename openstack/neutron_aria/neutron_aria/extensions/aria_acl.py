@@ -173,6 +173,7 @@ RESOURCE_ATTRIBUTE_MAP = {
         "counters_truncated": {"allow_post": False, "allow_put": False, "is_visible": True},
         "counters_reset_detected": {"allow_post": False, "allow_put": False, "is_visible": True},
         "aria_acl_port_counters": {"allow_post": False, "allow_put": False, "is_visible": True},
+        "aria_acl_port_group_map": {"allow_post": False, "allow_put": False, "is_visible": True},
     },
     "ports": PORT_READONLY_ATTRIBUTES,
 }

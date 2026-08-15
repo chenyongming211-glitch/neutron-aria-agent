@@ -1337,6 +1337,7 @@ class NeutronDbAriaAclRepository(object):
                 sa.Column("counters_drop_pps", sa.Float()),
                 sa.Column("counters_truncated", sa.Boolean()),
                 sa.Column("counters_reset_detected", sa.Boolean()),
+                sa.Column("counters_group_map", sa.Text()),
             ),
             "port_counters": sa.Table(
                 "aria_acl_port_counters", md,

@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import datetime
+import json
 import logging
 import os
 import time
@@ -418,6 +419,11 @@ class AriaAclPlugin(object):
         payload["counters_drop_bytes"] = summary.get("drop_bytes")
         payload["counters_truncated"] = bool(blob.get("truncated"))
         payload["counters_reset_detected"] = bool(blob.get("reset_detected"))
+        groups = blob.get("groups")
+        if groups is not None:
+            payload["counters_group_map"] = json.dumps(groups)
+        else:
+            payload["counters_group_map"] = None
         port_row = None
         for row in blob.get("rows") or []:
             if row.get("kind") == "port":
@@ -554,6 +560,22 @@ class AriaAclPlugin(object):
         if status is None:
             return None
         projected = self._project_port_status(status)
+        group_map = projected.get("counters_group_map")
+        if isinstance(group_map, str) and group_map.strip():
+            try:
+                parsed = json.loads(group_map)
+                if isinstance(parsed, list):
+                    projected["aria_acl_port_group_map"] = dict(
+                        (int(group.get("id")), group.get("cidrs") or [])
+                        for group in parsed
+                        if isinstance(group, dict) and group.get("id") is not None
+                    )
+            except (TypeError, ValueError) as exc:
+                LOG.warning(
+                    "aria_acl port group map parse failed port_id=%s error=%s",
+                    port_id,
+                    exc,
+                )
         counter_rows = getattr(repository, "get_port_counters", None)
         if counter_rows is not None:
             try:

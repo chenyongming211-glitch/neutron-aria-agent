@@ -1034,8 +1034,13 @@ sampled_at         DateTime nullable
 
 - 通用 `kind` 行模型是后续扩展点：QoS/Mirror/flow 计数器以新 `kind` 值接入，
   不改变表结构。
-- 表内存的是数值 id；bucket 的地址集名称由展示层翻译（v1 不做独立名称表）。
+- 表内存的是数值 id。展示层翻译随计数器一起下发：datapath 从 per-tap group
+  注册表（`list_groups`）携带 id → CIDR 映射，server 存入 statuses 行的
+  `counters_group_map`（JSON TEXT），CLI 展示 bucket 行时渲染 CIDR（无映射时
+  回退数字 id）。
 - 计数器是 best-effort：写失败只记日志，绝不影响 status 写入与 ACL 生效。
+- 无采样周期会清空 `counters_*` 摘要列；datapath 读失败（`counters_error`）
+  则保留上次好快照，按 `counters_sampled_at` 年龄标记陈旧。
 - 生产启用门槛：`counters_report_enabled` 默认 false，待现场 RED/GREEN 证据后
   放开（现场证据规则见 AGENTS.md deferred/pending）。
 

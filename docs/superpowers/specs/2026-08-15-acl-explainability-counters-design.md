@@ -152,9 +152,12 @@ Upsert policy: each report replaces all rows for the port in one transaction
 extension point: QoS/Mirror/flow counters become new `kind` values without a
 schema change.
 
-The DB stores numeric ids only. Group names are resolved at display time from
-the agent's existing snapshot translation context; a dedicated group-name
-table is out of v1 scope (see §11).
+The DB stores numeric ids only. Display-layer translation is carried
+alongside the counters: the datapath reads its per-tap group registry
+(`StateManager::list_groups`) and ships the id -> CIDR map in the counters
+section; the server persists it on the status row (`counters_group_map`) and
+the CLI renders bucket rows with CIDRs (numeric fallback when absent). A
+dedicated group-name table remains out of scope.
 
 ## 7. Rate and Reset Semantics
 
@@ -211,9 +214,9 @@ table is out of v1 scope (see §11).
   rule; no fabricated field evidence).
 - CI gates run the full counter pipeline with synthetic traffic regardless of
   the default.
-- The group-name translation used by the CLI relies on the agent's existing
-  snapshot translation context; a dedicated group-names table is explicitly
-  out of v1 scope and may be added when operator feedback demands it.
+- Group translation ships from the datapath group registry (id -> CIDR) as
+  described in §6.2; a dedicated group-names table is explicitly out of v1
+  scope and may be added when operator feedback demands it.
 
 ## 12. Testing and Acceptance
 

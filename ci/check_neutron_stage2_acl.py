@@ -89,6 +89,7 @@ def check_neutron_server_contract_files():
         '"counters_sampled_at"',
         '"counters_policy_packets"',
         '"counters_truncated"',
+        '"counters_group_map"',
         '"uq_aria_acl_port_counters_natural"',
     ):
         if term not in migration:

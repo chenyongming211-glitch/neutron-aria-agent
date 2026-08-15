@@ -299,12 +299,48 @@ class AriaAclCliTest(unittest.TestCase):
         ])
         rows = self._show_result(command.execute(parsed_args))
         self.assertIn("counters.bucket[1]", rows)
-        self.assertIn("src_id=1 dst_id=2 proto=6 dir=ingress",
+        self.assertIn("src=1 dst=2 proto=6 dir=ingress",
                       rows["counters.bucket[1]"])
         self.assertIn("pkts=100", rows["counters.bucket[1]"])
         self.assertIn("counters.reason[1]", rows)
         self.assertIn("reason=ACL_DENY", rows["counters.reason[1]"])
         self.assertNotIn("aria_acl_port_counters", rows)
+
+    def test_status_show_counters_renders_group_cidrs_from_map(self):
+        class FakeClient(object):
+            def show_ext(self, path, resource_id):
+                return {"aria_acl_port_status": {
+                    "id": resource_id,
+                    "port_id": "port-1",
+                    "aria_acl_port_group_map": {
+                        "1": ["10.0.0.0/24"],
+                        "2": ["10.1.0.0/24"],
+                    },
+                    "aria_acl_port_counters": [{
+                        "kind": "bucket",
+                        "src_id": 1,
+                        "dst_id": 2,
+                        "proto": 6,
+                        "direction": "ingress",
+                        "packets": 100,
+                        "bytes": 1000,
+                        "dropped_packets": 10,
+                        "dropped_bytes": 100,
+                        "pps": 50.0,
+                        "bps": 500.0,
+                    }],
+                }}
+
+        command = aria_acl.AriaAclPortStatusShow(FakeApp(FakeClient()), None)
+        parsed_args = command.get_parser("aria-acl-port-status-show").parse_args([
+            "status-1",
+            "--counters",
+        ])
+        rows = self._show_result(command.execute(parsed_args))
+        self.assertIn(
+            "src=10.0.0.0/24 dst=10.1.0.0/24",
+            rows["counters.bucket[1]"],
+        )
 
     def test_status_show_without_counters_keeps_default_shape(self):
         class FakeClient(object):
