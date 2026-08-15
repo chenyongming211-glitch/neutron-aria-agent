@@ -12,7 +12,7 @@ pub struct DropStatsEntry {
     pub last_seen: u64,
 }
 
-fn sum_per_cpu_drop(values: PerCpuValues<DropValue>) -> (u64, u64, u64) {
+pub(crate) fn sum_per_cpu_drop(values: PerCpuValues<DropValue>) -> (u64, u64, u64) {
     let mut packets = 0u64;
     let mut bytes = 0u64;
     let mut last_seen = 0u64;

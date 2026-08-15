@@ -397,7 +397,7 @@ mod fragment_observability_tests {
     }
 }
 
-fn sum_per_cpu_rule_stats(values: PerCpuValues<RuleStatsValue>) -> (u64, u64, u64, u64) {
+pub(crate) fn sum_per_cpu_rule_stats(values: PerCpuValues<RuleStatsValue>) -> (u64, u64, u64, u64) {
     let mut packets = 0u64;
     let mut bytes = 0u64;
     let mut dropped_packets = 0u64;

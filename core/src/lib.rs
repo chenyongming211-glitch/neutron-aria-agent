@@ -6,6 +6,7 @@ pub mod ebpf_ops;
 pub mod kernel_drop_ops;
 pub mod mirror_ops;
 pub mod monitoring;
+pub mod port_counters;
 pub mod qos_ops;
 pub mod ssl_ops;
 pub mod state;
