@@ -1622,4 +1622,86 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&state_path);
     }
+
+    struct ScriptedReader {
+        chunks: std::collections::VecDeque<std::io::Result<Vec<u8>>>,
+        current: Vec<u8>,
+        pos: usize,
+    }
+
+    impl ScriptedReader {
+        fn new(chunks: Vec<std::io::Result<Vec<u8>>>) -> Self {
+            Self {
+                chunks: chunks.into(),
+                current: Vec::new(),
+                pos: 0,
+            }
+        }
+    }
+
+    impl std::io::BufRead for ScriptedReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.pos < self.current.len() {
+                return Ok(&self.current[self.pos..]);
+            }
+            match self.chunks.pop_front() {
+                None => Ok(&[]),
+                Some(Err(error)) => Err(error),
+                Some(Ok(bytes)) => {
+                    self.current = bytes;
+                    self.pos = 0;
+                    Ok(&self.current)
+                }
+            }
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.pos += amount;
+        }
+    }
+
+    impl std::io::Read for ScriptedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let filled = self.fill_buf()?;
+            let count = filled.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&filled[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    fn scripted_line(line: String) -> Vec<u8> {
+        format!("{}\n", line).into_bytes()
+    }
+
+    #[test]
+    fn wal_inventory_propagates_read_errors() {
+        let reader = ScriptedReader::new(vec![
+            Ok(scripted_line(wal_checkpoint_record(3, 1))),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected read failure",
+            )),
+            Ok(scripted_line(wal_checkpoint_record(4, 1))),
+        ]);
+        let result = inventory_wal_reader(reader, None);
+
+        match result {
+            Err(error) => assert!(error.contains("injected read failure")),
+            Ok(_) => panic!("expected the read error to propagate"),
+        }
+    }
+
+    #[test]
+    fn wal_inventory_skips_non_utf8_records() {
+        let reader = ScriptedReader::new(vec![
+            Ok(scripted_line(wal_checkpoint_record(3, 1))),
+            Ok(vec![0xff, 0xfe, b'\n']),
+            Ok(scripted_line(wal_checkpoint_record(5, 1))),
+        ]);
+        let inventory = inventory_wal_reader(reader, None).unwrap();
+
+        assert_eq!(5, inventory.max_checkpoint_id);
+        assert!(inventory.has_nonempty_line);
+    }
 }

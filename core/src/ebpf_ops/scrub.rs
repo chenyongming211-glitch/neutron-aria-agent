@@ -499,6 +499,7 @@ pub fn scrub_standalone_runtime_state(pin_path: &str) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::collect_iterated_items;
     use super::policy_key_matches_bank;
     use crate::common::PolicyKey;
 
@@ -517,5 +518,24 @@ mod tests {
         assert!(policy_key_matches_bank(&key, 3, 1));
         assert!(!policy_key_matches_bank(&key, 3, 0));
         assert!(!policy_key_matches_bank(&key, 4, 1));
+    }
+
+    #[test]
+    fn scrub_iteration_propagates_first_error() {
+        let items = vec![Ok(1u32), Ok(2u32), Err("injected"), Ok(4u32)];
+        let result: Result<Vec<u32>, String> = collect_iterated_items(items, "TEST_MAP");
+
+        match result {
+            Err(error) => assert!(error.contains("injected")),
+            Ok(_) => panic!("expected the iteration error to propagate"),
+        }
+    }
+
+    #[test]
+    fn scrub_iteration_collects_all_healthy_items() {
+        let items = vec![Ok(1u32), Ok(2u32), Ok(3u32)];
+        let result: Result<Vec<u32>, String> = collect_iterated_items(items, "TEST_MAP");
+
+        assert_eq!(vec![1, 2, 3], result.unwrap());
     }
 }
