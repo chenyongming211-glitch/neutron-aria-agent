@@ -32,6 +32,7 @@ class AgentRuntimeStatus(object):
         self.last_managed_ports = 0
         self.last_managed_ports_detail = []
         self.last_port_statuses = []
+        self.last_counters = None
         self.domain_counts = []
         self.degraded_reasons = []
         self.projection_index = {

@@ -127,6 +127,10 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_capabilities_validates_required_domains",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
     "test_capabilities_rejects_missing_domain",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_status_v3_counters_section_is_preserved",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_status_v3_without_counters_still_decodes",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
     "test_legacy_port_read_wrapper_batches_projection_and_preserves_fields",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."

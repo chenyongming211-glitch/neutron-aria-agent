@@ -1462,6 +1462,7 @@ class SnapshotSynchronizer(object):
                 **runtime_arguments
             )
         self.runtime_status.update_projection_summary(self.projection_summary())
+        self.runtime_status.last_counters = status.get("counters")
         return managed_ports
 
     def _raise_if_response_failed(self, response):

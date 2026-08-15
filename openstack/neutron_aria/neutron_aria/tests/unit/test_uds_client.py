@@ -15,6 +15,7 @@ from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_cases
 from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_contract_error_cases
 from neutron_aria.tests.unit.status_contract_scenarios import status_v2_scenario
+from neutron_aria.tests.unit.status_contract_scenarios import status_v3_scenario
 
 
 class FakeResponse(object):
@@ -1822,6 +1823,24 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
             scenario["status"],
         )
         self.assertEqual(scenario["status"], decoded)
+
+    def test_status_v3_counters_section_is_preserved(self):
+        from neutron_aria.agent.uds_client import _decode_status_v3
+        scenario = status_v3_scenario("counters-present-single-port")
+        parsed = _decode_status_v3(scenario["status"])
+        self.assertEqual(parsed["status_schema_version"], 3)
+        self.assertIn("counters", parsed)
+        self.assertEqual(parsed["counters"]["counters_schema_version"], 1)
+        self.assertEqual(
+            parsed["counters"]["ports"][0]["port_id"], "port-counters-1"
+        )
+
+    def test_status_v3_without_counters_still_decodes(self):
+        from neutron_aria.agent.uds_client import _decode_status_v3
+        scenario = status_v3_scenario("counters-absent-legacy-datapath")
+        parsed = _decode_status_v3(scenario["status"])
+        self.assertEqual(parsed["status_schema_version"], 3)
+        self.assertNotIn("counters", parsed)
 
 
 if __name__ == "__main__":
