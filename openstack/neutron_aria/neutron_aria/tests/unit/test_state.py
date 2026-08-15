@@ -37,6 +37,7 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         dir_fd = 987654
         real_fsync = os.fsync
         real_open = os.open
+        real_close = os.close
 
         def recording_fsync(fd):
             fsynced.append(fd)
@@ -49,13 +50,20 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
                 return dir_fd
             return real_open(path, flags, *args, **kwargs)
 
+        def recording_close(fd):
+            if fd == dir_fd:
+                return None
+            return real_close(fd)
+
         os.fsync = recording_fsync
         os.open = recording_open
+        os.close = recording_close
         try:
             store.prepare_snapshot(self._snapshot())
         finally:
             os.fsync = real_fsync
             os.open = real_open
+            os.close = real_close
 
         self.assertEqual(2, len(fsynced))
         self.assertEqual(dir_fd, fsynced[1])

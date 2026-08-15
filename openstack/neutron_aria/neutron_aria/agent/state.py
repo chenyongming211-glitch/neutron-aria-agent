@@ -815,6 +815,25 @@ class SnapshotStateStore(object):
             fh.flush()
             os.fsync(fh.fileno())
         self._replace(tmp_path, self.path)
+        self._fsync_directory()
+
+    def _fsync_directory(self):
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags = flags | os.O_DIRECTORY
+        try:
+            fd = os.open(self.state_dir, flags)
+        except OSError:
+            return
+        try:
+            try:
+                os.fsync(fd)
+            except OSError:
+                # Directory fsync is not supported on every platform
+                # (for example macOS); it remains best-effort there.
+                pass
+        finally:
+            os.close(fd)
 
     def _replace(self, tmp_path, path):
         replace = getattr(os, "replace", None)
