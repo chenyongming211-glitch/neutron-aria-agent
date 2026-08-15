@@ -861,7 +861,7 @@ class NeutronDbAriaAclRepository(object):
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("address_sets", address_set_id, self._db_values("address_sets", current))
-        if "members" in current:
+        if "members" in values:
             self._replace_members(address_set_id, current.get("members", []))
         return _clone(current)
 
@@ -958,6 +958,8 @@ class NeutronDbAriaAclRepository(object):
         update = table.update().where(row_identity).values(**db_values)
         result = self.session.execute(update)
         if result.rowcount == 0:
+            if self._port_status_row_exists(table, row_identity):
+                return _clone(values)
             insert_error = None
             try:
                 with self.session.begin_nested():
@@ -967,8 +969,16 @@ class NeutronDbAriaAclRepository(object):
             if insert_error is not None:
                 result = self.session.execute(update)
                 if result.rowcount == 0:
+                    if self._port_status_row_exists(table, row_identity):
+                        return _clone(values)
                     raise insert_error
         return _clone(values)
+
+    def _port_status_row_exists(self, table, row_identity):
+        presence = self.session.execute(
+            table.select().where(row_identity).limit(1)
+        ).first()
+        return presence is not None
 
     def get_port_status(self, port_id, host=None):
         table = self.tables["port_statuses"]
