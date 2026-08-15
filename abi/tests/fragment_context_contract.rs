@@ -71,8 +71,21 @@ fn fragment_resolved_l4_fields_recovers_tcp_proto_and_ports() {
 }
 
 #[test]
-fn fragment_resolved_l4_fields_is_none_without_l4_flags() {
+fn fragment_resolved_l4_fields_recovers_udp_for_zero_flag() {
     let value = current_value();
+
+    assert_eq!(
+        Some((IPPROTO_UDP, 40000u16, 53u16)),
+        fragment_resolved_l4_fields(&value),
+    );
+}
+
+#[test]
+fn fragment_resolved_l4_fields_is_none_with_invalid_l4_flags() {
+    let value = FragmentContextValue {
+        flags: 2,
+        ..current_value()
+    };
 
     assert_eq!(None, fragment_resolved_l4_fields(&value));
 }
