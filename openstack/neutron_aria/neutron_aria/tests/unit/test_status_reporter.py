@@ -570,6 +570,44 @@ class StatusReporterTestCase(unittest.TestCase):
         except Exception as exc:
             error = exc
         self.assertIsNone(error)
+        self.assertEqual([], sorted(reporter.pending_deleted_port_ids))
+
+        runtime_status = AgentRuntimeStatus("compute-1")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+        result = reporter.report(runtime_status)
+
+        self.assertEqual(0, result["deleted_port_statuses"])
+        self.assertEqual(1, len(api.statuses))
+
+    def test_port_status_reporter_flush_treats_not_found_as_idempotent(self):
+        class NotFoundError(Exception):
+            status_code = 404
+
+        class FailThenNotFoundApi(FakeAriaAclApi):
+            def __init__(self):
+                FakeAriaAclApi.__init__(self)
+                self.attempts = 0
+
+            def delete_aria_acl_port_status(self, context, port_id, host=None):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("status database unavailable")
+                raise NotFoundError("aria_acl_port_status not found")
+
+        api = FailThenNotFoundApi()
+        reporter = AriaAclPortStatusReporter(
+            api,
+            context="ctx",
+            host="compute-1",
+        )
+
+        with self.assertRaises(RuntimeError):
+            reporter.remove_port_status("port-1")
 
         runtime_status = AgentRuntimeStatus("compute-1")
         runtime_status.mark_ready(

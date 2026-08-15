@@ -271,13 +271,18 @@ class AriaAclPortStatusReporter(object):
             raise StatusReportError(
                 "aria_acl API does not expose delete_aria_acl_port_status"
             )
-        if self.api_call_style == ARIA_ACL_STATUS_CALL_PAYLOAD:
-            return method(port_id, self.host)
-        return method(
-            self.context,
-            port_id,
-            host=self.host,
-        )
+        try:
+            if self.api_call_style == ARIA_ACL_STATUS_CALL_PAYLOAD:
+                return method(port_id, self.host)
+            return method(
+                self.context,
+                port_id,
+                host=self.host,
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                return None
+            raise
 
     def _port_status_payload(self, runtime_status, status):
         source = dict(status)
