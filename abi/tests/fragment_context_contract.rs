@@ -4,8 +4,9 @@ use aria_ebpf_abi::{
     fragment_resolve_decision, fragment_resolved_l4_fields, fragment_tracking_required,
     FragmentConfig, FragmentContextDisposition, FragmentContextKey4, FragmentContextValue,
     FragmentCtCreatePoint, FragmentEpochValue, FragmentInstallDecision, FragmentKind,
-    FragmentResolveDecision, set_fragment_resolve_drop_ids, PipelineCtx, TraceEvent,
-    TraceEventV6, TraceStreamEvent, DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_CONTEXT_EXPIRED,
+    FragmentResolveDecision, FragmentResolveInput, PipelineCtx, TraceEvent, TraceEventV6,
+    TraceStreamEvent, set_fragment_resolve_drop_ids, DIR_EGRESS, DIR_INGRESS,
+    DROP_FRAGMENT_CONTEXT_EXPIRED,
     DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
     DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
     FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP, FRAGMENT_CONTEXT_VERSION,
@@ -54,6 +55,21 @@ fn current_value() -> FragmentContextValue {
         _reserved: [0; 6],
         epoch: 7,
         expires_at_ns: 30_000_000_000,
+    }
+}
+
+fn resolve_input(
+    tap_id: u32,
+    is_ipv6: bool,
+    now_ns: u64,
+    fragment_offset: u16,
+) -> FragmentResolveInput {
+    FragmentResolveInput {
+        tap_id,
+        is_ipv6,
+        active_bank: 0,
+        now_ns,
+        fragment_offset,
     }
 }
 
@@ -261,14 +277,10 @@ fn fragment_resolve_disabled_mode_fails_closed_with_stable_reason_and_metric() {
     let mut config = enabled_config();
     config.enabled = FRAGMENT_CONFIG_DISABLED;
     let decision = fragment_resolve_decision(
-        77,
-        false,
+        resolve_input(77, false, 1_000, 1480),
         Some(&config),
         Some(&current_epoch()),
         Some(&current_value()),
-        0,
-        1_000,
-        1480,
     );
 
     assert_eq!(decision, FragmentResolveDecision::DropTrackingDisabled);
@@ -280,14 +292,10 @@ fn fragment_resolve_disabled_mode_fails_closed_with_stable_reason_and_metric() {
 #[test]
 fn fragment_resolve_missing_context_fails_closed_with_stable_reason_and_metric() {
     let decision = fragment_resolve_decision(
-        77,
-        false,
+        resolve_input(77, false, 1_000, 1480),
         Some(&enabled_config()),
         Some(&current_epoch()),
         None,
-        0,
-        1_000,
-        1480,
     );
 
     assert_eq!(decision, FragmentResolveDecision::DropContextMissing);
@@ -299,14 +307,10 @@ fn fragment_resolve_missing_context_fails_closed_with_stable_reason_and_metric()
 #[test]
 fn fragment_resolve_first_range_overlap_fails_closed() {
     let decision = fragment_resolve_decision(
-        77,
-        false,
+        resolve_input(77, false, 1_000, 1472),
         Some(&enabled_config()),
         Some(&current_epoch()),
         Some(&current_value()),
-        0,
-        1_000,
-        1472,
     );
 
     assert_eq!(decision, FragmentResolveDecision::DropOverlap);
@@ -317,14 +321,10 @@ fn fragment_resolve_first_range_overlap_fails_closed() {
 fn fragment_resolve_exact_context_hit_returns_authoritative_ports() {
     let value = current_value();
     let decision = fragment_resolve_decision(
-        77,
-        false,
+        resolve_input(77, false, 1_000, 1480),
         Some(&enabled_config()),
         Some(&current_epoch()),
         Some(&value),
-        0,
-        1_000,
-        1480,
     );
 
     assert_eq!(decision, FragmentResolveDecision::Hit);
@@ -336,14 +336,10 @@ fn fragment_resolve_exact_context_hit_returns_authoritative_ports() {
 fn fragment_resolve_expired_context_drops_without_packet_path_delete() {
     let value = current_value();
     let decision = fragment_resolve_decision(
-        77,
-        false,
+        resolve_input(77, false, value.expires_at_ns, 1480),
         Some(&enabled_config()),
         Some(&current_epoch()),
         Some(&value),
-        0,
-        value.expires_at_ns,
-        1480,
     );
 
     assert_eq!(decision, FragmentResolveDecision::DropExpired);
@@ -369,7 +365,12 @@ fn fragment_resolve_rejects_missing_invalid_and_stale_authority() {
     let config = enabled_config();
     let epoch = current_epoch();
     assert_eq!(
-        fragment_resolve_decision(77, false, None, Some(&epoch), None, 0, 1_000, 1480),
+        fragment_resolve_decision(
+            resolve_input(77, false, 1_000, 1480),
+            None,
+            Some(&epoch),
+            None,
+        ),
         FragmentResolveDecision::DropConfigMissing,
     );
 
@@ -377,19 +378,20 @@ fn fragment_resolve_rejects_missing_invalid_and_stale_authority() {
     invalid_config.version = FRAGMENT_CONFIG_VERSION.wrapping_add(1);
     assert_eq!(
         fragment_resolve_decision(
-            77,
-            false,
+            resolve_input(77, false, 1_000, 1480),
             Some(&invalid_config),
             Some(&epoch),
             None,
-            0,
-            1_000,
-            1480,
         ),
         FragmentResolveDecision::DropConfigInvalid,
     );
     assert_eq!(
-        fragment_resolve_decision(77, false, Some(&config), None, None, 0, 1_000, 1480),
+        fragment_resolve_decision(
+            resolve_input(77, false, 1_000, 1480),
+            Some(&config),
+            None,
+            None,
+        ),
         FragmentResolveDecision::DropEpochMissing,
     );
 
@@ -397,14 +399,10 @@ fn fragment_resolve_rejects_missing_invalid_and_stale_authority() {
     invalid_value.version = FRAGMENT_CONTEXT_VERSION.wrapping_add(1);
     assert_eq!(
         fragment_resolve_decision(
-            77,
-            false,
+            resolve_input(77, false, 1_000, 1480),
             Some(&config),
             Some(&epoch),
             Some(&invalid_value),
-            0,
-            1_000,
-            1480,
         ),
         FragmentResolveDecision::DropContextInvalid,
     );
@@ -413,14 +411,10 @@ fn fragment_resolve_rejects_missing_invalid_and_stale_authority() {
     stale_value.epoch = epoch.epoch + 1;
     assert_eq!(
         fragment_resolve_decision(
-            77,
-            false,
+            resolve_input(77, false, 1_000, 1480),
             Some(&config),
             Some(&epoch),
             Some(&stale_value),
-            0,
-            1_000,
-            1480,
         ),
         FragmentResolveDecision::DropContextStale,
     );
@@ -430,14 +424,10 @@ fn fragment_resolve_rejects_missing_invalid_and_stale_authority() {
 fn fragment_resolve_managed_tap_zero_cannot_use_context() {
     assert_eq!(
         fragment_resolve_decision(
-            0,
-            false,
+            resolve_input(0, false, 1_000, 1480),
             Some(&enabled_config()),
             Some(&current_epoch()),
             Some(&current_value()),
-            0,
-            1_000,
-            1480,
         ),
         FragmentResolveDecision::DropTapUnassigned,
     );
@@ -447,14 +437,10 @@ fn fragment_resolve_managed_tap_zero_cannot_use_context() {
 fn fragment_resolve_standalone_tap_zero_uses_its_stable_identity() {
     assert_eq!(
         fragment_resolve_decision(
-            0,
-            false,
+            resolve_input(0, false, 1_000, 1480),
             Some(&standalone_enabled_config()),
             Some(&current_epoch()),
             Some(&current_value()),
-            0,
-            1_000,
-            1480,
         ),
         FragmentResolveDecision::Hit,
     );
@@ -467,7 +453,12 @@ fn fragment_resolve_unknown_runtime_mode_is_invalid_before_disabled_handling() {
     config.runtime_mode = 0xff;
 
     assert_eq!(
-        fragment_resolve_decision(0, false, Some(&config), None, None, 0, 1_000, 1480,),
+        fragment_resolve_decision(
+            resolve_input(0, false, 1_000, 1480),
+            Some(&config),
+            None,
+            None,
+        ),
         FragmentResolveDecision::DropConfigInvalid,
     );
 }
@@ -477,7 +468,12 @@ fn fragment_resolve_valid_disabled_config_precedes_enabled_identity_checks() {
     for mut config in [enabled_config(), standalone_enabled_config()] {
         config.enabled = FRAGMENT_CONFIG_DISABLED;
         assert_eq!(
-            fragment_resolve_decision(0, false, Some(&config), None, None, 0, 1_000, 1480),
+            fragment_resolve_decision(
+                resolve_input(0, false, 1_000, 1480),
+                Some(&config),
+                None,
+                None,
+            ),
             FragmentResolveDecision::DropTrackingDisabled,
         );
     }
@@ -493,13 +489,23 @@ fn fragment_resolve_validates_both_family_timeouts_before_disabled_or_tap_identi
     for (is_ipv6, mut config) in [(false, ipv4_packet_config), (true, ipv6_packet_config)] {
         config.enabled = FRAGMENT_CONFIG_DISABLED;
         assert_eq!(
-            fragment_resolve_decision(0, is_ipv6, Some(&config), None, None, 0, 1_000, 1480),
+            fragment_resolve_decision(
+                resolve_input(0, is_ipv6, 1_000, 1480),
+                Some(&config),
+                None,
+                None,
+            ),
             FragmentResolveDecision::DropConfigInvalid,
         );
 
         config.enabled = FRAGMENT_CONFIG_ENABLED;
         assert_eq!(
-            fragment_resolve_decision(0, is_ipv6, Some(&config), None, None, 0, 1_000, 1480),
+            fragment_resolve_decision(
+                resolve_input(0, is_ipv6, 1_000, 1480),
+                Some(&config),
+                None,
+                None,
+            ),
             FragmentResolveDecision::DropConfigInvalid,
         );
     }

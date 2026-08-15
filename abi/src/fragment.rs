@@ -171,6 +171,15 @@ pub enum FragmentResolveDecision {
     DropTapUnassigned = DROP_FRAGMENT_TAP_UNASSIGNED,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FragmentResolveInput {
+    pub tap_id: u32,
+    pub is_ipv6: bool,
+    pub active_bank: u8,
+    pub now_ns: u64,
+    pub fragment_offset: u16,
+}
+
 impl FragmentResolveDecision {
     #[inline(always)]
     pub fn drop_reason(self) -> u8 {
@@ -357,16 +366,12 @@ pub const fn fragment_metric_index(metric: u8, family: u8) -> Option<u32> {
 
 #[inline(always)]
 pub fn fragment_resolve_decision(
-    tap_id: u32,
-    is_ipv6: bool,
+    input: FragmentResolveInput,
     config: Option<&FragmentConfig>,
     epoch: Option<&FragmentEpochValue>,
     value: Option<&FragmentContextValue>,
-    active_bank: u8,
-    now_ns: u64,
-    fragment_offset: u16,
 ) -> FragmentResolveDecision {
-    match fragment_authority_drop_reason(tap_id, is_ipv6, config, epoch) {
+    match fragment_authority_drop_reason(input.tap_id, input.is_ipv6, config, epoch) {
         0 => {}
         DROP_FRAGMENT_TAP_UNASSIGNED => return FragmentResolveDecision::DropTapUnassigned,
         DROP_FRAGMENT_CONFIG_MISSING => return FragmentResolveDecision::DropConfigMissing,
@@ -389,7 +394,13 @@ pub fn fragment_resolve_decision(
         Some(epoch) => epoch.epoch,
         None => return FragmentResolveDecision::DropEpochMissing,
     };
-    match fragment_context_disposition(value, active_bank, active_epoch, now_ns, fragment_offset) {
+    match fragment_context_disposition(
+        value,
+        input.active_bank,
+        active_epoch,
+        input.now_ns,
+        input.fragment_offset,
+    ) {
         FragmentContextDisposition::Hit => FragmentResolveDecision::Hit,
         FragmentContextDisposition::InvalidVersion => FragmentResolveDecision::DropContextInvalid,
         FragmentContextDisposition::Expired => FragmentResolveDecision::DropExpired,

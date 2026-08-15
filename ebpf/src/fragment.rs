@@ -3,11 +3,12 @@ use crate::common::{
     fragment_first_observation_metric, fragment_install_result, fragment_metric_for_drop_reason,
     fragment_metric_index, fragment_resolve_decision, fragment_resolved_l4_fields,
     fragment_tracking_required, FragmentConfig, FragmentContextKey4, FragmentContextKey6,
-    FragmentContextValue, FragmentInstallDecision, FragmentKind, PipelineCtx,
-    DROP_FRAGMENT_CONFIG_MISSING, DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_CONTEXT_MISSING,
-    DROP_FRAGMENT_EPOCH_MISSING, DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION,
-    FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW,
-    FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
+    FragmentContextValue, FragmentInstallDecision, FragmentKind, FragmentResolveInput,
+    PipelineCtx, DROP_FRAGMENT_CONFIG_MISSING, DROP_FRAGMENT_CONTEXT_INVALID,
+    DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_EPOCH_MISSING, DROP_FRAGMENT_EXPIRY_OVERFLOW,
+    FRAGMENT_CONTEXT_VERSION, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
+    FRAGMENT_METRIC_EXPIRY_OVERFLOW, FRAGMENT_METRIC_INVALID_L4,
+    FRAGMENT_METRIC_NON_INITIAL,
 };
 use crate::maps::{
     FRAGMENT_CONFIG, FRAGMENT_EPOCH, FRAGMENT_METRICS, FRAG_CONTEXT_V4, FRAG_CONTEXT_V6,
@@ -144,14 +145,16 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         }
     };
     let decision = fragment_resolve_decision(
-        p.tap_id,
-        false,
+        FragmentResolveInput {
+            tap_id: p.tap_id,
+            is_ipv6: false,
+            active_bank: p.acl_bank_snapshot,
+            now_ns: p.now,
+            fragment_offset: info.fragment_offset,
+        },
         Some(config),
         Some(&epoch),
         Some(value),
-        p.acl_bank_snapshot,
-        p.now,
-        info.fragment_offset,
     );
     record_metric(p, FRAGMENT_FAMILY_IPV4, decision.metric());
     if decision.drop_reason() != 0 {
@@ -215,14 +218,16 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         }
     };
     let decision = fragment_resolve_decision(
-        p.tap_id,
-        true,
+        FragmentResolveInput {
+            tap_id: p.tap_id,
+            is_ipv6: true,
+            active_bank: p.acl_bank_snapshot,
+            now_ns: p.now,
+            fragment_offset: info.fragment_offset,
+        },
         Some(config),
         Some(&epoch),
         Some(value),
-        p.acl_bank_snapshot,
-        p.now,
-        info.fragment_offset,
     );
     record_metric(p, FRAGMENT_FAMILY_IPV6, decision.metric());
     if decision.drop_reason() != 0 {
