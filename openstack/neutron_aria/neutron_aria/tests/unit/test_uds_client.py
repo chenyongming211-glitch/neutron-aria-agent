@@ -1842,6 +1842,37 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         self.assertEqual(parsed["status_schema_version"], 3)
         self.assertNotIn("counters", parsed)
 
+    def test_v3_capability_handshake_is_accepted(self):
+        # Regression: the v3 profile must exist in _STATUS_CONTRACT_PROFILES
+        # or capabilities() raises KeyError and the agent handshake dies.
+        client = self._client()
+        v3_capabilities = {
+            "api_version": "v1",
+            "contract_version": "2026-06-v0.9",
+            "schema_version_min": 1,
+            "schema_version_max": 1,
+            "attach_authority": "neutron_snapshot",
+            "supports_full_snapshot": True,
+            "supports_port_delete": True,
+            "supported_domains": ["attach", "acl"],
+            "mandatory_domains": [],
+            "body_max_bytes": 1048576,
+            "timeout_ms": 3000,
+            "error_codes_hash": "v0.9-neutron-errors-3",
+            "peer_auth_policy": "filesystem_permissions_then_peercred",
+            "capability_hash": "v0.9-neutron-capabilities-5",
+            "status_schema_version_min": 2,
+            "status_schema_version_max": 3,
+            "status_contract_hash": "v0.9-neutron-status-3",
+            "counters_v1": True,
+        }
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", v3_capabilities)
+        )
+        body = client.capabilities(required_domains=["acl"])
+        self.assertEqual(body["capability_hash"], "v0.9-neutron-capabilities-5")
+        self.assertTrue(body.get("counters_v1"))
+
 
 if __name__ == "__main__":
     unittest.main()
