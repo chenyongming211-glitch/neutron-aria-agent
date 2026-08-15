@@ -922,6 +922,18 @@ impl FirewallInstance {
         }
     }
 
+    /// Persisted tap id for this instance, if one is assigned.
+    pub fn tap_id(&self) -> Option<u32> {
+        let state_path = match self.state_path.to_str() {
+            Some(path) => path,
+            None => return None,
+        };
+        match aria_core::state::StateManager::new(state_path).get_tap_id() {
+            Ok(tap_id) if tap_id != aria_core::common::TAP_ID_UNASSIGNED => Some(tap_id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn with_fragment_tracking(
         mut self,
         fragment_tracking: FragmentTrackingSettings,

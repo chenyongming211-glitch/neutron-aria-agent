@@ -589,6 +589,18 @@ impl TapRegistry {
         names
     }
 
+    /// Snapshot of ifname -> tap_id for attached instances (read-only).
+    pub async fn tap_ids_by_ifname(&self) -> HashMap<String, u32> {
+        let instances = self.instances.read().await;
+        let mut ids = HashMap::new();
+        for (ifname, instance) in instances.iter() {
+            if let Some(tap_id) = instance.tap_id() {
+                ids.insert(ifname.clone(), tap_id);
+            }
+        }
+        ids
+    }
+
     /// Graceful shutdown: unpin all links (XDP detaches), clean up
     pub async fn shutdown(&self) {
         let ifaces: Vec<String> = {
@@ -798,6 +810,40 @@ mod tests {
         assert!(load_orphan_tap_id(&state_root, "tap-missing")
             .unwrap_err()
             .contains("unassigned"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tap_ids_by_ifname_returns_empty_without_instances() {
+        let root = temp_root("tap-ids-empty");
+        let registry = test_registry(&root);
+        assert!(registry.tap_ids_by_ifname().await.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tap_ids_by_ifname_maps_attached_instances_with_assigned_ids() {
+        let root = temp_root("tap-ids-mapped");
+        let registry = test_registry(&root);
+        let ifname = "tap-with-id";
+        let state_path = registry.base_state_path.join(ifname);
+        let state_manager =
+            aria_core::state::StateManager::new(state_path.to_str().expect("valid test path"));
+        state_manager.set_tap_id(7).expect("test tap id must persist");
+        let instance = FirewallInstance::new(
+            ifname,
+            PathBuf::from(registry.control_plane.managed_pin_path()),
+            state_path,
+            true,
+            registry.control_plane.trace_map_mode(),
+        );
+        registry
+            .instances
+            .write()
+            .await
+            .insert(ifname.to_string(), instance);
+        let ids = registry.tap_ids_by_ifname().await;
+        assert_eq!(ids.get(ifname), Some(&7));
         let _ = std::fs::remove_dir_all(root);
     }
 

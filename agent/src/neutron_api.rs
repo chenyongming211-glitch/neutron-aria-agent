@@ -1,14 +1,17 @@
 use aria_api::{
     action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
-    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
-    NeutronDomainStatus, NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus,
-    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusDomainEvidence,
+    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronCounterBucketV1,
+    NeutronCounterReasonV1, NeutronDeleteResponse, NeutronDomainStatus, NeutronPortApplyResult,
+    NeutronPortCountersV1, NeutronPortSnapshot, NeutronPortStatus, NeutronSnapshotRequest,
+    NeutronSnapshotResponse, NeutronStatusCountersV1, NeutronStatusDomainEvidence,
     NeutronStatusDomainState, NeutronStatusEffectiveAction, NeutronStatusOverallReadiness,
     NeutronStatusPortEvidence, NeutronStatusRecoveryCause, NeutronStatusRequiredAction,
     NeutronStatusSupportDisposition, NeutronStatusTransactionState, NeutronStatusV1Response,
+    NEUTRON_COUNTERS_SCHEMA_VERSION, NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT,
     NEUTRON_STATUS_CONTRACT_HASH, NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
     NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
+use aria_core::port_counters::read_port_counters;
 use axum::{
     extract::DefaultBodyLimit,
     extract::{Path, State},
@@ -26,7 +29,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::{error, info, warn};
@@ -2082,6 +2085,108 @@ fn project_neutron_status_v2(
     projection
 }
 
+/// Build the optional counters v1 section for a status response.
+///
+/// Best-effort by design: reads the shared managed pin path maps once and maps
+/// rows back to managed ports via the registry's ifname -> tap_id snapshot.
+/// Any tap id without a managed port is dropped; ports without a tap id are
+/// skipped. Map iteration is bounded (512 rows/port) and fast enough for the
+/// status handler; a read failure degrades only this section.
+fn build_neutron_counters_section(
+    state: &NeutronApiState,
+    ports: &BTreeMap<String, ManagedNeutronPort>,
+    tap_ids: &std::collections::HashMap<String, u32>,
+) -> Option<NeutronStatusCountersV1> {
+    let sampled_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let error_section = |reason: String| NeutronStatusCountersV1 {
+        counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
+        sampled_at_ms,
+        counters_error: Some(reason),
+        ports: Vec::new(),
+    };
+
+    let mut tap_to_port: BTreeMap<u32, String> = BTreeMap::new();
+    let mut tap_list: Vec<u32> = Vec::new();
+    for port in ports.values() {
+        if let Some(tap_id) = tap_ids.get(&port.ifname).copied() {
+            tap_to_port.insert(tap_id, port.port_id.clone());
+            tap_list.push(tap_id);
+        }
+    }
+    if tap_list.is_empty() {
+        return Some(NeutronStatusCountersV1 {
+            counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
+            sampled_at_ms,
+            counters_error: None,
+            ports: Vec::new(),
+        });
+    }
+    tap_list.sort_unstable();
+    tap_list.dedup();
+
+    let pin_path = state.control_plane.managed_pin_path();
+    let summaries = match read_port_counters(&pin_path, &tap_list) {
+        Ok(summaries) => summaries,
+        Err(error) => return Some(error_section(error)),
+    };
+    let mut counter_ports = Vec::new();
+    for summary in summaries {
+        let Some(port_id) = tap_to_port.get(&summary.tap_id) else {
+            continue;
+        };
+        let mut buckets: Vec<NeutronCounterBucketV1> = summary
+            .buckets
+            .iter()
+            .take(NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT)
+            .map(|b| NeutronCounterBucketV1 {
+                src_id: b.src_id,
+                dst_id: b.dst_id,
+                proto: b.proto,
+                direction: b.direction,
+                packets: b.packets,
+                bytes: b.bytes,
+                dropped_packets: b.dropped_packets,
+                dropped_bytes: b.dropped_bytes,
+            })
+            .collect();
+        buckets.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        let reasons: Vec<NeutronCounterReasonV1> = summary
+            .reasons
+            .iter()
+            .map(|r| NeutronCounterReasonV1 {
+                reason: r.reason,
+                direction: r.direction,
+                proto: r.proto,
+                packets: r.packets,
+                bytes: r.bytes,
+            })
+            .collect();
+        counter_ports.push(NeutronPortCountersV1 {
+            port_id: port_id.clone(),
+            tap_id: summary.tap_id,
+            policy_packets: summary.policy_packets,
+            policy_bytes: summary.policy_bytes,
+            policy_allow_packets: summary.policy_allow_packets,
+            policy_dropped_packets: summary.policy_dropped_packets,
+            policy_dropped_bytes: summary.policy_dropped_bytes,
+            drop_packets: summary.drop_packets,
+            drop_bytes: summary.drop_bytes,
+            truncated: summary.truncated,
+            buckets,
+            reasons,
+        });
+    }
+    Some(NeutronStatusCountersV1 {
+        counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
+        sampled_at_ms,
+        counters_error: None,
+        ports: counter_ports,
+    })
+}
+
 async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatusV1Response {
     let runtime = state.runtime.read().await;
     let durable_partial_retryable =
@@ -2101,7 +2206,11 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
     } else {
         runtime.authority_state.clone()
     };
+    let counters_ports = runtime.ports.clone();
+    let counters_tap_ids = state.registry.tap_ids_by_ifname().await;
     drop(runtime);
+
+    let counters = build_neutron_counters_section(state, &counters_ports, &counters_tap_ids);
 
     NeutronStatusV1Response {
         status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
@@ -2123,7 +2232,7 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
         managed_ports,
         port_statuses: projection.port_statuses,
         active_instances: state.registry.list().await,
-        counters: None,
+        counters,
     }
 }
 
