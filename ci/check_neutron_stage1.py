@@ -123,6 +123,10 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_pending_generation_survives_restart",
     "neutron_aria.tests.unit.test_status_reporter.StatusReporterTestCase."
     "test_global_degraded_rewrites_cached_acl_rows_to_bypass",
+    "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
+    "test_attach_counters_blob_adds_rows_when_present",
+    "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
+    "test_attach_counters_blob_is_noop_without_counters",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
     "test_capabilities_validates_required_domains",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."

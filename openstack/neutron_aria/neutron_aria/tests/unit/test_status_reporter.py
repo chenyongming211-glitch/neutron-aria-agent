@@ -921,5 +921,71 @@ class StatusContractStatusReporterRedTestCase(unittest.TestCase):
         )
 
 
+class CountersReportTestCase(unittest.TestCase):
+    def _runtime(self, with_counters=True):
+        runtime = AgentRuntimeStatus(host="h")
+        runtime.mark_ready(1, 1, 1)
+        if with_counters:
+            runtime.last_counters = {
+                "counters_schema_version": 1,
+                "sampled_at_ms": 2000,
+                "ports": [{
+                    "port_id": "p1", "tap_id": 7,
+                    "policy_packets": 200, "policy_bytes": 2000,
+                    "policy_allow_packets": 180,
+                    "policy_dropped_packets": 20,
+                    "policy_dropped_bytes": 200,
+                    "drop_packets": 20, "drop_bytes": 200,
+                    "truncated": False,
+                    "buckets": [],
+                    "reasons": [],
+                }],
+            }
+        else:
+            runtime.last_counters = None
+        return runtime
+
+    def test_attach_counters_blob_adds_rows_when_present(self):
+        from neutron_aria.agent.status_reporter import attach_counters_blob
+        from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
+        _PREVIOUS_COUNTERS.pop("p1", None)
+        payload = attach_counters_blob({}, self._runtime(with_counters=True))
+        self.assertEqual(payload["counters_sampled_at_ms"], 2000)
+        self.assertEqual(len(payload["counters_rows"]), 1)
+        row = payload["counters_rows"][0]
+        self.assertEqual(row["port_id"], "p1")
+        self.assertFalse(row["reset_detected"])
+        port_row = [r for r in row["rows"] if r["kind"] == "port"][0]
+        self.assertEqual(port_row["packets"], 200)
+        self.assertIsNone(port_row["pps"])
+
+    def test_attach_counters_blob_is_noop_without_counters(self):
+        from neutron_aria.agent.status_reporter import attach_counters_blob
+        payload = attach_counters_blob(
+            {}, self._runtime(with_counters=False)
+        )
+        self.assertEqual(payload, {})
+
+    def test_reporter_attaches_counters_only_when_enabled(self):
+        api = FakeReportStateApi()
+        runtime = self._runtime(with_counters=True)
+        disabled = NeutronStatusReporter(
+            api, context="ctx", host="h",
+        )
+        agent_state = disabled.report(runtime)
+        self.assertNotIn(
+            "counters_rows", agent_state["configurations"]
+        )
+        enabled = NeutronStatusReporter(
+            api, context="ctx", host="h",
+            counters_report_enabled=True,
+        )
+        agent_state = enabled.report(runtime)
+        self.assertIn("counters_rows", agent_state["configurations"])
+        self.assertIn(
+            "counters_sampled_at_ms", agent_state["configurations"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

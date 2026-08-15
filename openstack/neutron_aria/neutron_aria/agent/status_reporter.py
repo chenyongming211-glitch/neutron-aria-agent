@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 from neutron_aria.agent.config import sync_mode
+from neutron_aria.agent.counter_sampler import diff_port_counters
 from neutron_aria.agent.status import ARIA_AGENT_TYPE
 
 
@@ -23,6 +24,40 @@ ARIA_ACL_PORT_STATUS_FIELDS = set([
     "generation",
 ])
 
+# Latest per-port counter snapshot per process; counter rates are diffed
+# against this. Persistence across restarts is out of v1 scope.
+_PREVIOUS_COUNTERS = {}
+
+
+def attach_counters_blob(payload, runtime_status):
+    """Attach sampled port counters to a heartbeat configurations payload.
+
+    No-op when the runtime status carries no counters section. Rates are
+    computed by differencing the previous snapshot; negative cumulative
+    deltas are reported as reset_detected with None rates.
+    """
+    counters = getattr(runtime_status, "last_counters", None)
+    if not counters or not counters.get("ports"):
+        return payload
+    sampled_at_ms = counters.get("sampled_at_ms")
+    payload["counters_sampled_at_ms"] = sampled_at_ms
+    payload["counters_rows"] = []
+    for port in counters["ports"]:
+        port_copy = dict(port)
+        port_copy.setdefault("sampled_at_ms", sampled_at_ms)
+        rows, reset = diff_port_counters(
+            _PREVIOUS_COUNTERS.get(port["port_id"]), port_copy
+        )
+        _PREVIOUS_COUNTERS[port["port_id"]] = port_copy
+        payload["counters_rows"].append({
+            "port_id": port["port_id"],
+            "tap_id": port.get("tap_id"),
+            "truncated": port.get("truncated", False),
+            "reset_detected": reset,
+            "rows": rows,
+        })
+    return payload
+
 
 class StatusReportError(Exception):
     pass
@@ -42,6 +77,7 @@ class NeutronStatusReporter(object):
         use_call=False,
         configurations=None,
         heartbeat_detail_mode=HEARTBEAT_DETAIL_SUMMARY_ONLY,
+        counters_report_enabled=False,
     ):
         self.report_state_api = report_state_api
         self.context = context
@@ -52,6 +88,7 @@ class NeutronStatusReporter(object):
         self.use_call = use_call
         self.configurations = dict(configurations or {})
         self.heartbeat_detail_mode = heartbeat_detail_mode
+        self.counters_report_enabled = bool(counters_report_enabled)
         self.start_flag = True
 
     def report(self, runtime_status):
@@ -117,6 +154,8 @@ class NeutronStatusReporter(object):
         })
         if self.heartbeat_detail_mode == HEARTBEAT_DETAIL_LEGACY_SAMPLE:
             self._add_legacy_samples(configurations, payload)
+        if self.counters_report_enabled:
+            attach_counters_blob(configurations, runtime_status)
 
         return {
             "binary": self.binary,
@@ -429,6 +468,7 @@ def build_neutron_status_reporter(
         host=host,
         configurations=configurations,
         heartbeat_detail_mode=config.heartbeat_detail_mode,
+        counters_report_enabled=getattr(config, "counters_report_enabled", False),
     )
     if getattr(config, "acl_source", None) != "neutron":
         return heartbeat_reporter
