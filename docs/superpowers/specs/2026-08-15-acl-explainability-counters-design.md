@@ -1,7 +1,7 @@
 # ACL Explainability Counter Pipeline Design
 
-**Status:** functional implementation and hosted CI complete 2026-08-15;
-failure-semantics closure `REVIEW-ACL-111..115` in progress; privileged field
+**Status:** functional implementation, failure-semantics closure
+`REVIEW-ACL-111..115`, and hosted CI complete 2026-08-15; privileged field
 evidence deferred/pending; production gate remains default-off
 
 **Scope:** Phase B of `docs/openstack-ebpf-platform-roadmap.md` — per-rule hit/drop
@@ -317,3 +317,9 @@ Acceptance remains RED-before-GREEN. Python/database behaviors run locally and
 in hosted CI; Rust behavior is verified only by hosted CI under the repository's
 no-local-Cargo rule. Passing hosted tests does not change field evidence from
 `deferred/pending` or enable `counters_report_enabled`.
+
+Closure evidence: RED `f2779d5` failed the new Python and Rust contracts in
+Build [31880002282](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31880002282).
+GREEN `d6cb17a` passed fast contracts, database contracts, selected Rust
+behavior with warnings denied, and the complete eBPF/userspace/agent build in
+Build [31880412479](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31880412479).

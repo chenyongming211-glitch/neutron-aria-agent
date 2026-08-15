@@ -2,9 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Execution status (2026-08-15):** functional implementation and hosted CI are
-complete; privileged field evidence remains deferred/pending and the feature
-remains default-off. The unchecked task steps below are the preserved original
+**Execution status (2026-08-15):** functional implementation, post-review
+failure-semantics closure `REVIEW-ACL-111..115`, and hosted CI are complete;
+privileged field evidence remains deferred/pending and the feature remains
+default-off. The unchecked task steps below are the preserved original
 execution recipe, not the current delivery-state register. Post-review
 corrections supersede the original Task 3 and Task 9 mechanics as recorded
 below.
@@ -1614,5 +1615,7 @@ git push origin v0.9-neutron-agent
 ## Final Verification
 
 - [ ] Push state: `git status` clean; `git log origin/v0.9-neutron-agent..HEAD` empty.
-- [ ] GitHub Actions: `fast-contracts`, `rust-behavior`, `neutron-db-contracts` green.
+- [x] GitHub Actions: `fast-contracts`, `rust-behavior`,
+  `neutron-db-contracts` green at implementation commit `d6cb17a`, Build
+  [31880412479](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31880412479).
 - [ ] Field gate unchanged: `counters_report_enabled` default false; `docs/evidence` untouched (no fabricated field evidence).
