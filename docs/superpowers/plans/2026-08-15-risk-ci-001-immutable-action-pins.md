@@ -49,7 +49,7 @@ time.
 - Consumes: tracked `.github/workflows/*.yml` files.
 - Produces: `external_action_pin_errors(source, source_name)` and a mutation-tested repository contract.
 
-- [ ] **Step 1: Add the public validator and mutation tests**
+- [x] **Step 1: Add the public validator and mutation tests**
 
 Create `ci/test_workflow_action_pins.py` with this behavior:
 
@@ -139,7 +139,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Wire the contract into the existing Cargo-free fast lane**
+- [x] **Step 2: Wire the contract into the existing Cargo-free fast lane**
 
 In the `fast-contracts` workflow command list, immediately after
 `ci.test_ci_lane_contract`, add:
@@ -148,7 +148,7 @@ In the `fast-contracts` workflow command list, immediately after
 python3 -m unittest ci.test_workflow_action_pins
 ```
 
-- [ ] **Step 3: Run local non-Cargo RED verification**
+- [x] **Step 3: Run local non-Cargo RED verification**
 
 Run:
 
@@ -160,7 +160,7 @@ python3 -m unittest ci.test_workflow_action_pins -v
 Expected: the mutation tests pass and the repository assertion fails with
 exactly eight actionable errors: two `@stable`, one `@master`, and five `@v4`.
 
-- [ ] **Step 4: Commit and push RED**
+- [x] **Step 4: Commit and push RED**
 
 ```bash
 git add ci/test_workflow_action_pins.py .github/workflows/build.yml
@@ -168,7 +168,7 @@ git commit -m "test(ci): reject mutable workflow action refs"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Capture hosted RED**
+- [x] **Step 5: Capture hosted RED**
 
 Use `gh run list` and `gh run view` to verify the exact-head `fast-contracts`
 job fails only on the eight immutable-reference violations. Record the commit,
@@ -187,7 +187,7 @@ expensive jobs only after the intended RED evidence is visible.
 - Consumes: the reviewed upstream identities above.
 - Produces: immutable stable/nightly toolchain installation and immutable v4.6.2 artifact upload.
 
-- [ ] **Step 1: Pin stable Rust in `rust-behavior` and make selection explicit**
+- [x] **Step 1: Pin stable Rust in `rust-behavior` and make selection explicit**
 
 Replace the mutable use with:
 
@@ -198,7 +198,7 @@ Replace the mutable use with:
     toolchain: stable
 ```
 
-- [ ] **Step 2: Pin both Rust installations in `rust-build`**
+- [x] **Step 2: Pin both Rust installations in `rust-build`**
 
 Keep nightly inputs unchanged and replace only the identity:
 
@@ -220,7 +220,7 @@ Make stable explicit while retaining the musl target:
     targets: x86_64-unknown-linux-musl
 ```
 
-- [ ] **Step 3: Pin all five artifact upload steps**
+- [x] **Step 3: Pin all five artifact upload steps**
 
 Replace each `actions/upload-artifact@v4` with:
 
@@ -230,7 +230,7 @@ uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
 
 Do not change any adjacent `if`, `name`, `path`, or `retention-days` value.
 
-- [ ] **Step 4: Run local non-Cargo GREEN verification**
+- [x] **Step 4: Run local non-Cargo GREEN verification**
 
 Run:
 
@@ -244,7 +244,7 @@ python3 ci/check_build_workflow_contract.py
 Expected: all commands pass; the generic workflow scan reports no mutable
 external reference.
 
-- [ ] **Step 5: Audit the semantic diff**
+- [x] **Step 5: Audit the semantic diff**
 
 Run:
 
@@ -257,7 +257,7 @@ Expected: the first diff contains only three Rust identity changes, two
 explicit `toolchain: stable` inputs, and five upload identity changes. The
 second command prints nothing.
 
-- [ ] **Step 6: Commit and push GREEN**
+- [x] **Step 6: Commit and push GREEN**
 
 ```bash
 git add .github/workflows/build.yml
@@ -265,7 +265,7 @@ git commit -m "fix(ci): pin every external workflow action"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Capture exact-head hosted GREEN**
+- [x] **Step 7: Capture exact-head hosted GREEN**
 
 Wait for the Build attached to the GREEN commit. Require successful
 `fast-contracts`, selected Rust behavior, warning-denied userspace/agent/eBPF
@@ -281,19 +281,19 @@ their original conditions. Do not infer Dependabot or field evidence.
 - Modify: `docs/openstack-neutron-aria-details/12-review-bug-backlog.md:RISK-CI-001`
 - Modify: `docs/superpowers/plans/2026-08-15-risk-ci-001-immutable-action-pins.md`
 
-- [ ] **Step 1: Record RED and GREEN evidence**
+- [x] **Step 1: Record RED and GREEN evidence**
 
 Change the design status to `implemented; hosted CI complete`. Add the exact
 RED/GREEN commit IDs and Build URLs. Mark `RISK-CI-001` fixed for immutable
 execution and state separately that automatic refresh remains a default-branch
 governance follow-up.
 
-- [ ] **Step 2: Mark completed plan checkboxes**
+- [x] **Step 2: Mark completed plan checkboxes**
 
 Mark only steps with observed evidence as complete. Leave no checkmark on an
 uncaptured CI claim.
 
-- [ ] **Step 3: Commit and push documentation closure**
+- [x] **Step 3: Commit and push documentation closure**
 
 ```bash
 git add \

@@ -1,6 +1,6 @@
 # RISK-CI-001 Immutable GitHub Action Pins Design
 
-**Status:** approved design; implementation pending
+**Status:** implemented; hosted CI complete
 
 **Scope:** external `uses:` references in `.github/workflows/*.yml`
 
@@ -111,3 +111,21 @@ No local Cargo command is run. No privileged or field evidence applies.
 external `uses:` references pass the validator at an exact green head. The
 default-branch automated-refresh follow-up remains explicitly pending and must
 not be described as enabled.
+
+## 8. Implementation Evidence
+
+- RED `dc1483e` / Build
+  [31888740382](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31888740382)
+  ran the mutation-tested validator and failed the repository assertion on
+  exactly eight references: two `@stable`, one `@master`, and five `@v4`.
+  The run was cancelled only after this intended hosted RED was captured.
+- GREEN `5be412b` / exact-head Build
+  [31888861469](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31888861469)
+  passed fast contracts, selected Rust behavior, warning-denied nightly eBPF
+  and stable userspace/agent builds, plus the 448-byte eBPF stack gate.
+- Stable and master Rust action refs were independently resolved and pinned.
+  The upload action is pinned to the commit identified upstream as `v4.6.2`.
+- No workflow trigger, permission, release dependency, artifact path,
+  retention period, or publication condition changed. Automated refresh is
+  still a separate default-branch governance follow-up and is not claimed as
+  active.
