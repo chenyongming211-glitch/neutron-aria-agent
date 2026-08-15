@@ -104,6 +104,18 @@ def upgrade_existing_schema(
             import sqlalchemy as sa_module
         except Exception:
             raise RuntimeError("sqlalchemy is required for aria_acl migration")
+    connection_type = getattr(
+        getattr(sa_module, "engine", None),
+        "Connection",
+        (),
+    )
+    if op_handle is None and not isinstance(bind, connection_type):
+        with bind.begin() as connection:
+            return upgrade_existing_schema(
+                connection,
+                sa_module=sa_module,
+                inspector=sa_module.inspect(connection),
+            )
     if inspector is None:
         inspector = sa_module.inspect(bind)
     if op_handle is None:

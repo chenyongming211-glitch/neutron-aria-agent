@@ -36,6 +36,14 @@ def check_neutron_server_contract_files():
         "openstack", "neutron_aria", "neutron_aria", "db", "aria_acl",
         "migration", "versions", "8b9c2d1e4f60_add_aria_acl_tables.py",
     ))
+    counter_migration = _read(os.path.join(
+        "openstack", "neutron_aria", "neutron_aria", "db", "migration",
+        "aria_acl_counters.py",
+    ))
+    counter_migration_version = _read(os.path.join(
+        "openstack", "neutron_aria", "neutron_aria", "db", "aria_acl",
+        "migration", "versions", "a4e7c2d9b610_add_acl_counter_schema.py",
+    ))
     policy = _read(os.path.join(
         "openstack", "neutron_aria", "neutron_aria", "policies", "aria_acl.py"
     ))
@@ -75,7 +83,6 @@ def check_neutron_server_contract_files():
         "aria_acl_bindings",
         "aria_acl_rbac",
         "aria_acl_port_statuses",
-        "aria_acl_port_counters",
     ):
         if table not in migration:
             raise SystemExit("ERROR: aria_acl migration contract missing %s" % table)
@@ -86,17 +93,31 @@ def check_neutron_server_contract_files():
         "create_table",
         "create_index",
         "drop_table",
+    ):
+        if term not in migration:
+            raise SystemExit("ERROR: aria_acl migration operation missing %s" % term)
+    for term in (
+        'revision = "a4e7c2d9b610"',
+        'down_revision = "f61a2c4e7b90"',
+        '"aria_acl_port_counters"',
         '"counters_sampled_at"',
         '"counters_policy_packets"',
         '"counters_truncated"',
         '"counters_group_map"',
         '"uq_aria_acl_port_counters_natural"',
+        "upgrade_existing_schema",
     ):
-        if term not in migration:
-            raise SystemExit("ERROR: aria_acl migration operation missing %s" % term)
+        if term not in counter_migration:
+            raise SystemExit(
+                "ERROR: aria_acl counter migration operation missing %s" % term
+            )
     for term in ("revision", "down_revision", "upgrade", "downgrade"):
         if term not in migration_version:
             raise SystemExit("ERROR: aria_acl migration version file missing %s" % term)
+        if term not in counter_migration_version:
+            raise SystemExit(
+                "ERROR: aria_acl counter migration version file missing %s" % term
+            )
 
     required_policy_terms = (
         '"create_aria_acl_policy": ADMIN_ONLY',
