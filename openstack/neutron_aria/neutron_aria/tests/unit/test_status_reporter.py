@@ -549,6 +549,41 @@ class StatusReporterTestCase(unittest.TestCase):
         )
         self.assertEqual(1, result["deleted_port_statuses"])
 
+    def test_port_status_reporter_treats_not_found_delete_as_idempotent(self):
+        class NotFoundError(Exception):
+            status_code = 404
+
+        class NotFoundApi(FakeAriaAclApi):
+            def delete_aria_acl_port_status(self, context, port_id, host=None):
+                raise NotFoundError("aria_acl_port_status not found")
+
+        api = NotFoundApi()
+        reporter = AriaAclPortStatusReporter(
+            api,
+            context="ctx",
+            host="compute-1",
+        )
+
+        error = None
+        try:
+            reporter.remove_port_status("port-1")
+        except Exception as exc:
+            error = exc
+        self.assertIsNone(error)
+
+        runtime_status = AgentRuntimeStatus("compute-1")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+        result = reporter.report(runtime_status)
+
+        self.assertEqual(1, result["deleted_port_statuses"])
+        self.assertEqual([], sorted(reporter.pending_deleted_port_ids))
+        self.assertEqual(1, len(api.statuses))
+
     def test_port_status_reporter_does_not_retry_report_type_error(self):
         class TypeErrorApi(object):
             def __init__(self):

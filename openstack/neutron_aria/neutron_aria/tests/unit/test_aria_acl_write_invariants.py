@@ -232,6 +232,15 @@ class RepositoryWriteInvariantBehavior(object):
         self.assertEqual("192.0.2.16/28", rule["dst_cidr"])
         self.assertEqual(rule, self.repository.get_rule("rule-1"))
 
+    def test_rule_write_canonicalizes_ethertype_case(self):
+        self.create_policy()
+        rule = self.repository.create_rule(self.rule_values(
+            ethertype="ipv4",
+            src_cidr="10.1.2.3/24",
+        ))
+        self.assertEqual("IPv4", rule["ethertype"])
+        self.assertEqual(rule, self.repository.get_rule("rule-1"))
+
     def test_address_set_write_canonicalizes_deduplicates_and_sorts(self):
         address_set = self.create_address_set(members=[
             "10.0.1.9/24",

@@ -424,6 +424,20 @@ class EffectiveAclTestCase(unittest.TestCase):
                 result["reason"],
             )
 
+    def test_non_canonical_ethertype_case_compiles_ready(self):
+        for ethertype in ("ipv4", "IPV4", "IpV4"):
+            result = effective_acl([
+                acl_rule(
+                    "ether-case",
+                    priority=10,
+                    ethertype=ethertype,
+                    src_cidr="10.1.2.0/24",
+                ),
+            ])
+
+            self.assertEqual(ACL_READY, result["status"], ethertype)
+            self.assertEqual("enforce", result["effective_action"], ethertype)
+
     def test_rule_runtime_limit_accepts_1000_and_bypasses_1001(self):
         accepted = effective_acl(acl_rules(1000))
         rejected = effective_acl(acl_rules(1001))
