@@ -296,12 +296,35 @@ pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::result_name;
+    use super::{delete_trace_filter_entry, result_name};
     use aria_ebpf_abi::userspace::TRACE_RESULT_DROP_FRAGMENT;
+    use aya::maps::MapError;
 
     #[test]
     fn fragment_observability_names_fragment_drop_separately_from_acl() {
         assert_eq!(result_name(TRACE_RESULT_DROP_FRAGMENT), "drop:fragment");
         assert_ne!(result_name(TRACE_RESULT_DROP_FRAGMENT), "drop:acl");
+    }
+
+    #[test]
+    fn trace_filter_delete_is_idempotent_only_for_missing_key() {
+        assert!(!delete_trace_filter_entry(
+            || Err(MapError::KeyNotFound),
+            "delete TRACE_FILTER tap 42",
+        )
+        .unwrap());
+
+        let error = delete_trace_filter_entry(
+            || {
+                Err(MapError::InvalidKeySize {
+                    size: 1,
+                    expected: 4,
+                })
+            },
+            "delete TRACE_FILTER tap 42",
+        )
+        .unwrap_err();
+        assert!(error.contains("delete TRACE_FILTER tap 42"));
+        assert!(error.contains("invalid key size"));
     }
 }

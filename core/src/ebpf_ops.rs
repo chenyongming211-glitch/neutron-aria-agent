@@ -190,7 +190,9 @@ where
 
 #[cfg(test)]
 mod map_delete_tests {
-    use super::{classify_map_delete, execute_map_delete_batch};
+    use super::{
+        classify_map_delete, execute_counted_map_delete_batch, execute_map_delete_batch,
+    };
     use aya::maps::MapError;
     use aya::sys::SyscallError;
 
@@ -243,6 +245,56 @@ mod map_delete_tests {
 
         assert_eq!(attempted, vec![1, 2, 3]);
         assert!(error.contains("invalid key size"));
+        assert!(!error.contains("key not found"));
+    }
+
+    #[test]
+    fn counted_map_delete_batch_counts_only_actual_removals() {
+        let mut attempted = Vec::new();
+        let removed = execute_counted_map_delete_batch(
+            [1u16, 2, 3],
+            |port| {
+                attempted.push(*port);
+                match port {
+                    2 => Err(MapError::KeyNotFound),
+                    _ => Ok(()),
+                }
+            },
+            "flush ACL observability entry",
+        )
+        .unwrap();
+
+        assert_eq!(attempted, vec![1, 2, 3]);
+        assert_eq!(removed, 2);
+    }
+
+    #[test]
+    fn counted_map_delete_batch_attempts_all_and_aggregates_real_faults() {
+        let mut attempted = Vec::new();
+        let error = execute_counted_map_delete_batch(
+            [1u16, 2, 3, 4],
+            |port| {
+                attempted.push(*port);
+                match port {
+                    1 => Err(MapError::InvalidKeySize {
+                        size: 1,
+                        expected: 8,
+                    }),
+                    2 => Err(MapError::KeyNotFound),
+                    3 => Err(MapError::InvalidValueSize {
+                        size: 2,
+                        expected: 16,
+                    }),
+                    _ => Ok(()),
+                }
+            },
+            "flush ACL observability entry",
+        )
+        .unwrap_err();
+
+        assert_eq!(attempted, vec![1, 2, 3, 4]);
+        assert!(error.contains("invalid key size"));
+        assert!(error.contains("invalid value size"));
         assert!(!error.contains("key not found"));
     }
 }
