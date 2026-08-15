@@ -54,6 +54,21 @@ def attach_counters_blob(payload, runtime_status):
             "tap_id": port.get("tap_id"),
             "truncated": port.get("truncated", False),
             "reset_detected": reset,
+            "summary": {
+                "policy_packets": port_copy.get("policy_packets"),
+                "policy_bytes": port_copy.get("policy_bytes"),
+                "policy_allow_packets": port_copy.get(
+                    "policy_allow_packets"
+                ),
+                "policy_dropped_packets": port_copy.get(
+                    "policy_dropped_packets"
+                ),
+                "policy_dropped_bytes": port_copy.get(
+                    "policy_dropped_bytes"
+                ),
+                "drop_packets": port_copy.get("drop_packets"),
+                "drop_bytes": port_copy.get("drop_bytes"),
+            },
             "rows": rows,
         })
     return payload

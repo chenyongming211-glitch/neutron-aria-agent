@@ -955,6 +955,8 @@ class CountersReportTestCase(unittest.TestCase):
         row = payload["counters_rows"][0]
         self.assertEqual(row["port_id"], "p1")
         self.assertFalse(row["reset_detected"])
+        self.assertEqual(row["summary"]["policy_packets"], 200)
+        self.assertEqual(row["summary"]["drop_packets"], 20)
         port_row = [r for r in row["rows"] if r["kind"] == "port"][0]
         self.assertEqual(port_row["packets"], 200)
         self.assertIsNone(port_row["pps"])

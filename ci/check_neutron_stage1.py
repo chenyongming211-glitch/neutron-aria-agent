@@ -141,6 +141,10 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_legacy_port_show_wrapper_projects_before_field_selection",
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
     "test_port_projection_failure_does_not_break_core_port_show",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_report_port_status_persists_counter_rows_and_summary",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_report_port_status_counter_persistence_failure_is_swallowed",
 )
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")

@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import datetime
 import logging
 import os
 import time
@@ -328,11 +329,127 @@ class AriaAclPlugin(object):
         )
 
     def report_aria_acl_port_status(self, context, aria_acl_port_status):
-        return self._project_port_status(
-            self._repo(context).upsert_port_status(
-                self._unwrap(aria_acl_port_status, "aria_acl_port_status")
-            )
+        payload = dict(
+            self._unwrap(aria_acl_port_status, "aria_acl_port_status")
         )
+        counter_blobs = payload.pop("counters_rows", None)
+        sampled_at_ms = payload.pop("counters_sampled_at_ms", None)
+        self._attach_counter_summary(payload, counter_blobs, sampled_at_ms)
+        self._persist_counter_rows(context, payload, counter_blobs, sampled_at_ms)
+        return self._project_port_status(
+            self._repo(context).upsert_port_status(payload)
+        )
+
+    @staticmethod
+    def _counter_sampled_at(sampled_at_ms):
+        if sampled_at_ms is None:
+            return None
+        try:
+            seconds = float(sampled_at_ms) / 1000.0
+        except (TypeError, ValueError):
+            return None
+        if seconds <= 0:
+            return None
+        return datetime.datetime.utcfromtimestamp(seconds)
+
+    @classmethod
+    def _attach_counter_summary(cls, payload, counter_blobs, sampled_at_ms):
+        if not counter_blobs:
+            return
+        port_id = payload.get("port_id")
+        blob = None
+        for candidate in counter_blobs:
+            if candidate.get("port_id") == port_id:
+                blob = candidate
+                break
+        if blob is None:
+            return
+        summary = blob.get("summary") or {}
+        payload["counters_sampled_at"] = cls._counter_sampled_at(
+            sampled_at_ms
+        )
+        payload["counters_policy_packets"] = summary.get("policy_packets")
+        payload["counters_policy_bytes"] = summary.get("policy_bytes")
+        payload["counters_policy_allow_packets"] = summary.get(
+            "policy_allow_packets"
+        )
+        payload["counters_policy_dropped_packets"] = summary.get(
+            "policy_dropped_packets"
+        )
+        payload["counters_policy_dropped_bytes"] = summary.get(
+            "policy_dropped_bytes"
+        )
+        payload["counters_drop_packets"] = summary.get("drop_packets")
+        payload["counters_drop_bytes"] = summary.get("drop_bytes")
+        payload["counters_truncated"] = bool(blob.get("truncated"))
+        payload["counters_reset_detected"] = bool(blob.get("reset_detected"))
+        port_row = None
+        for row in blob.get("rows") or []:
+            if row.get("kind") == "port":
+                port_row = row
+                break
+        if port_row is not None:
+            payload["counters_policy_pps"] = port_row.get("pps")
+        reason_pps = [
+            row.get("pps")
+            for row in blob.get("rows") or []
+            if row.get("kind") == "reason" and row.get("pps") is not None
+        ]
+        payload["counters_drop_pps"] = (
+            sum(reason_pps) if reason_pps else None
+        )
+
+    @classmethod
+    def _counter_rows(cls, counter_blobs, sampled_at_ms):
+        sampled_at = cls._counter_sampled_at(sampled_at_ms)
+        rows = []
+        for blob in counter_blobs or []:
+            for row in blob.get("rows") or []:
+                key = row.get("key") or {}
+                rows.append({
+                    "kind": row.get("kind"),
+                    "src_id": key.get("src_id"),
+                    "dst_id": key.get("dst_id"),
+                    "proto": key.get("proto"),
+                    "direction": key.get("direction"),
+                    "reason": key.get("reason"),
+                    "packets": row.get("packets") or 0,
+                    "bytes": row.get("bytes") or 0,
+                    "dropped_packets": row.get("dropped_packets"),
+                    "dropped_bytes": row.get("dropped_bytes"),
+                    "pps": row.get("pps"),
+                    "bps": row.get("bps"),
+                    "sampled_at": sampled_at,
+                })
+        return rows
+
+    def _persist_counter_rows(
+        self, context, payload, counter_blobs, sampled_at_ms
+    ):
+        if not counter_blobs:
+            return
+        port_id = payload.get("port_id")
+        host = payload.get("host")
+        if not port_id or not host:
+            return
+        repository = self._repo(context)
+        upsert = getattr(repository, "upsert_port_counters", None)
+        if upsert is None:
+            return
+        try:
+            upsert(
+                port_id,
+                host,
+                self._counter_rows(counter_blobs, sampled_at_ms),
+            )
+        except Exception as exc:
+            LOG.warning(
+                "aria_acl port counter persistence failed port_id=%s "
+                "host=%s error=%s",
+                port_id,
+                host,
+                exc,
+            )
 
     def create_aria_acl_port_status(self, context, aria_acl_port_status):
         return self.report_aria_acl_port_status(context, aria_acl_port_status)

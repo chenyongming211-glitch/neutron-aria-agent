@@ -2142,6 +2142,128 @@ class AriaAclPluginTestCase(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_report_port_status_persists_counter_rows_and_summary(self):
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        payload = {
+            "port_id": "p1",
+            "host": "h1",
+            "status": "ready",
+            "counters_sampled_at_ms": 2000000,
+            "counters_rows": [{
+                "port_id": "p1",
+                "tap_id": 7,
+                "truncated": False,
+                "reset_detected": False,
+                "summary": {
+                    "policy_packets": 200,
+                    "policy_bytes": 2000,
+                    "policy_allow_packets": 180,
+                    "policy_dropped_packets": 20,
+                    "policy_dropped_bytes": 200,
+                    "drop_packets": 20,
+                    "drop_bytes": 200,
+                },
+                "rows": [{
+                    "kind": "port",
+                    "key": {},
+                    "packets": 200,
+                    "bytes": 2000,
+                    "dropped_packets": 20,
+                    "dropped_bytes": 200,
+                    "pps": 100.0,
+                    "bps": 1000.0,
+                }, {
+                    "kind": "bucket",
+                    "key": {
+                        "src_id": 1,
+                        "dst_id": 2,
+                        "proto": 6,
+                        "direction": 0,
+                    },
+                    "packets": 100,
+                    "bytes": 1000,
+                    "dropped_packets": 10,
+                    "dropped_bytes": 100,
+                    "pps": 50.0,
+                    "bps": 500.0,
+                }, {
+                    "kind": "reason",
+                    "key": {
+                        "reason": 1,
+                        "direction": 0,
+                        "proto": 6,
+                    },
+                    "packets": 20,
+                    "bytes": 200,
+                    "dropped_packets": None,
+                    "dropped_bytes": None,
+                    "pps": 10.0,
+                    "bps": 100.0,
+                }],
+            }],
+        }
+        status = plugin.report_aria_acl_port_status(
+            None, {"aria_acl_port_status": payload}
+        )
+        self.assertEqual(status["port_id"], "p1")
+        self.assertNotIn("counters_rows", status)
+        self.assertEqual(status["counters_policy_packets"], 200)
+        self.assertEqual(status["counters_policy_pps"], 100.0)
+        self.assertEqual(status["counters_drop_packets"], 20)
+        self.assertEqual(status["counters_drop_pps"], 10.0)
+        self.assertFalse(status["counters_truncated"])
+        self.assertFalse(status["counters_reset_detected"])
+        rows = repository.get_port_counters("p1", host="h1")
+        self.assertEqual(len(rows), 3)
+        bucket = [r for r in rows if r["kind"] == "bucket"][0]
+        self.assertEqual(bucket["src_id"], 1)
+        self.assertEqual(bucket["packets"], 100)
+        self.assertIsNotNone(bucket["sampled_at"])
+        reason = [r for r in rows if r["kind"] == "reason"][0]
+        self.assertEqual(reason["reason"], 1)
+
+    def test_report_port_status_without_counters_keeps_status_shape(self):
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        status = plugin.report_aria_acl_port_status(
+            None,
+            {"aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+            }},
+        )
+        self.assertEqual(status["port_id"], "p1")
+        self.assertNotIn("counters_rows", status)
+        self.assertEqual(repository.get_port_counters("p1", host="h1"), [])
+
+    def test_report_port_status_counter_persistence_failure_is_swallowed(self):
+        class FailingCountersRepository(InMemoryAriaAclRepository):
+            def upsert_port_counters(self, port_id, host, rows):
+                raise RuntimeError("counters table unavailable")
+
+        repository = FailingCountersRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        status = plugin.report_aria_acl_port_status(
+            None,
+            {"aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_sampled_at_ms": 2000000,
+                "counters_rows": [{
+                    "port_id": "p1",
+                    "truncated": False,
+                    "reset_detected": False,
+                    "summary": {},
+                    "rows": [],
+                }],
+            }},
+        )
+        self.assertEqual(status["port_id"], "p1")
+        self.assertEqual(status["status"], "ready")
+
 
 if __name__ == "__main__":
     unittest.main()
