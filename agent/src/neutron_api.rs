@@ -7974,6 +7974,18 @@ mod tests {
         (status, readiness)
     }
 
+    /// Normalize the dynamic counters sample timestamp so two bodies built at
+    /// different instants still compare equal (the counters section samples
+    /// the wall clock per request by design).
+    fn strip_counters_timestamp(mut body: Value) -> Value {
+        if let Some(counters) = body.get_mut("counters") {
+            if let Some(object) = counters.as_object_mut() {
+                object.insert("sampled_at_ms".to_string(), serde_json::json!(0));
+            }
+        }
+        body
+    }
+
     #[tokio::test]
     async fn neutron_readiness_returns_success_only_for_exact_ready() {
         for (id, expected_status) in [
@@ -8003,7 +8015,8 @@ mod tests {
                 "readiness status must follow overall_readiness for {id}"
             );
             assert_eq!(
-                readiness_body, status_body,
+                strip_counters_timestamp(readiness_body),
+                strip_counters_timestamp(status_body),
                 "readiness and status inspection must share one Status V1 body for {id}"
             );
         }
@@ -8020,7 +8033,10 @@ mod tests {
 
         assert_eq!(status_code, StatusCode::OK);
         assert_eq!(readiness_code, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(readiness_body, status_body);
+        assert_eq!(
+            strip_counters_timestamp(readiness_body),
+            strip_counters_timestamp(status_body)
+        );
         assert_eq!(
             readiness_body
                 .get("transaction_state")
