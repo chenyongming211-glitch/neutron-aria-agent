@@ -1842,6 +1842,59 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         self.assertEqual(parsed["status_schema_version"], 3)
         self.assertNotIn("counters", parsed)
 
+    def test_status_omits_counter_query_by_default(self):
+        scenario = status_v3_scenario("counters-absent-legacy-datapath")
+        client = self._client()
+        capabilities = copy.deepcopy(
+            load_status_contract_v2_fixture()["capabilities"]
+        )
+        capabilities.update({
+            "status_schema_version_max": 3,
+            "status_contract_hash": "v0.9-neutron-status-3",
+            "capability_hash": "v0.9-neutron-capabilities-5",
+            "error_codes_hash": "v0.9-neutron-errors-3",
+            "counters_v1": True,
+        })
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", capabilities),
+            FakeResponse(200, "OK", copy.deepcopy(scenario["status"])),
+        ])
+        client.capabilities(required_domains=["acl"])
+
+        client.status()
+
+        self.assertEqual(
+            "/api/v1/neutron/status",
+            FakeConnection.requests[-1]["path"],
+        )
+
+    def test_counter_status_explicitly_requests_bounded_counter_section(self):
+        scenario = status_v3_scenario("counters-present-single-port")
+        client = self._client()
+        capabilities = copy.deepcopy(
+            load_status_contract_v2_fixture()["capabilities"]
+        )
+        capabilities.update({
+            "status_schema_version_max": 3,
+            "status_contract_hash": "v0.9-neutron-status-3",
+            "capability_hash": "v0.9-neutron-capabilities-5",
+            "error_codes_hash": "v0.9-neutron-errors-3",
+            "counters_v1": True,
+        })
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", capabilities),
+            FakeResponse(200, "OK", copy.deepcopy(scenario["status"])),
+        ])
+        client.capabilities(required_domains=["acl"])
+
+        decoded = client.counter_status()
+
+        self.assertEqual(
+            "/api/v1/neutron/status?include_counters=1",
+            FakeConnection.requests[-1]["path"],
+        )
+        self.assertIn("counters", decoded)
+
     def test_v3_capability_handshake_is_accepted(self):
         # Regression: the v3 profile must exist in _STATUS_CONTRACT_PROFILES
         # or capabilities() raises KeyError and the agent handshake dies.

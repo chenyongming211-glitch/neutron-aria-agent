@@ -8154,6 +8154,52 @@ mod tests {
         body
     }
 
+    #[tokio::test]
+    async fn neutron_status_counters_default_response_omits_counter_section() {
+        let root = temp_root("status-counters-default-off");
+        let state = test_neutron_state(&root);
+
+        let response = build_neutron_status_response(&state, false).await;
+
+        assert!(response.counters.is_none());
+        std::fs::remove_dir_all(&root)
+            .expect("counter default-off temporary root should be removable");
+    }
+
+    #[test]
+    fn neutron_status_counters_oversize_section_becomes_bounded_error() {
+        let port = NeutronPortCountersV1 {
+            port_id: "p".repeat(1024),
+            tap_id: 1,
+            policy_packets: 1,
+            policy_bytes: 1,
+            policy_allow_packets: 1,
+            policy_dropped_packets: 0,
+            policy_dropped_bytes: 0,
+            drop_packets: 0,
+            drop_bytes: 0,
+            truncated: false,
+            buckets: Vec::new(),
+            reasons: Vec::new(),
+            groups: Vec::new(),
+        };
+        let section = NeutronStatusCountersV1 {
+            counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
+            sampled_at_ms: 1000,
+            counters_error: None,
+            ports: vec![port; 8],
+        };
+
+        let bounded = enforce_neutron_counters_budget(section, 512);
+
+        assert!(bounded.ports.is_empty());
+        assert_eq!(
+            bounded.counters_error.as_deref(),
+            Some("counters_response_budget_exceeded")
+        );
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= 512);
+    }
+
     #[test]
     fn counters_tap_mapping_maps_ports_and_skips_unregistered_taps() {
         let mut ports = BTreeMap::new();

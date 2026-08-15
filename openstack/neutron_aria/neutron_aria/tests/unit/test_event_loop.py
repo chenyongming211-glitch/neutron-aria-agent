@@ -4371,6 +4371,53 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertFalse(status_reporter.statuses[0]["degraded"])
         self.assertEqual("ready", status_reporter.statuses[0]["reason"])
 
+    def test_counter_enabled_report_refreshes_explicit_counter_snapshot(self):
+        class CounterClient(FakeLocalClient):
+            def __init__(self):
+                FakeLocalClient.__init__(self)
+                self.counter_status_calls = 0
+
+            def counter_status(self):
+                self.counter_status_calls += 1
+                return {"counters": {
+                    "counters_schema_version": 1,
+                    "sampled_at_ms": 1000,
+                    "ports": [],
+                }}
+
+        client = CounterClient()
+        reporter = FakeStatusReporter()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            client,
+            status_reporter=reporter,
+            counters_report_enabled=True,
+        )
+
+        result = sync.report_status()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, client.counter_status_calls)
+        self.assertEqual(1000, sync.runtime_status.last_counters["sampled_at_ms"])
+
+    def test_counter_disabled_report_never_requests_counter_snapshot(self):
+        class NoCounterClient(FakeLocalClient):
+            def counter_status(self):
+                raise AssertionError("disabled counters must not be requested")
+
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            NoCounterClient(),
+            status_reporter=FakeStatusReporter(),
+            counters_report_enabled=False,
+        )
+
+        self.assertTrue(sync.report_status()["ok"])
+
     def test_full_resync_recovers_when_timed_out_snapshot_converged(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         port_source = StaticPortSource([{
