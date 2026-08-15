@@ -179,6 +179,7 @@ unsafe fn try_tc_egress_v4(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
+            refresh_trace_flag_tc(p, info);
             phase_fragment_resolve_drop_v4_tc(ctx, info, p);
             return p.action as i32;
         }
@@ -249,6 +250,7 @@ unsafe fn try_tc_egress_v6(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
+            refresh_trace_flag_tc(p, info);
             phase_fragment_resolve_drop_v6_tc(ctx, info, p);
             return p.action as i32;
         }
@@ -383,6 +385,7 @@ unsafe fn try_tc_ingress_v4(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
+            refresh_trace_flag_tc(p, info);
             phase_fragment_resolve_drop_v4_tc(ctx, info, p);
             return p.action as i32;
         }
@@ -453,6 +456,7 @@ unsafe fn try_tc_ingress_v6(
             refresh_trace_flag_tc(p, info);
         }
         fragment::ResolveOutcome::Drop => {
+            refresh_trace_flag_tc(p, info);
             phase_fragment_resolve_drop_v6_tc(ctx, info, p);
             return p.action as i32;
         }
