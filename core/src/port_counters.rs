@@ -34,6 +34,7 @@ pub struct PortCounterSummary {
     pub policy_packets: u64,
     pub policy_bytes: u64,
     pub policy_allow_packets: u64,
+    pub policy_allow_bytes: u64,
     pub policy_dropped_packets: u64,
     pub policy_dropped_bytes: u64,
     pub drop_packets: u64,
@@ -197,9 +198,11 @@ pub fn read_port_counters(
 
     let mut summaries = Vec::new();
     for &tap_id in &requested {
-        let rule_stats = rule_rows.get(&tap_id).cloned().unwrap_or_default();
-        let drop_stats = drop_rows.get(&tap_id).cloned().unwrap_or_default();
-        let summary = aggregate_port_counters(&rule_stats, &drop_stats, tap_id);
+        let rule_stats: &[RuleStatsEntry] =
+            rule_rows.get(&tap_id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let drop_stats: &[DropStatsEntry] =
+            drop_rows.get(&tap_id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let summary = aggregate_port_counters(rule_stats, drop_stats, tap_id);
         if summary.policy_packets > 0 || summary.drop_packets > 0 {
             summaries.push(summary);
         }
