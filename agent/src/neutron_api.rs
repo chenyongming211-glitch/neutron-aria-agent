@@ -2355,7 +2355,18 @@ async fn build_neutron_status_response(
     let registry = state.registry.clone();
     let pin_path = state.control_plane.managed_pin_path();
     let counters = tokio::task::spawn_blocking(move || {
-        let runtimes = registry.tap_runtimes_now();
+        let runtimes = match registry.tap_runtimes_now() {
+            Ok(runtimes) => runtimes,
+            Err(error) => {
+                return Some(neutron_counters_error(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    error,
+                ));
+            }
+        };
         let mut tap_ids = std::collections::HashMap::new();
         let mut state_paths = std::collections::HashMap::new();
         for (ifname, (tap_id, state_path)) in runtimes {

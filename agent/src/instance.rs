@@ -923,14 +923,18 @@ impl FirewallInstance {
     }
 
     /// Persisted tap id for this instance, if one is assigned.
-    pub fn tap_id(&self) -> Option<u32> {
-        let state_path = match self.state_path.to_str() {
-            Some(path) => path,
-            None => return None,
-        };
-        match aria_core::state::StateManager::new(state_path).get_tap_id() {
-            Ok(tap_id) if tap_id != aria_core::common::TAP_ID_UNASSIGNED => Some(tap_id),
-            _ => None,
+    pub fn tap_id(&self) -> Result<Option<u32>, String> {
+        let state_path = self
+            .state_path
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 state path for {}", self.iface))?;
+        let tap_id = aria_core::state::StateManager::new(state_path)
+            .get_tap_id()
+            .map_err(|error| format!("read tap id for {}: {}", self.iface, error))?;
+        if tap_id == aria_core::common::TAP_ID_UNASSIGNED {
+            Ok(None)
+        } else {
+            Ok(Some(tap_id))
         }
     }
 

@@ -644,11 +644,10 @@ class AriaAclPortStatusShow(_AriaAclShow):
     def execute(self, parsed_args):
         neutron_client = self._client(parsed_args)
         data = neutron_client.show_ext(self.id_path, parsed_args.id)
+        status = dict(data.get(self.resource) or {})
+        group_map = status.pop("aria_acl_port_group_map", None) or {}
+        counter_rows = status.pop("aria_acl_port_counters", None) or []
         if getattr(parsed_args, "counters", False):
-            status = data.get(self.resource) or {}
-            status = dict(status)
-            group_map = status.get("aria_acl_port_group_map") or {}
-            counter_rows = status.get("aria_acl_port_counters") or []
             bucket_index = 0
             reason_index = 0
             for row in counter_rows:
@@ -664,9 +663,7 @@ class AriaAclPortStatusShow(_AriaAclShow):
                 else:
                     continue
                 status[key] = value
-            status.pop("aria_acl_port_counters", None)
-            status.pop("aria_acl_port_group_map", None)
-            data[self.resource] = status
+        data[self.resource] = status
         self.format_output_data(data)
         return self._show_rows(data)
 
@@ -711,10 +708,14 @@ class AriaAclPortStatusShow(_AriaAclShow):
 
     @classmethod
     def _format_reason(cls, row):
+        reason_id = row.get("reason")
+        reason_name = DROP_REASON_NAMES.get(reason_id)
+        if reason_name is None:
+            reason_name = "UNKNOWN(%s)" % reason_id
         return (
             "reason=%s dir=%s pkts=%s bytes=%s pps=%s bps=%s"
             % (
-                DROP_REASON_NAMES.get(row.get("reason"), "UNKNOWN"),
+                reason_name,
                 cls._direction_name(row.get("direction")),
                 row.get("packets"),
                 row.get("bytes"),

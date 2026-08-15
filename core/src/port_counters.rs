@@ -114,6 +114,9 @@ pub fn aggregate_port_counters(
 /// caller (best-effort counters must not silently mask real map faults).
 fn pin_missing(error: &MapError) -> bool {
     match error {
+        MapError::SyscallError(syscall) => {
+            syscall.io_error.kind() == std::io::ErrorKind::NotFound
+        }
         MapError::PinError { error: pin_error, .. } => match pin_error {
             aya::pin::PinError::SyscallError(syscall) => {
                 syscall.io_error.kind() == std::io::ErrorKind::NotFound
@@ -130,14 +133,18 @@ fn pin_missing(error: &MapError) -> bool {
 /// existence check and the open) — counters simply stay empty. `Err` means a
 /// genuine map fault worth surfacing.
 fn open_pin_or_missing(path: &str) -> Result<Option<MapData>, String> {
-    if !std::path::Path::new(path).exists() {
-        return Ok(None);
-    }
     match MapData::from_pin(path) {
         Ok(data) => Ok(Some(data)),
         Err(error) if pin_missing(&error) => Ok(None),
         Err(error) => Err(format!("open pinned map {}: {}", path, error)),
     }
+}
+
+fn counter_map_item<K, V>(
+    map_name: &str,
+    item: Result<(K, V), MapError>,
+) -> Result<(K, V), String> {
+    item.map_err(|error| format!("iterate {}: {}", map_name, error))
 }
 
 fn collect_rule_rows(
@@ -154,25 +161,24 @@ fn collect_rule_rows(
     )
     .map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
     for item in rule_map.iter() {
-        if let Ok((key, values)) = item {
-            if !requested.contains(&key.tap_id) {
-                continue;
-            }
-            let (packets, bytes, dropped_packets, dropped_bytes) =
-                sum_per_cpu_rule_stats(values);
-            if packets == 0 {
-                continue;
-            }
-            rows.entry(key.tap_id)
-                .or_default()
-                .push(RuleStatsEntry {
-                    key,
-                    packets,
-                    bytes,
-                    dropped_packets,
-                    dropped_bytes,
-                });
+        let (key, values) = counter_map_item("RULE_STATS", item)?;
+        if !requested.contains(&key.tap_id) {
+            continue;
         }
+        let (packets, bytes, dropped_packets, dropped_bytes) =
+            sum_per_cpu_rule_stats(values);
+        if packets == 0 {
+            continue;
+        }
+        rows.entry(key.tap_id)
+            .or_default()
+            .push(RuleStatsEntry {
+                key,
+                packets,
+                bytes,
+                dropped_packets,
+                dropped_bytes,
+            });
     }
     Ok(rows)
 }
@@ -191,27 +197,26 @@ fn collect_drop_rows(
     )
     .map_err(|e| format!("convert DROP_REASON_STATS: {:?}", e))?;
     for item in drop_map.iter() {
-        if let Ok((key, values)) = item {
-            if !requested.contains(&key.tap_id) {
-                continue;
-            }
-            let (packets, bytes, last_seen) = sum_per_cpu_drop(values);
-            if packets == 0 {
-                continue;
-            }
-            rows.entry(key.tap_id)
-                .or_default()
-                .push(DropStatsEntry {
-                    reason: key.reason,
-                    direction: key.direction,
-                    proto: key.proto,
-                    src_id: key.src_id,
-                    dst_id: key.dst_id,
-                    packets,
-                    bytes,
-                    last_seen,
-                });
+        let (key, values) = counter_map_item("DROP_REASON_STATS", item)?;
+        if !requested.contains(&key.tap_id) {
+            continue;
         }
+        let (packets, bytes, last_seen) = sum_per_cpu_drop(values);
+        if packets == 0 {
+            continue;
+        }
+        rows.entry(key.tap_id)
+            .or_default()
+            .push(DropStatsEntry {
+                reason: key.reason,
+                direction: key.direction,
+                proto: key.proto,
+                src_id: key.src_id,
+                dst_id: key.dst_id,
+                packets,
+                bytes,
+                last_seen,
+            });
     }
     Ok(rows)
 }

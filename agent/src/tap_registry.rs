@@ -593,22 +593,24 @@ impl TapRegistry {
     ///
     /// Reads persisted tap-id state files and is therefore intended for
     /// blocking contexts (e.g. `tokio::task::spawn_blocking`), not async
-    /// handlers. Uses `try_read` so a contended registry yields an empty
-    /// snapshot instead of blocking. The state path lets callers read
+    /// handlers. Lock contention and persisted-state read faults are returned
+    /// explicitly instead of being projected as an empty successful sample.
+    /// The state path lets callers read
     /// per-tap persisted runtime metadata (e.g. the group registry for
     /// counter display translation) off the async worker.
-    pub fn tap_runtimes_now(&self) -> HashMap<String, (u32, PathBuf)> {
-        let instances = match self.instances.try_read() {
-            Ok(guard) => guard,
-            Err(_) => return HashMap::new(),
-        };
+    pub fn tap_runtimes_now(&self) -> Result<HashMap<String, (u32, PathBuf)>, String> {
+        let instances = self.instances.try_read().map_err(|_| {
+            "tap runtime registry lock contended".to_string()
+        })?;
         let mut runtimes = HashMap::new();
         for (ifname, instance) in instances.iter() {
-            if let Some(tap_id) = instance.tap_id() {
+            if let Some(tap_id) = instance.tap_id().map_err(|error| {
+                format!("tap runtime {}: {}", ifname, error)
+            })? {
                 runtimes.insert(ifname.clone(), (tap_id, instance.state_path.clone()));
             }
         }
-        runtimes
+        Ok(runtimes)
     }
 
     /// Graceful shutdown: unpin all links (XDP detaches), clean up

@@ -3,6 +3,8 @@ from __future__ import absolute_import
 from neutron_aria.agent.config import sync_mode
 from neutron_aria.agent.counter_sampler import diff_port_counters
 from neutron_aria.agent.status import ARIA_AGENT_TYPE
+from neutron_aria.agent.uds_client import LocalApiContractError
+from neutron_aria.agent.uds_client import _decode_counters_v1
 
 
 ARIA_AGENT_BINARY = "neutron-aria-agent"
@@ -49,6 +51,10 @@ def port_counters_blob(runtime_status, port_id):
     counters = getattr(runtime_status, "last_counters", None)
     if counters is None:
         return None
+    try:
+        counters = _decode_counters_v1(counters)
+    except (LocalApiContractError, AttributeError, TypeError) as exc:
+        return {"counters_error": "invalid_counters_v1: %s" % exc}
     if counters.get("counters_error"):
         return {"counters_error": counters["counters_error"]}
     sampled_at_ms = counters.get("sampled_at_ms")

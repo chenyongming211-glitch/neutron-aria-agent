@@ -824,6 +824,129 @@ def _decode_status_v2(body):
     )
 
 
+def _decode_counters_v1(counters):
+    if not isinstance(counters, dict):
+        raise LocalApiContractError("counters must be an object")
+    decoded = {
+        "counters_schema_version": _strict_int(
+            _required(counters, "counters_schema_version"),
+            "counters.counters_schema_version",
+            minimum=1,
+        ),
+        "sampled_at_ms": _strict_int(
+            _required(counters, "sampled_at_ms"),
+            "counters.sampled_at_ms",
+            minimum=0,
+        ),
+    }
+    if decoded["counters_schema_version"] != 1:
+        raise LocalApiContractError("unsupported counters schema version")
+    counters_error = counters.get("counters_error")
+    if counters_error is not None:
+        decoded["counters_error"] = _strict_string(
+            counters_error, "counters.counters_error", nonempty=True,
+        )
+    ports = _strict_list(_required(counters, "ports"), "counters.ports")
+    if counters_error is not None and ports:
+        raise LocalApiContractError("counter error response contains ports")
+
+    cumulative_fields = (
+        "policy_packets", "policy_bytes", "policy_allow_packets",
+        "policy_dropped_packets", "policy_dropped_bytes",
+        "drop_packets", "drop_bytes",
+    )
+    decoded_ports = []
+    seen_ports = set()
+    for port_index, port in enumerate(ports):
+        prefix = "counters.ports[%s]" % port_index
+        if not isinstance(port, dict):
+            raise LocalApiContractError("invalid %s %r" % (prefix, port))
+        decoded_port = {
+            "port_id": _strict_string(
+                _required(port, "port_id"), "%s.port_id" % prefix,
+                nonempty=True,
+            ),
+            "tap_id": _strict_int(
+                _required(port, "tap_id"), "%s.tap_id" % prefix,
+                minimum=0,
+            ),
+        }
+        if decoded_port["port_id"] in seen_ports:
+            raise LocalApiContractError("duplicate counter port_id")
+        seen_ports.add(decoded_port["port_id"])
+        for field in cumulative_fields:
+            decoded_port[field] = _strict_int(
+                _required(port, field), "%s.%s" % (prefix, field), minimum=0,
+            )
+        truncated = _required(port, "truncated")
+        if not isinstance(truncated, bool):
+            raise LocalApiContractError("invalid %s.truncated %r" % (prefix, truncated))
+        decoded_port["truncated"] = truncated
+
+        decoded_buckets = []
+        for row_index, row in enumerate(
+            _strict_list(_required(port, "buckets"), "%s.buckets" % prefix)
+        ):
+            row_prefix = "%s.buckets[%s]" % (prefix, row_index)
+            if not isinstance(row, dict):
+                raise LocalApiContractError("invalid %s %r" % (row_prefix, row))
+            decoded_buckets.append({
+                "src_id": _strict_int(_required(row, "src_id"), "%s.src_id" % row_prefix, minimum=0),
+                "dst_id": _strict_int(_required(row, "dst_id"), "%s.dst_id" % row_prefix, minimum=0),
+                "proto": _strict_int(_required(row, "proto"), "%s.proto" % row_prefix, minimum=0),
+                "direction": _strict_int(_required(row, "direction"), "%s.direction" % row_prefix, minimum=0),
+                "packets": _strict_int(_required(row, "packets"), "%s.packets" % row_prefix, minimum=0),
+                "bytes": _strict_int(_required(row, "bytes"), "%s.bytes" % row_prefix, minimum=0),
+                "dropped_packets": _strict_int(_required(row, "dropped_packets"), "%s.dropped_packets" % row_prefix, minimum=0),
+                "dropped_bytes": _strict_int(_required(row, "dropped_bytes"), "%s.dropped_bytes" % row_prefix, minimum=0),
+            })
+            if decoded_buckets[-1]["direction"] not in (0, 1):
+                raise LocalApiContractError("invalid %s.direction" % row_prefix)
+            if decoded_buckets[-1]["proto"] > 255:
+                raise LocalApiContractError("invalid %s.proto" % row_prefix)
+        decoded_port["buckets"] = decoded_buckets
+
+        decoded_reasons = []
+        for row_index, row in enumerate(
+            _strict_list(_required(port, "reasons"), "%s.reasons" % prefix)
+        ):
+            row_prefix = "%s.reasons[%s]" % (prefix, row_index)
+            if not isinstance(row, dict):
+                raise LocalApiContractError("invalid %s %r" % (row_prefix, row))
+            decoded_reasons.append({
+                "reason": _strict_int(_required(row, "reason"), "%s.reason" % row_prefix, minimum=0),
+                "direction": _strict_int(_required(row, "direction"), "%s.direction" % row_prefix, minimum=0),
+                "proto": _strict_int(_required(row, "proto"), "%s.proto" % row_prefix, minimum=0),
+                "packets": _strict_int(_required(row, "packets"), "%s.packets" % row_prefix, minimum=0),
+                "bytes": _strict_int(_required(row, "bytes"), "%s.bytes" % row_prefix, minimum=0),
+            })
+            if decoded_reasons[-1]["direction"] not in (0, 1):
+                raise LocalApiContractError("invalid %s.direction" % row_prefix)
+            if decoded_reasons[-1]["reason"] > 255 or decoded_reasons[-1]["proto"] > 255:
+                raise LocalApiContractError("invalid %s byte field" % row_prefix)
+        decoded_port["reasons"] = decoded_reasons
+
+        decoded_groups = []
+        for group_index, group in enumerate(
+            _strict_list(port.get("groups", []), "%s.groups" % prefix)
+        ):
+            group_prefix = "%s.groups[%s]" % (prefix, group_index)
+            if not isinstance(group, dict):
+                raise LocalApiContractError("invalid %s %r" % (group_prefix, group))
+            cidrs = _strict_list(_required(group, "cidrs"), "%s.cidrs" % group_prefix)
+            decoded_groups.append({
+                "id": _strict_int(_required(group, "id"), "%s.id" % group_prefix, minimum=0),
+                "cidrs": [
+                    _strict_string(cidr, "%s.cidrs[%s]" % (group_prefix, cidr_index), nonempty=True)
+                    for cidr_index, cidr in enumerate(cidrs)
+                ],
+            })
+        decoded_port["groups"] = decoded_groups
+        decoded_ports.append(decoded_port)
+    decoded["ports"] = decoded_ports
+    return decoded
+
+
 def _decode_status_v3(body):
     decoded = _decode_status_versioned(
         body,
@@ -832,8 +955,16 @@ def _decode_status_v3(body):
         _STATUS_V2_TRIPLES,
         allow_retry_snapshot=True,
     )
-    if isinstance(body.get("counters"), dict):
-        decoded["counters"] = body["counters"]
+    if "counters" in body:
+        try:
+            decoded["counters"] = _decode_counters_v1(body["counters"])
+        except LocalApiContractError as exc:
+            decoded["counters"] = {
+                "counters_schema_version": 1,
+                "sampled_at_ms": 0,
+                "counters_error": "invalid_counters_v1: %s" % exc,
+                "ports": [],
+            }
     return decoded
 
 

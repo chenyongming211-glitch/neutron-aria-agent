@@ -367,7 +367,13 @@ class AriaAclPlugin(object):
             # stale values from a previous cycle are never re-presented.
             for field in self.COUNTER_SUMMARY_FIELDS:
                 payload[field] = None
-        self._persist_counter_rows(context, payload, counter_blobs, sampled_at_ms)
+        self._persist_counter_rows(
+            context,
+            payload,
+            counter_blobs,
+            sampled_at_ms,
+            counters_error=counters_error,
+        )
         return self._project_port_status(
             self._repo(context).upsert_port_status(payload)
         )
@@ -466,9 +472,10 @@ class AriaAclPlugin(object):
         return rows
 
     def _persist_counter_rows(
-        self, context, payload, counter_blobs, sampled_at_ms
+        self, context, payload, counter_blobs, sampled_at_ms,
+        counters_error=None,
     ):
-        if not counter_blobs:
+        if counters_error is not None:
             return
         port_id = payload.get("port_id")
         host = payload.get("host")

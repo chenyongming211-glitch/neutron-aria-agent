@@ -140,7 +140,7 @@ def _stamp_status(values):
 def _parse_time(value):
     if value is None or isinstance(value, datetime.datetime):
         return value
-    if isinstance(value, str):
+    if isinstance(value, STRING_TYPES):
         value = value.rstrip("Z")
         try:
             return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f")
@@ -156,6 +156,45 @@ def _format_time(value):
     if isinstance(value, datetime.datetime):
         return "%s.%06dZ" % (value.strftime("%Y-%m-%dT%H:%M:%S"), value.microsecond)
     return value
+
+
+_SQLITE_DATETIME_KEY = "__aria_acl_datetime__"
+
+
+def _sqlite_json_default(value):
+    if isinstance(value, datetime.datetime):
+        return {_SQLITE_DATETIME_KEY: _format_time(value)}
+    raise TypeError("not JSON serializable: %r" % (value,))
+
+
+def _sqlite_json_object_hook(value):
+    if set(value) == set([_SQLITE_DATETIME_KEY]):
+        return _parse_time(value[_SQLITE_DATETIME_KEY])
+    return value
+
+
+def _sqlite_json_dumps(value):
+    return json.dumps(value, sort_keys=True, default=_sqlite_json_default)
+
+
+def _sqlite_json_loads(value):
+    return json.loads(value, object_hook=_sqlite_json_object_hook)
+
+
+def _counter_row_sort_key(row):
+    def number(name):
+        value = row.get(name)
+        return -1 if value is None else value
+
+    return (
+        row.get("kind") or "",
+        number("src_id"),
+        number("dst_id"),
+        number("proto"),
+        row.get("direction") or "",
+        number("reason"),
+        row.get("id") or "",
+    )
 
 
 def _locked_access(method):
@@ -571,7 +610,7 @@ class InMemoryAriaAclRepository(object):
             for (row_port_id, _host), values in self.port_counters.items():
                 if row_port_id == port_id:
                     rows.extend(_clone(values))
-        return sorted(rows, key=lambda row: (row.get("kind") or "", row.get("id") or ""))
+        return sorted(rows, key=_counter_row_sort_key)
 
     @_locked_access
     def list_port_statuses(
@@ -1086,7 +1125,15 @@ class NeutronDbAriaAclRepository(object):
         query = table.select().where(table.c.port_id == port_id)
         if host is not None:
             query = query.where(table.c.host == host)
-        query = query.order_by(table.c.kind, table.c.sampled_at)
+        query = query.order_by(
+            table.c.kind,
+            table.c.src_id,
+            table.c.dst_id,
+            table.c.proto,
+            table.c.direction,
+            table.c.reason,
+            table.c.id,
+        )
         rows = self.session.execute(query).fetchall()
         return [self._row_to_dict("port_counters", row) for row in rows]
 
@@ -1563,6 +1610,11 @@ class SqliteAriaAclRepository(object):
             "port_id TEXT NOT NULL, host TEXT NOT NULL, payload TEXT NOT NULL, "
             "PRIMARY KEY (port_id, host)",
         ),
+        (
+            "aria_acl_port_counters",
+            "id TEXT PRIMARY KEY, port_id TEXT NOT NULL, host TEXT NOT NULL, "
+            "payload TEXT NOT NULL",
+        ),
     )
 
     def __init__(self, path):
@@ -1876,14 +1928,17 @@ class SqliteAriaAclRepository(object):
         values = _clone(values)
         _require(values, ("port_id", "host"), "aria_acl_port_status")
         _stamp_status(values)
-        payload = json.dumps(values, sort_keys=True)
+        current = self.get_port_status(values["port_id"], host=values["host"])
+        current = dict(current or {})
+        current.update(values)
+        payload = _sqlite_json_dumps(current)
         self.connection.execute(
             "INSERT OR REPLACE INTO aria_acl_port_statuses "
             "(port_id, host, payload) VALUES (?, ?, ?)",
             (values["port_id"], values["host"], payload),
         )
         self.connection.commit()
-        return _clone(values)
+        return _clone(current)
 
     def get_port_status(self, port_id, host=None):
         if host is not None:
@@ -1892,12 +1947,52 @@ class SqliteAriaAclRepository(object):
                 (port_id, host),
             )
             row = cursor.fetchone()
-            return json.loads(row[0]) if row else None
+            return _sqlite_json_loads(row[0]) if row else None
         cursor = self.connection.execute(
             "SELECT payload FROM aria_acl_port_statuses WHERE port_id=?",
             (port_id,),
         )
-        return [json.loads(row[0]) for row in cursor.fetchall()]
+        return [_sqlite_json_loads(row[0]) for row in cursor.fetchall()]
+
+    @_sqlite_write()
+    def upsert_port_counters(self, port_id, host, rows):
+        self.connection.execute(
+            "DELETE FROM aria_acl_port_counters WHERE port_id=? AND host=?",
+            (port_id, host),
+        )
+        stored = []
+        for row in rows or []:
+            value = _clone(row)
+            value.setdefault("id", _new_id())
+            value.setdefault("port_id", port_id)
+            value.setdefault("host", host)
+            self.connection.execute(
+                "INSERT INTO aria_acl_port_counters "
+                "(id, port_id, host, payload) VALUES (?, ?, ?, ?)",
+                (
+                    value["id"],
+                    value["port_id"],
+                    value["host"],
+                    _sqlite_json_dumps(value),
+                ),
+            )
+            stored.append(value)
+        return _clone(stored)
+
+    def get_port_counters(self, port_id, host=None):
+        if host is None:
+            cursor = self.connection.execute(
+                "SELECT payload FROM aria_acl_port_counters WHERE port_id=?",
+                (port_id,),
+            )
+        else:
+            cursor = self.connection.execute(
+                "SELECT payload FROM aria_acl_port_counters "
+                "WHERE port_id=? AND host=?",
+                (port_id, host),
+            )
+        rows = [_sqlite_json_loads(row[0]) for row in cursor.fetchall()]
+        return sorted(rows, key=_counter_row_sort_key)
 
     def list_port_statuses(
         self, filters=None, fields=None, sorts=None, limit=None,
@@ -1920,9 +2015,17 @@ class SqliteAriaAclRepository(object):
                 "DELETE FROM aria_acl_port_statuses WHERE port_id=? AND host=?",
                 (port_id, host),
             )
+            self.connection.execute(
+                "DELETE FROM aria_acl_port_counters WHERE port_id=? AND host=?",
+                (port_id, host),
+            )
         else:
             cursor = self.connection.execute(
                 "DELETE FROM aria_acl_port_statuses WHERE port_id=?",
+                (port_id,),
+            )
+            self.connection.execute(
+                "DELETE FROM aria_acl_port_counters WHERE port_id=?",
                 (port_id,),
             )
         self.connection.commit()
@@ -1996,7 +2099,7 @@ class SqliteAriaAclRepository(object):
         self.connection.commit()
 
     def _upsert(self, table, object_id, values, **columns):
-        payload = json.dumps(values, sort_keys=True)
+        payload = _sqlite_json_dumps(values)
         exists = self.connection.execute(
             "SELECT 1 FROM %s WHERE id=?" % table,
             (object_id,),
@@ -2193,7 +2296,7 @@ class SqliteAriaAclRepository(object):
         rows = self.connection.execute(sql, parameters).fetchall()
         if query.page_reverse:
             rows = list(reversed(rows))
-        values = [json.loads(row[0]) for row in rows]
+        values = [_sqlite_json_loads(row[0]) for row in rows]
         if resource == "port_statuses" and projection is not None:
             values = [projection.project(value) for value in values]
         return [project_fields(value, query.fields) for value in values]
@@ -2217,7 +2320,7 @@ class SqliteAriaAclRepository(object):
             raise AriaAclNotFound(
                 "%s marker %s not found" % (resource, query.marker)
             )
-        return json.loads(row[0])
+        return _sqlite_json_loads(row[0])
 
     def _get(self, table, object_id, object_type, fields=None):
         cursor = self.connection.execute(
@@ -2227,7 +2330,7 @@ class SqliteAriaAclRepository(object):
         row = cursor.fetchone()
         if not row:
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
-        return project_fields(json.loads(row[0]), fields)
+        return project_fields(_sqlite_json_loads(row[0]), fields)
 
     def _delete(self, table, object_id, object_type, commit=True):
         cursor = self.connection.execute("DELETE FROM %s WHERE id=?" % table, (object_id,))

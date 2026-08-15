@@ -52,8 +52,18 @@ def diff_port_counters(previous, current):
 
     reset_detected = False
     if previous is not None:
-        for field in ("policy_packets", "policy_dropped_packets",
-                      "drop_packets"):
+        if current_sampled <= previous_sampled:
+            reset_detected = True
+        if (
+            previous.get("tap_id") is not None and
+            current.get("tap_id") != previous.get("tap_id")
+        ):
+            reset_detected = True
+        for field in (
+            "policy_packets", "policy_bytes", "policy_allow_packets",
+            "policy_dropped_packets", "policy_dropped_bytes",
+            "drop_packets", "drop_bytes",
+        ):
             if (current.get(field) or 0) < (previous.get(field) or 0):
                 reset_detected = True
                 break
@@ -65,9 +75,11 @@ def diff_port_counters(previous, current):
                     "proto": bucket.get("proto"),
                     "direction": bucket.get("direction"),
                 })
-                if prev_row is not None and (
-                    (bucket.get("packets") or 0) < (prev_row.get("packets") or 0)
-                    or (bucket.get("bytes") or 0) < (prev_row.get("bytes") or 0)
+                if prev_row is not None and any(
+                    (bucket.get(field) or 0) < (prev_row.get(field) or 0)
+                    for field in (
+                        "packets", "bytes", "dropped_packets", "dropped_bytes",
+                    )
                 ):
                     reset_detected = True
                     break
