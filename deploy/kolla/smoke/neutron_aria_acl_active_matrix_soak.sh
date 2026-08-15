@@ -390,7 +390,7 @@ wait_guest_ssh() {
 }
 
 prepare_guest_listeners() {
-    local password alias server port_id ip host ifname endpoint
+    local password alias port_id ip host ifname endpoint
     password="$(cat "${GUEST_PASSWORD_FILE}")"
     while IFS=$'\t' read -r alias _server port_id ip host ifname; do
         wait_guest_ssh "${ip}" || die "guest SSH did not become ready: ${alias}/${ip}"

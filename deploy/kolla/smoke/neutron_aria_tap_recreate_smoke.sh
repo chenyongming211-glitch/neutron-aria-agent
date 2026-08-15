@@ -256,8 +256,8 @@ PY
 }
 
 wait_server_active() {
-    local attempt status
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    local status
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         status="$(server_field "${SERVER_ID}" status || true)"
         if [ "${status}" = "ACTIVE" ]; then
             return 0

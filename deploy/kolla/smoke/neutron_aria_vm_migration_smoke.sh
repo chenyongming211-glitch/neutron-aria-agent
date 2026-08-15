@@ -286,8 +286,8 @@ PY
 
 wait_port_host() {
     local wanted="$1"
-    local attempt host
-    for attempt in $(seq 1 "${MIGRATION_WAIT_SECONDS}"); do
+    local host
+    for _ in $(seq 1 "${MIGRATION_WAIT_SECONDS}"); do
         host="$(port_field "${EXPECTED_PORT_ID}" binding:host_id || true)"
         if [ "${host}" = "${wanted}" ]; then
             return 0
@@ -299,8 +299,8 @@ wait_port_host() {
 
 wait_server_host() {
     local wanted="$1"
-    local attempt host status
-    for attempt in $(seq 1 "${MIGRATION_WAIT_SECONDS}"); do
+    local host status
+    for _ in $(seq 1 "${MIGRATION_WAIT_SECONDS}"); do
         status="$(server_field "${SERVER_ID}" status || true)"
         host="$(server_field "${SERVER_ID}" OS-EXT-SRV-ATTR:host || true)"
         if [ "${status}" = "ACTIVE" ] && [ "${host}" = "${wanted}" ]; then
