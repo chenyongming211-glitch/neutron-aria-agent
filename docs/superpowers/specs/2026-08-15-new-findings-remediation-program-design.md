@@ -1,6 +1,6 @@
 # New-Findings Remediation Program Design
 
-Status: approved plan; Batches 1-4 complete (2026-08-15), Batch 5 pending
+Status: complete — all five batches closed 2026-08-15
 
 Date: 2026-08-15
 
@@ -199,7 +199,7 @@ Batch 1  ACL-106 + ACL-107   Python agent, user-visible P2 fast wins   DONE
 Batch 2  ACL-108 + ACL-109 + ACL-110 + TXN-038   Python robustness    DONE
 Batch 3  ACL-101 + ACL-102 + TXN-037             Rust core ERROR-EXACT DONE
 Batch 4  ACL-104 + ACL-105                       eBPF fragment attribution DONE
-Batch 5  TXN-036 + ACL-100                       transaction/status projection
+Batch 5  TXN-036 + ACL-100                       transaction/status projection DONE
 ```
 
 Batch 1 closed 2026-08-15: RED `8b34f26` / Build
@@ -235,6 +235,15 @@ rust-behavior on the missing abi helper; GREEN `db5297a` + `e895ef6` +
 [31867137312](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31867137312)
 with all jobs green, including the nightly eBPF build and the 448-byte
 stack budget. Target-kernel observation stays deferred.
+
+Batch 5 closed 2026-08-15: RED `04f40af` + `355d8bf` / Build
+[31869238668](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31869238668)
+failed only the two intended Rust contracts and the reporter contract;
+GREEN `3d0d29d` + `7bb97cd` passed exact-head Build
+[31869573028](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31869573028)
+with all jobs green. The thirteen-row program is complete;
+`REVIEW-ACL-103` remains the only open row of the pass as isolation-boundary
+debt with its recorded escalation condition.
 
 The order fixes the two user-visible P2 rows first, then completes the
 same-language Python hardening, then the core error-propagation family, then
