@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn scrub_iteration_collects_all_healthy_items() {
-        let items = vec![Ok(1u32), Ok(2u32), Ok(3u32)];
+        let items: Vec<Result<u32, &str>> = vec![Ok(1u32), Ok(2u32), Ok(3u32)];
         let result: Result<Vec<u32>, String> = collect_iterated_items(items, "TEST_MAP");
 
         assert_eq!(vec![1, 2, 3], result.unwrap());
