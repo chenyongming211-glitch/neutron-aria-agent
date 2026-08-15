@@ -343,9 +343,13 @@ Build [31890013101](https://github.com/chenyongming211-glitch/aria-firewall/acti
 `quality-scripts` and `quality-rust` started at 14:28:44Z/14:28:45Z and failed
 after 26/107 seconds respectively. Ruff passed; the Rust workspace exposed two
 dormant test defects and ShellCheck reported 85 diagnostics at 82 locations in
-24 scripts. Findings are `DEBT-CI-002` through `DEBT-CI-004`; their exact
+26 scripts. Findings are `DEBT-CI-002` through `DEBT-CI-004`; their exact
 remediation is defined in
 `docs/superpowers/plans/2026-08-15-debt-ci-001-first-audit-remediation.md`.
+After both Rust tests were corrected, exact-head Build
+[31890412178](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890412178)
+passed all 487 workspace tests and exposed `DEBT-CI-005` at the first strict
+Clippy step. Rustfmt had not yet run.
 
 ---
 

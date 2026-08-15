@@ -6,7 +6,7 @@
 
 **Architecture:** Treat the two Rust failures as independent fixture/test-contract defects and preserve production behavior. Treat ShellCheck as a full-inventory baseline: correct actual shell semantics, rewrite ambiguous constructs where small, and use only line-local annotations whose adjacent comment explains an intentional construct. Re-run the unchanged hosted jobs until both are green, then collect the three-run evidence required by `DEBT-CI-001`.
 
-**Evidence baseline:** Exact head `bb56310f0dee88a8669fd57eee61599060b6e29a`, Build [31890013101](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890013101). The Rust job ran 487 tests: 485 passed and 2 failed. The scripts job passed Ruff and reported 85 ShellCheck diagnostics at 82 locations in 24 files.
+**Evidence baseline:** Exact head `bb56310f0dee88a8669fd57eee61599060b6e29a`, Build [31890013101](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890013101). The Rust job ran 487 tests: 485 passed and 2 failed. The scripts job passed Ruff and reported 85 ShellCheck diagnostics at 82 locations in 26 files. After the two Rust tests were corrected, Build [31890412178](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890412178) passed all 487 tests and exposed `DEBT-CI-005` in the first strict Clippy step.
 
 ## Global constraints
 
@@ -52,12 +52,19 @@
 - [ ] Run `bash -n` over every modified shell script and the existing Cargo-free CI contract tests locally.
 - [ ] Commit and push the shell remediation.
 
-## Task 4: Obtain hosted GREEN and close the three findings
+## Task 4: Obtain hosted GREEN and close the four findings
+
+Before the GREEN run, close `DEBT-CI-005` without a lint suppression:
+
+- [ ] Add a public, copyable `FragmentResolveInput` in `abi/src/fragment.rs` containing `tap_id`, `is_ipv6`, `active_bank`, `now_ns`, and `fragment_offset`.
+- [ ] Change `fragment_resolve_decision` to accept that input plus the existing config, epoch, and context references.
+- [ ] Update all eBPF and ABI-test callers without changing decision values, ABI map layouts, or datapath ordering.
+- [ ] Commit and push the API-structure remediation.
 
 - [ ] Dispatch `run_quality_audit=true` on the exact remediation head.
 - [ ] If new diagnostics appear, preserve the command/rules and repair them under this plan.
 - [ ] Require the full host-workspace test, clippy, rustfmt, Ruff, and ShellCheck steps all green.
-- [ ] Update `DEBT-CI-002`, `DEBT-CI-003`, and `DEBT-CI-004` to fixed with exact commit/run evidence.
+- [ ] Update `DEBT-CI-002` through `DEBT-CI-005` to fixed with exact commit/run evidence.
 - [ ] Do not close `DEBT-CI-001` until two more runs of the same unchanged head also pass.
 
 ## Task 5: Complete DEBT-CI-001 reproducibility evidence
