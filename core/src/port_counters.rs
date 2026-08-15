@@ -124,16 +124,30 @@ fn pin_missing(error: &MapError) -> bool {
     }
 }
 
+/// Open a pinned map for a shared multi-tap pin path.
+///
+/// `Ok(None)` means the map is absent (path missing or removed between the
+/// existence check and the open) — counters simply stay empty. `Err` means a
+/// genuine map fault worth surfacing.
+fn open_pin_or_missing(path: &str) -> Result<Option<MapData>, String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(None);
+    }
+    match MapData::from_pin(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(error) if pin_missing(&error) => Ok(None),
+        Err(error) => Err(format!("open pinned map {}: {}", path, error)),
+    }
+}
+
 fn collect_rule_rows(
     pin_path: &str,
     requested: &BTreeSet<u32>,
 ) -> Result<BTreeMap<u32, Vec<RuleStatsEntry>>, String> {
     let mut rows: BTreeMap<u32, Vec<RuleStatsEntry>> = BTreeMap::new();
     let rule_path = format!("{}/RULE_STATS", pin_path);
-    let rule_map_data = match MapData::from_pin(&rule_path) {
-        Ok(data) => data,
-        Err(error) if pin_missing(&error) => return Ok(rows),
-        Err(error) => return Err(format!("open RULE_STATS: {}", error)),
+    let Some(rule_map_data) = open_pin_or_missing(&rule_path)? else {
+        return Ok(rows);
     };
     let rule_map = PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
         aya::maps::Map::PerCpuHashMap(rule_map_data),
@@ -169,10 +183,8 @@ fn collect_drop_rows(
 ) -> Result<BTreeMap<u32, Vec<DropStatsEntry>>, String> {
     let mut rows: BTreeMap<u32, Vec<DropStatsEntry>> = BTreeMap::new();
     let drop_path = format!("{}/DROP_REASON_STATS", pin_path);
-    let drop_map_data = match MapData::from_pin(&drop_path) {
-        Ok(data) => data,
-        Err(error) if pin_missing(&error) => return Ok(rows),
-        Err(error) => return Err(format!("open DROP_REASON_STATS: {}", error)),
+    let Some(drop_map_data) = open_pin_or_missing(&drop_path)? else {
+        return Ok(rows);
     };
     let drop_map = PerCpuHashMap::<_, DropKey, DropValue>::try_from(
         aya::maps::Map::PerCpuHashMap(drop_map_data),
