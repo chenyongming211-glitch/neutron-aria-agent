@@ -247,11 +247,16 @@ Completeness and backpressure rules:
   degraded for that domain and schedules future full-resync recovery. ACL
   failure must not break OVS L2 forwarding.
 - `event_merge_interval` is the minimum debounce window; default `0.2s`.
+- `event_max_merge_delay` is the absolute drain deadline measured from the
+  first pending event; default `5.0s`. A sustained event stream can postpone
+  the quiet-window drain, so the merger also drains when this deadline
+  elapses.
 - Multiple events for the same ACL object coalesce into one dirty full-resync
   reason; the resync reads the final DB state rather than replaying all
   intermediate states.
-- If the event queue overflows, the agent drops per-object detail, sets
-  `full_resync=true`, and runs one full-resync.
+- If the event queue overflows, the agent drops per-object update detail,
+  retains recorded port deletions, sets `full_resync=true`, and runs one
+  full-resync.
 - Only one apply may be in flight per agent process. New events that arrive
   while an apply is running remain queued and trigger a later resync; they do
   not start a parallel UDS apply.
