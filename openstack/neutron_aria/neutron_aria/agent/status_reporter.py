@@ -29,31 +29,57 @@ ARIA_ACL_PORT_STATUS_FIELDS = set([
 _PREVIOUS_COUNTERS = {}
 
 
-def attach_counters_blob(payload, runtime_status):
-    """Attach sampled port counters to a heartbeat configurations payload.
+def _rate_delta(prev, curr, elapsed_seconds):
+    if prev is None or curr is None or elapsed_seconds <= 0:
+        return None
+    return float(curr - prev) / elapsed_seconds
 
-    No-op when the runtime status carries no counters section. Rates are
-    computed by differencing the previous snapshot; negative cumulative
-    deltas are reported as reset_detected with None rates.
+
+def port_counters_blob(runtime_status, port_id):
+    """Build the counters blob for one port status payload.
+
+    Returns None when the runtime status carries no counters section for
+    this port. The blob carries the diffed rows, the cumulative summary,
+    the exact drop pps diffed from the summary drop totals, and the
+    reset/truncated flags. Rates are None on the first snapshot and on
+    any negative-delta reset.
     """
     counters = getattr(runtime_status, "last_counters", None)
     if not counters or not counters.get("ports"):
-        return payload
+        return None
     sampled_at_ms = counters.get("sampled_at_ms")
-    payload["counters_sampled_at_ms"] = sampled_at_ms
-    payload["counters_rows"] = []
-    for port in counters["ports"]:
-        port_copy = dict(port)
-        port_copy.setdefault("sampled_at_ms", sampled_at_ms)
-        rows, reset = diff_port_counters(
-            _PREVIOUS_COUNTERS.get(port["port_id"]), port_copy
+    port = None
+    for candidate in counters["ports"]:
+        if candidate.get("port_id") == port_id:
+            port = candidate
+            break
+    if port is None:
+        return None
+    port_copy = dict(port)
+    port_copy.setdefault("sampled_at_ms", sampled_at_ms)
+    previous = _PREVIOUS_COUNTERS.get(port_id)
+    rows, reset = diff_port_counters(previous, port_copy)
+    _PREVIOUS_COUNTERS[port_id] = port_copy
+
+    elapsed = 0.0
+    if previous is not None:
+        prev_sampled = float(previous.get("sampled_at_ms") or 0)
+        elapsed = max(0.0, (float(sampled_at_ms or 0) - prev_sampled) / 1000.0)
+    drop_pps = None
+    if previous is not None and not reset:
+        drop_pps = _rate_delta(
+            previous.get("drop_packets"),
+            port_copy.get("drop_packets"),
+            elapsed,
         )
-        _PREVIOUS_COUNTERS[port["port_id"]] = port_copy
-        payload["counters_rows"].append({
+    return {
+        "counters_sampled_at_ms": sampled_at_ms,
+        "counters_rows": [{
             "port_id": port["port_id"],
             "tap_id": port.get("tap_id"),
             "truncated": port.get("truncated", False),
             "reset_detected": reset,
+            "drop_pps": drop_pps,
             "summary": {
                 "policy_packets": port_copy.get("policy_packets"),
                 "policy_bytes": port_copy.get("policy_bytes"),
@@ -70,8 +96,8 @@ def attach_counters_blob(payload, runtime_status):
                 "drop_bytes": port_copy.get("drop_bytes"),
             },
             "rows": rows,
-        })
-    return payload
+        }],
+    }
 
 
 class StatusReportError(Exception):
@@ -92,7 +118,6 @@ class NeutronStatusReporter(object):
         use_call=False,
         configurations=None,
         heartbeat_detail_mode=HEARTBEAT_DETAIL_SUMMARY_ONLY,
-        counters_report_enabled=False,
     ):
         self.report_state_api = report_state_api
         self.context = context
@@ -103,7 +128,6 @@ class NeutronStatusReporter(object):
         self.use_call = use_call
         self.configurations = dict(configurations or {})
         self.heartbeat_detail_mode = heartbeat_detail_mode
-        self.counters_report_enabled = bool(counters_report_enabled)
         self.start_flag = True
 
     def report(self, runtime_status):
@@ -169,8 +193,6 @@ class NeutronStatusReporter(object):
         })
         if self.heartbeat_detail_mode == HEARTBEAT_DETAIL_LEGACY_SAMPLE:
             self._add_legacy_samples(configurations, payload)
-        if self.counters_report_enabled:
-            attach_counters_blob(configurations, runtime_status)
 
         return {
             "binary": self.binary,
@@ -270,10 +292,17 @@ class NeutronStatusReporter(object):
 class AriaAclPortStatusReporter(object):
     """Write per-port runtime status to the aria_acl service plugin/API."""
 
-    def __init__(self, aria_acl_api, context=None, host=None):
+    def __init__(
+        self,
+        aria_acl_api,
+        context=None,
+        host=None,
+        counters_report_enabled=False,
+    ):
         self.aria_acl_api = aria_acl_api
         self.context = context
         self.host = host
+        self.counters_report_enabled = bool(counters_report_enabled)
         self.api_call_style = getattr(
             aria_acl_api,
             "ARIA_ACL_STATUS_CALL_STYLE",
@@ -303,6 +332,7 @@ class AriaAclPortStatusReporter(object):
         }
 
     def remove_port_status(self, port_id):
+        _PREVIOUS_COUNTERS.pop(port_id, None)
         self.pending_deleted_port_ids.add(port_id)
         self._delete_one(port_id)
         self.pending_deleted_port_ids.discard(port_id)
@@ -365,6 +395,12 @@ class AriaAclPortStatusReporter(object):
             payload["effective_action"] = "enforce"
         if runtime_status.last_error and not payload.get("reason"):
             payload["reason"] = runtime_status.last_error
+        if self.counters_report_enabled:
+            blob = port_counters_blob(
+                runtime_status, payload.get("port_id")
+            )
+            if blob is not None:
+                payload.update(blob)
         return payload
 
     def _acl_domain_status(self, payload):
@@ -483,7 +519,6 @@ def build_neutron_status_reporter(
         host=host,
         configurations=configurations,
         heartbeat_detail_mode=config.heartbeat_detail_mode,
-        counters_report_enabled=getattr(config, "counters_report_enabled", False),
     )
     if getattr(config, "acl_source", None) != "neutron":
         return heartbeat_reporter
@@ -497,5 +532,12 @@ def build_neutron_status_reporter(
 
     return CompositeStatusReporter(
         heartbeat_reporter,
-        AriaAclPortStatusReporter(aria_acl_api, context=context, host=host),
+        AriaAclPortStatusReporter(
+            aria_acl_api,
+            context=context,
+            host=host,
+            counters_report_enabled=getattr(
+                config, "counters_report_enabled", False
+            ),
+        ),
     )

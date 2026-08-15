@@ -945,48 +945,81 @@ class CountersReportTestCase(unittest.TestCase):
             runtime.last_counters = None
         return runtime
 
-    def test_attach_counters_blob_adds_rows_when_present(self):
-        from neutron_aria.agent.status_reporter import attach_counters_blob
+    def test_port_counters_blob_builds_rows_when_present(self):
         from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
+        from neutron_aria.agent.status_reporter import port_counters_blob
         _PREVIOUS_COUNTERS.pop("p1", None)
-        payload = attach_counters_blob({}, self._runtime(with_counters=True))
-        self.assertEqual(payload["counters_sampled_at_ms"], 2000)
-        self.assertEqual(len(payload["counters_rows"]), 1)
-        row = payload["counters_rows"][0]
+        blob = port_counters_blob(
+            self._runtime(with_counters=True), "p1"
+        )
+        self.assertEqual(blob["counters_sampled_at_ms"], 2000)
+        self.assertEqual(len(blob["counters_rows"]), 1)
+        row = blob["counters_rows"][0]
         self.assertEqual(row["port_id"], "p1")
         self.assertFalse(row["reset_detected"])
+        self.assertIsNone(row["drop_pps"])
         self.assertEqual(row["summary"]["policy_packets"], 200)
         self.assertEqual(row["summary"]["drop_packets"], 20)
         port_row = [r for r in row["rows"] if r["kind"] == "port"][0]
         self.assertEqual(port_row["packets"], 200)
         self.assertIsNone(port_row["pps"])
 
-    def test_attach_counters_blob_is_noop_without_counters(self):
-        from neutron_aria.agent.status_reporter import attach_counters_blob
-        payload = attach_counters_blob(
-            {}, self._runtime(with_counters=False)
+    def test_port_counters_blob_is_none_without_counters(self):
+        from neutron_aria.agent.status_reporter import port_counters_blob
+        blob = port_counters_blob(
+            self._runtime(with_counters=False), "p1"
         )
-        self.assertEqual(payload, {})
+        self.assertIsNone(blob)
 
-    def test_reporter_attaches_counters_only_when_enabled(self):
-        api = FakeReportStateApi()
+    def test_port_counters_blob_diffs_drop_pps_from_summary(self):
+        from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
+        from neutron_aria.agent.status_reporter import port_counters_blob
+        _PREVIOUS_COUNTERS["p1"] = {
+            "sampled_at_ms": 1000,
+            "drop_packets": 10,
+        }
+        blob = port_counters_blob(
+            self._runtime(with_counters=True), "p1"
+        )
+        row = blob["counters_rows"][0]
+        self.assertAlmostEqual(row["drop_pps"], 10.0, places=3)
+
+    def test_rest_reporter_attaches_counters_only_when_enabled(self):
+        api = FakeAriaAclApi()
         runtime = self._runtime(with_counters=True)
-        disabled = NeutronStatusReporter(
-            api, context="ctx", host="h",
-        )
-        agent_state = disabled.report(runtime)
+        runtime.last_port_statuses = [{
+            "port_id": "p1",
+            "status": "ready",
+            "domains": [{
+                "domain": "acl",
+                "status": "ready",
+                "effective_action": "enforce",
+            }],
+        }]
+        disabled = AriaAclPortStatusReporter(api, context="ctx", host="h")
+        disabled.report(runtime)
         self.assertNotIn(
-            "counters_rows", agent_state["configurations"]
+            "counters_rows", api.statuses[0][1]["aria_acl_port_status"]
         )
-        enabled = NeutronStatusReporter(
-            api, context="ctx", host="h",
+        enabled = AriaAclPortStatusReporter(
+            api,
+            context="ctx",
+            host="h",
             counters_report_enabled=True,
         )
-        agent_state = enabled.report(runtime)
-        self.assertIn("counters_rows", agent_state["configurations"])
+        enabled.report(runtime)
         self.assertIn(
-            "counters_sampled_at_ms", agent_state["configurations"]
+            "counters_rows", api.statuses[-1][1]["aria_acl_port_status"]
         )
+
+    def test_remove_port_status_evicts_previous_counters(self):
+        from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
+        _PREVIOUS_COUNTERS["p1"] = {"sampled_at_ms": 1000}
+        reporter = AriaAclPortStatusReporter(
+            FakeAriaAclApi(), context="ctx", host="h"
+        )
+        reporter.remove_port_status("p1")
+        self.assertNotIn("p1", _PREVIOUS_COUNTERS)
 
 
 if __name__ == "__main__":

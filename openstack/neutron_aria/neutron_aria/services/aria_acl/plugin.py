@@ -390,14 +390,15 @@ class AriaAclPlugin(object):
                 break
         if port_row is not None:
             payload["counters_policy_pps"] = port_row.get("pps")
-        reason_pps = [
-            row.get("pps")
-            for row in blob.get("rows") or []
-            if row.get("kind") == "reason" and row.get("pps") is not None
-        ]
-        payload["counters_drop_pps"] = (
-            sum(reason_pps) if reason_pps else None
-        )
+        payload["counters_drop_pps"] = blob.get("drop_pps")
+
+    @staticmethod
+    def _direction_name(direction):
+        if direction == 0:
+            return "ingress"
+        if direction == 1:
+            return "egress"
+        return None
 
     @classmethod
     def _counter_rows(cls, counter_blobs, sampled_at_ms):
@@ -411,7 +412,7 @@ class AriaAclPlugin(object):
                     "src_id": key.get("src_id"),
                     "dst_id": key.get("dst_id"),
                     "proto": key.get("proto"),
-                    "direction": key.get("direction"),
+                    "direction": cls._direction_name(key.get("direction")),
                     "reason": key.get("reason"),
                     "packets": row.get("packets") or 0,
                     "bytes": row.get("bytes") or 0,

@@ -64,6 +64,41 @@ class CounterSamplerTestCase(unittest.TestCase):
             self.assertIsNone(row["pps"])
             self.assertIsNone(row["bps"])
 
+    def test_negative_bucket_delta_resets_even_when_port_total_grows(self):
+        previous = self._port(100, 10, 1000)
+        previous["buckets"] = [
+            {"src_id": 1, "dst_id": 2, "proto": 6, "direction": 0,
+             "packets": 80, "bytes": 800,
+             "dropped_packets": 10, "dropped_bytes": 100},
+        ]
+        current = self._port(120, 10, 2000)
+        current["buckets"] = [
+            {"src_id": 1, "dst_id": 2, "proto": 6, "direction": 0,
+             "packets": 30, "bytes": 300,
+             "dropped_packets": 5, "dropped_bytes": 50},
+        ]
+        rows, reset = diff_port_counters(previous, current, now_ms=2000.0)
+        self.assertTrue(reset)
+        for row in rows:
+            self.assertIsNone(row["pps"])
+            self.assertIsNone(row["bps"])
+
+    def test_negative_reason_delta_resets_even_when_port_total_grows(self):
+        previous = self._port(100, 10, 1000)
+        previous["reasons"] = [
+            {"reason": 1, "direction": 0, "proto": 6,
+             "packets": 10, "bytes": 100},
+        ]
+        current = self._port(120, 15, 2000)
+        current["reasons"] = [
+            {"reason": 1, "direction": 0, "proto": 6,
+             "packets": 4, "bytes": 40},
+        ]
+        rows, reset = diff_port_counters(previous, current, now_ms=2000.0)
+        self.assertTrue(reset)
+        for row in rows:
+            self.assertIsNone(row["pps"])
+
     def test_bucket_rows_are_capped_at_512(self):
         current = self._port(100, 10, 1000)
         current["buckets"] = [

@@ -560,12 +560,13 @@ class InMemoryAriaAclRepository(object):
     @_locked_access
     def get_port_counters(self, port_id, host=None):
         if host is not None:
-            return _clone(self.port_counters.get((port_id, host), []))
-        rows = []
-        for (row_port_id, _host), values in self.port_counters.items():
-            if row_port_id == port_id:
-                rows.extend(_clone(values))
-        return rows
+            rows = _clone(self.port_counters.get((port_id, host), []))
+        else:
+            rows = []
+            for (row_port_id, _host), values in self.port_counters.items():
+                if row_port_id == port_id:
+                    rows.extend(_clone(values))
+        return sorted(rows, key=lambda row: (row.get("kind") or "", row.get("id") or ""))
 
     @_locked_access
     def list_port_statuses(
@@ -600,6 +601,7 @@ class InMemoryAriaAclRepository(object):
             if key not in self.port_statuses:
                 raise AriaAclNotFound("aria_acl_port_status %s/%s not found" % (port_id, host))
             del self.port_statuses[key]
+            self.port_counters.pop(key, None)
             return
         keys = [
             key for key in self.port_statuses
@@ -609,6 +611,7 @@ class InMemoryAriaAclRepository(object):
             raise AriaAclNotFound("aria_acl_port_status %s not found" % port_id)
         for key in keys:
             del self.port_statuses[key]
+            self.port_counters.pop(key, None)
 
     @_locked_access
     def get_port_status_resource(self, resource_id):
@@ -1036,6 +1039,15 @@ class NeutronDbAriaAclRepository(object):
             clause = clause & (table.c.host == host)
         with self._write_transaction():
             result = self.session.execute(table.delete().where(clause))
+            counters_table = self.tables["port_counters"]
+            counters_clause = counters_table.c.port_id == port_id
+            if host is not None:
+                counters_clause = counters_clause & (
+                    counters_table.c.host == host
+                )
+            self.session.execute(
+                counters_table.delete().where(counters_clause)
+            )
         if result.rowcount == 0:
             if host is not None:
                 raise AriaAclNotFound(
@@ -1069,6 +1081,7 @@ class NeutronDbAriaAclRepository(object):
         query = table.select().where(table.c.port_id == port_id)
         if host is not None:
             query = query.where(table.c.host == host)
+        query = query.order_by(table.c.kind, table.c.sampled_at)
         rows = self.session.execute(query).fetchall()
         return [self._row_to_dict("port_counters", row) for row in rows]
 

@@ -31,13 +31,26 @@ def diff_port_counters(previous, current, now_ms=None):
     Returns (rows, reset_detected). Rows are dicts with kind in
     (port|bucket|reason), a key dict identifying the row, cumulative
     counters, and pps/bps rates. First snapshot and reset snapshots
-    report None rates; any negative cumulative delta marks a reset.
+    report None rates. A negative cumulative delta on the port summary
+    OR on any matched bucket/reason row marks a reset, because bucket
+    sets can be rebuilt while the port total still grows.
     """
     if now_ms is None:
         now_ms = time.time() * 1000.0
     current_sampled = float(current.get("sampled_at_ms") or 0)
     previous_sampled = float((previous or {}).get("sampled_at_ms") or 0)
     elapsed = max(0.0, (current_sampled - previous_sampled) / 1000.0)
+
+    def matched_previous_row(kind, key_dict):
+        if previous is None:
+            return None
+        prev_list = previous.get(
+            "buckets" if kind == "bucket" else "reasons"
+        ) or []
+        for candidate in prev_list:
+            if all(candidate.get(k) == v for k, v in key_dict.items()):
+                return candidate
+        return None
 
     reset_detected = False
     if previous is not None:
@@ -46,6 +59,33 @@ def diff_port_counters(previous, current, now_ms=None):
             if (current.get(field) or 0) < (previous.get(field) or 0):
                 reset_detected = True
                 break
+        if not reset_detected:
+            for bucket in current.get("buckets") or []:
+                prev_row = matched_previous_row("bucket", {
+                    "src_id": bucket.get("src_id"),
+                    "dst_id": bucket.get("dst_id"),
+                    "proto": bucket.get("proto"),
+                    "direction": bucket.get("direction"),
+                })
+                if prev_row is not None and (
+                    (bucket.get("packets") or 0) < (prev_row.get("packets") or 0)
+                    or (bucket.get("bytes") or 0) < (prev_row.get("bytes") or 0)
+                ):
+                    reset_detected = True
+                    break
+        if not reset_detected:
+            for reason in current.get("reasons") or []:
+                prev_row = matched_previous_row("reason", {
+                    "reason": reason.get("reason"),
+                    "direction": reason.get("direction"),
+                    "proto": reason.get("proto"),
+                })
+                if prev_row is not None and (
+                    (reason.get("packets") or 0) < (prev_row.get("packets") or 0)
+                    or (reason.get("bytes") or 0) < (prev_row.get("bytes") or 0)
+                ):
+                    reset_detected = True
+                    break
 
     rows = []
 
@@ -68,15 +108,7 @@ def diff_port_counters(previous, current, now_ms=None):
         row_bytes = row.get("bytes") or 0
         row_dropped = row.get("dropped_packets") or 0
         row_dropped_bytes = row.get("dropped_bytes") or 0
-        prev_row = None
-        if previous is not None:
-            prev_list = previous.get(
-                "buckets" if kind == "bucket" else "reasons"
-            ) or []
-            for candidate in prev_list:
-                if all(candidate.get(k) == v for k, v in key_dict.items()):
-                    prev_row = candidate
-                    break
+        prev_row = matched_previous_row(kind, key_dict)
         pps = None
         bps = None
         if prev_row is not None and not reset_detected:

@@ -2155,6 +2155,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "tap_id": 7,
                 "truncated": False,
                 "reset_detected": False,
+                "drop_pps": 10.0,
                 "summary": {
                     "policy_packets": 200,
                     "policy_bytes": 2000,
@@ -2219,9 +2220,11 @@ class AriaAclPluginTestCase(unittest.TestCase):
         bucket = [r for r in rows if r["kind"] == "bucket"][0]
         self.assertEqual(bucket["src_id"], 1)
         self.assertEqual(bucket["packets"], 100)
+        self.assertEqual(bucket["direction"], "ingress")
         self.assertIsNotNone(bucket["sampled_at"])
         reason = [r for r in rows if r["kind"] == "reason"][0]
         self.assertEqual(reason["reason"], 1)
+        self.assertEqual(reason["direction"], "ingress")
 
     def test_report_port_status_without_counters_keeps_status_shape(self):
         repository = InMemoryAriaAclRepository()

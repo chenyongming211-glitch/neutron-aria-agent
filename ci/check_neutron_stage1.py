@@ -124,9 +124,11 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "neutron_aria.tests.unit.test_status_reporter.StatusReporterTestCase."
     "test_global_degraded_rewrites_cached_acl_rows_to_bypass",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
-    "test_attach_counters_blob_adds_rows_when_present",
+    "test_port_counters_blob_builds_rows_when_present",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
-    "test_attach_counters_blob_is_noop_without_counters",
+    "test_port_counters_blob_is_none_without_counters",
+    "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
+    "test_rest_reporter_attaches_counters_only_when_enabled",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
     "test_capabilities_validates_required_domains",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
@@ -762,6 +764,50 @@ def run_db_crud_adminrc_test():
     run([bash, bash_path("ci", "test_neutronclient_aria_cli_adminrc.sh")])
 
 
+def check_drop_reason_name_sync():
+    print("==> checking drop-reason name dictionary sync")
+    import ast
+
+    def load_dict(path, marker):
+        source = read_text(path)
+        start = source.index(marker)
+        brace = source.index("{", start)
+        parsed = ast.parse(source[brace:])
+        node = parsed.body[0].value
+        if not isinstance(node, ast.Dict):
+            raise SystemExit("ERROR: %s must define a dict at %s" % (path, marker))
+        keys = set()
+        values = []
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, int):
+                raise SystemExit("ERROR: %s %s keys must be int literals" % (path, marker))
+            keys.add(key.value)
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                raise SystemExit("ERROR: %s %s values must be string literals" % (path, marker))
+            values.append((key.value, value.value))
+        return keys, dict(values)
+
+    agent_keys, agent_names = load_dict(
+        os.path.join("openstack", "neutron_aria", "neutron_aria", "agent", "drop_reasons.py"),
+        "DROP_REASON_NAMES",
+    )
+    cli_keys, cli_names = load_dict(
+        os.path.join("openstack", "neutronclient_aria", "neutronclient_aria", "v2_0", "aria_acl.py"),
+        "DROP_REASON_NAMES",
+    )
+    if agent_keys != cli_keys:
+        raise SystemExit(
+            "ERROR: drop-reason dictionaries drifted: agent=%s cli=%s"
+            % (sorted(agent_keys), sorted(cli_keys))
+        )
+    for key in agent_keys:
+        if agent_names[key] != cli_names[key]:
+            raise SystemExit(
+                "ERROR: drop-reason name drifted for %s: %s vs %s"
+                % (key, agent_names[key], cli_names[key])
+            )
+
+
 def run_fast_contracts():
     check_required_python_behaviors()
     run_python_tests()
@@ -769,6 +815,7 @@ def run_fast_contracts():
     check_packaged_ini_contract()
     check_documented_ini_contract()
     check_documented_status_contract()
+    check_drop_reason_name_sync()
     check_uds_contract_artifact()
     check_public_smoke_entrypoints()
     run_smoke_syntax()
