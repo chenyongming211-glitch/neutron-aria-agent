@@ -88,9 +88,9 @@ local Cargo command is allowed.
 maintained `4.18.0-553.5.1.el8_10` source. The target implementation immediately
 returns deleted LRU elements to the free list and can reuse them for another
 key, so the cross-CPU pointer-alias defect is confirmed. The minimum two-
-snapshot/key-scoped-publication repair is specified separately; exact-kernel
-stress remains deferred field evidence and is never recorded as PASS without
-execution.
+snapshot/key-scoped-publication repair is implemented and passed exact-head
+hosted Rust/eBPF, warning, and stack-budget CI; exact-kernel stress remains
+deferred field evidence and is never recorded as PASS without execution.
 
 `REVIEW-ACL-083`, `REVIEW-ACL-084`, and `REVIEW-TXN-035` received separate
 behavior probes. `REVIEW-ACL-083` produced a real RED sessionless-context
@@ -129,7 +129,7 @@ not modify their tests or production paths:
 ```text
 Batch 1  ACL-085 + ACL-090 + ACL-091  Fixed with exact RED/GREEN CI
 Batch 2  ACL-098 + ACL-099            Fixed with exact RED/GREEN CI
-Gate 3   ACL-086                      target source confirmed; RED/GREEN pending
+Gate 3   ACL-086                      source + hosted RED/GREEN complete; field stress pending
 Gate 4   ACL-083                      fixed after RED missing-session reproduction
          ACL-084                      closed by GREEN outer-owner rollback probe
          TXN-035                      closed by GREEN combined restart projection
@@ -146,7 +146,7 @@ The ACL-only program is complete when:
 
 - the five confirmed ACL defects have exact RED/GREEN evidence;
 - every conditional item has an honest verified or deferred outcome;
-- `REVIEW-ACL-086` is not called fixed without target-kernel evidence;
+- `REVIEW-ACL-086` keeps privileged target-kernel stress explicitly pending;
 - excluded non-ACL rows remain open and are not counted as ACL delivery gaps;
 - all applicable hosted CI lanes pass at each implementation head; and
 - the branch is clean and synchronized with `origin/v0.9-neutron-agent`.

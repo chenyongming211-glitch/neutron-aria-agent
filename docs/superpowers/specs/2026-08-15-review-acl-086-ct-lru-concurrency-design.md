@@ -1,6 +1,6 @@
 # REVIEW-ACL-086 CT LRU Concurrency Design
 
-**Status:** target-kernel source verified; implementation pending RED evidence
+**Status:** source implementation and hosted CI complete; privileged target-kernel stress deferred
 
 **Scope:** IPv4 and IPv6 TC conntrack lookup/update only
 
@@ -195,3 +195,24 @@ No local Cargo command is run. The privileged exact-kernel concurrency stress
 remains `deferred/pending` until the field environment is available; it will
 measure cache churn and confirm the source-derived race closure, not substitute
 for the source proof.
+
+## 8. Delivery Evidence
+
+- `c382853` records the exact target-kernel source proof and this selected
+  design.
+- RED `e44498a` failed the Rust behavior lane because the required complete-
+  snapshot and confirmed-hit helpers did not exist; its warning-denied eBPF
+  build and 448-byte stack gate still passed.
+- GREEN `7dd5b71` removed in-place LRU value writes and added two-snapshot,
+  key-scoped publication. Its first hosted build exposed a real 480-byte
+  compiler-generated `memmove` call path rather than weakening the stack gate.
+- `f77bb15` made the three padding bytes explicit, restoring the existing
+  448-byte maximum without changing the protocol. Exact-head Build
+  [31882176133](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31882176133)
+  passed Rust behavior, warning-denied eBPF compilation, the 448-byte legacy
+  stack budget, static userspace/agent builds, fast contracts, DB contracts,
+  and clean installation.
+
+The implementation is delivered, but the exact-kernel privileged churn test
+remains `deferred/pending`; this document does not record unexecuted field work
+as PASS.
