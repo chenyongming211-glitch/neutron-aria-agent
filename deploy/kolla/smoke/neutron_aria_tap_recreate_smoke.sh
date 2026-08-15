@@ -269,8 +269,8 @@ wait_server_active() {
 }
 
 wait_port_on_host() {
-    local attempt host
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    local host
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         host="$(port_field "${EXPECTED_PORT_ID}" binding:host_id || true)"
         if [ "${host}" = "${HOST_FQDN}" ]; then
             return 0

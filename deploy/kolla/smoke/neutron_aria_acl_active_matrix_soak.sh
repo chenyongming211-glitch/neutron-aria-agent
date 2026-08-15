@@ -345,7 +345,7 @@ PY
 
 provision_vms() {
     : >"${WORK_DIR}/vms.tsv"
-    local alias host name output server_id status actual_host identity port_id ip ifname i
+    local alias host name output server_id status actual_host identity port_id ip ifname
     while IFS=$'\t' read -r alias host; do
         [ -n "${alias}" ] || continue
         name="aria-acl-matrix-${RUN_ID}-${alias}"
@@ -354,7 +354,7 @@ provision_vms() {
         server_id="$(printf '%s\n' "${output}" | table_field id)"
         [ -n "${server_id}" ] || die "failed to create ${name}"
         record_owned vm "${server_id}" "${alias}"
-        for i in $(seq 1 120); do
+        for _ in $(seq 1 120); do
             output="$(nova_cli show "${server_id}" || true)"
             status="$(printf '%s\n' "${output}" | table_field status)"
             actual_host="$(printf '%s\n' "${output}" | table_field OS-EXT-SRV-ATTR:host)"
@@ -392,7 +392,7 @@ wait_guest_ssh() {
 prepare_guest_listeners() {
     local password alias server port_id ip host ifname endpoint
     password="$(cat "${GUEST_PASSWORD_FILE}")"
-    while IFS=$'\t' read -r alias server port_id ip host ifname; do
+    while IFS=$'\t' read -r alias _server port_id ip host ifname; do
         wait_guest_ssh "${ip}" || die "guest SSH did not become ready: ${alias}/${ip}"
         for endpoint in tcp:8080 tcp:8081 tcp:8082 tcp:65535 udp:1080 udp:1081; do
             CIRROS_PASSWORD="${password}" "${LISTENER_TOOL}" "${ip}" "${endpoint}" start \
