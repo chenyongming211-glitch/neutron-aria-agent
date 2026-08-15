@@ -209,8 +209,7 @@ check_config() {
 }
 
 wait_for_socket() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         if container_running "${DATAPATH_SERVICE}" &&
             [ -S "${SOCKET_PATH}" ] &&
             [ "$(stat -c '%a' "${SOCKET_PATH}" 2>/dev/null || true)" = "660" ] &&

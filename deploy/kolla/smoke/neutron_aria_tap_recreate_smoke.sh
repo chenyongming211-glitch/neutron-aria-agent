@@ -281,8 +281,7 @@ wait_port_on_host() {
 }
 
 wait_tap() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_SECONDS}"); do
         if ip link show dev "${EXPECTED_IFNAME}" >/dev/null 2>&1; then
             return 0
         fi

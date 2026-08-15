@@ -78,6 +78,8 @@ guest_ssh() {
             "${GUEST_SSH_USER}@${GUEST_IP}" "$@"
     else
         # shellcheck disable=SC2046
+        # Wrapper arguments are deliberately expanded locally into the remote argv.
+        # shellcheck disable=SC2029
         ssh $(ssh_base_args) "${GUEST_SSH_USER}@${GUEST_IP}" "$@"
     fi
 }

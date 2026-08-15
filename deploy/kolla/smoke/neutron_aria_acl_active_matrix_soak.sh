@@ -380,8 +380,8 @@ provision_vms() {
 }
 
 wait_guest_ssh() {
-    local ip="$1" i
-    for i in $(seq 1 120); do
+    local ip="$1"
+    for _ in $(seq 1 120); do
         if CIRROS_PASSWORD_FILE="${GUEST_PASSWORD_FILE}" "${PYTHON_BIN}" "${GUEST_EXEC}" \
             "${ip}" true >/dev/null 2>&1; then return 0; fi
         sleep 2
@@ -457,7 +457,7 @@ EOF
 
 run_matrix() {
     local direction protocol stateful selector min_port max_port nonmatch
-    local alias server port_id ip host ifname case_id case_dir start_tick elapsed crossed tick
+    local alias port_id ip host ifname case_id case_dir start_tick elapsed crossed tick
     while [ "$(date +%s)" -lt "${DEADLINE_EPOCH}" ]; do
         CURRENT_CYCLE=$((CURRENT_CYCLE + 1))
         checkpoint cycle_start "" "" pass

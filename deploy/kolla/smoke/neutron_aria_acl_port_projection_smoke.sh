@@ -113,8 +113,8 @@ wait_for_status() {
     local expected_status="$1"
     local expected_action="$2"
     local expected_stale="$3"
-    local i status action stale
-    for i in $(seq 1 "${CONVERGENCE_TIMEOUT}"); do
+    local status action stale
+    for _ in $(seq 1 "${CONVERGENCE_TIMEOUT}"); do
         status="$(status_field status || true)"
         action="$(status_field effective_action || true)"
         stale="$(status_field stale || true)"

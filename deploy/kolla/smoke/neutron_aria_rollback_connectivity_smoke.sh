@@ -172,8 +172,7 @@ acl_rollback_drill() {
 }
 
 wait_agent_running() {
-    local attempt
-    for attempt in $(seq 1 "${WAIT_AGENT_SECONDS}"); do
+    for _ in $(seq 1 "${WAIT_AGENT_SECONDS}"); do
         if docker ps --format '{{.Names}}' | grep -qx "${SERVICE_NAME}"; then
             return 0
         fi

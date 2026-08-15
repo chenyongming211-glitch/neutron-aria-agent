@@ -184,8 +184,8 @@ PY
 }
 
 wait_guest_ping_ready() {
-    local i output
-    for i in $(seq 1 "${GUEST_READY_ATTEMPTS}"); do
+    local output
+    for _ in $(seq 1 "${GUEST_READY_ATTEMPTS}"); do
         if output="$(guest_ping 2>/dev/null)"; then
             printf '%s\n' "${output}"
             return 0
