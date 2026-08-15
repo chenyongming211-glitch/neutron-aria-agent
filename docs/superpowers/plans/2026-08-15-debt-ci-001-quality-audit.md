@@ -50,7 +50,7 @@ gh workflow run build.yml \
 - Consumes: public workflow input/job/command definitions.
 - Produces: contract tests for `run_quality_audit`, `quality-rust`, and `quality-scripts`.
 
-- [ ] **Step 1: Add exact command constants**
+- [x] **Step 1: Add exact command constants**
 
 Add these constants below the existing action identities:
 
@@ -76,7 +76,7 @@ SHELLCHECK_COMMAND = (
 )
 ```
 
-- [ ] **Step 2: Add opt-in and parallelism tests**
+- [x] **Step 2: Add opt-in and parallelism tests**
 
 Add tests that require the input and both independent jobs:
 
@@ -102,7 +102,7 @@ def test_quality_jobs_are_independent_and_share_the_exact_trigger(self):
     self.assertNotIn("quality-scripts", release)
 ```
 
-- [ ] **Step 3: Add command and strictness tests**
+- [x] **Step 3: Add command and strictness tests**
 
 Add:
 
@@ -127,7 +127,7 @@ def test_quality_scripts_is_cargo_free_and_uses_pinned_correctness_tools(self):
     self.assertNotIn("|| true", block)
 ```
 
-- [ ] **Step 4: Run local Cargo-free RED verification**
+- [x] **Step 4: Run local Cargo-free RED verification**
 
 Run:
 
@@ -139,7 +139,7 @@ python3 -m unittest ci.test_ci_lane_contract -v
 Expected: existing tests pass and the new tests fail because the input and both
 jobs do not exist.
 
-- [ ] **Step 5: Commit and push RED**
+- [x] **Step 5: Commit and push RED**
 
 ```bash
 git add ci/test_ci_lane_contract.py
@@ -147,7 +147,7 @@ git commit -m "test(ci): require opt-in quality audit lanes"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 6: Capture hosted RED**
+- [x] **Step 6: Capture hosted RED**
 
 Require exact-head `fast-contracts` to fail on the missing public workflow
 contract. Record its commit, run URL, and failing test names; do not expect or
@@ -166,7 +166,7 @@ claim quality-job execution yet.
 - Consumes: immutable action SHAs established by `RISK-CI-001`.
 - Produces: opt-in `quality-rust` and `quality-scripts` hosted jobs.
 
-- [ ] **Step 1: Add the default-off dispatch input**
+- [x] **Step 1: Add the default-off dispatch input**
 
 After `run_deep_audit`, add:
 
@@ -178,7 +178,7 @@ run_quality_audit:
   type: boolean
 ```
 
-- [ ] **Step 2: Add `quality-rust` before the release job**
+- [x] **Step 2: Add `quality-rust` before the release job**
 
 Use the pinned checkout, stable toolchain, and Cargo cache identities already
 accepted by the immutable-reference contract:
@@ -216,7 +216,7 @@ quality-rust:
       run: cargo +stable fmt --all -- --check
 ```
 
-- [ ] **Step 3: Add `quality-scripts` as a separate job**
+- [x] **Step 3: Add `quality-scripts` as a separate job**
 
 ```yaml
 quality-scripts:
@@ -240,7 +240,7 @@ quality-scripts:
       run: git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck
 ```
 
-- [ ] **Step 4: Update existing immutable JavaScript action counts**
+- [x] **Step 4: Update existing immutable JavaScript action counts**
 
 The two new jobs add two checkout executions and `quality-rust` adds one cache
 execution. Update only these expected counts:
@@ -250,7 +250,7 @@ self.assertEqual(self.source.count(CHECKOUT_NODE24), 9)
 self.assertEqual(self.source.count(CACHE_NODE24), 3)
 ```
 
-- [ ] **Step 5: Run local Cargo-free GREEN verification**
+- [x] **Step 5: Run local Cargo-free GREEN verification**
 
 Run:
 
@@ -264,7 +264,7 @@ python3 ci/check_build_workflow_contract.py
 Expected: all public workflow contracts pass. No local Cargo, Ruff, or
 ShellCheck command runs.
 
-- [ ] **Step 6: Commit and push the workflow implementation**
+- [x] **Step 6: Commit and push the workflow implementation**
 
 ```bash
 git add .github/workflows/build.yml ci/test_ci_lane_contract.py
@@ -272,7 +272,7 @@ git commit -m "ci: add opt-in hosted quality audit lanes"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Verify ordinary push behavior**
+- [x] **Step 7: Verify ordinary push behavior**
 
 For the implementation commit's automatic Build, require existing applicable
 jobs green and confirm both quality jobs are `skipped`. This proves the default
@@ -286,7 +286,7 @@ push path did not acquire the audit cost.
 - Modify: `docs/openstack-neutron-aria-details/12-review-bug-backlog.md:DEBT-CI-001`
 - Modify: `docs/superpowers/plans/2026-08-15-debt-ci-001-quality-audit.md`
 
-- [ ] **Step 1: Dispatch the exact implementation head**
+- [x] **Step 1: Dispatch the exact implementation head**
 
 Run:
 
@@ -301,13 +301,13 @@ gh workflow run build.yml \
 Resolve the new run ID with `gh run list`, verify its head SHA equals the
 implementation head, then wait for completion.
 
-- [ ] **Step 2: Record job execution and duration**
+- [x] **Step 2: Record job execution and duration**
 
 Require both `quality-rust` and `quality-scripts` to be present and not skipped.
 Record each job conclusion and duration. Verify their timestamps overlap; they
 must not be serialized through `needs`.
 
-- [ ] **Step 3: Classify the first-run result without weakening checks**
+- [x] **Step 3: Classify the first-run result without weakening checks**
 
 If both jobs pass, record zero findings and continue to Task 4. If either job
 fails:
@@ -325,7 +325,7 @@ This is an intentional decision point based on evidence that does not exist
 until hosted tools run. No unknown source remediation is authorized by this
 plan.
 
-- [ ] **Step 4: Commit the measured baseline**
+- [x] **Step 4: Commit the measured baseline**
 
 Record the exact head, run URL, job conclusions, durations, and either zero
 findings or the newly registered finding IDs in the backlog and this plan.
@@ -337,6 +337,15 @@ git add \
 git commit -m "docs(ci): record first hosted quality audit"
 git push origin v0.9-neutron-agent
 ```
+
+Measured baseline: exact implementation head `bb56310f0dee88a8669fd57eee61599060b6e29a`,
+Build [31890013101](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890013101).
+`quality-scripts` and `quality-rust` started at 14:28:44Z/14:28:45Z and failed
+after 26/107 seconds respectively. Ruff passed; the Rust workspace exposed two
+dormant test defects and ShellCheck reported 85 diagnostics at 82 locations in
+24 scripts. Findings are `DEBT-CI-002` through `DEBT-CI-004`; their exact
+remediation is defined in
+`docs/superpowers/plans/2026-08-15-debt-ci-001-first-audit-remediation.md`.
 
 ---
 
