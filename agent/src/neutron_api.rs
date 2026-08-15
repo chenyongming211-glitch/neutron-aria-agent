@@ -7267,7 +7267,7 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_domain_status_acl_less_managed_port_is_degraded_bypass() {
+    fn neutron_snapshot_acl_less_managed_port_domain_status_is_degraded_bypass() {
         let port = NeutronPortSnapshot {
             port_id: "port-1".to_string(),
             ifname: "tap-port-1".to_string(),
