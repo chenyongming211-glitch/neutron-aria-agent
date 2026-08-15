@@ -8648,9 +8648,12 @@ mod tests {
             assert_eq!(runtime.wal_status, "intent_written");
         }
 
-        let response = get_neutron_status(State(state.clone()))
-            .await
-            .into_response();
+        let response = get_neutron_status_with_query(
+            State(state.clone()),
+            Query(NeutronStatusQuery::default()),
+        )
+        .await
+        .into_response();
         let (status, actual) = response_json_value(response).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(actual["accepted_generation"], serde_json::json!(42));
@@ -8728,9 +8731,12 @@ mod tests {
             assert_eq!(runtime.recovery_cause, None);
         }
 
-        let response = get_neutron_status(State(restarted.clone()))
-            .await
-            .into_response();
+        let response = get_neutron_status_with_query(
+            State(restarted.clone()),
+            Query(NeutronStatusQuery::default()),
+        )
+        .await
+        .into_response();
         let (status, actual) = response_json_value(response).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(actual["accepted_generation"], serde_json::json!(52));
@@ -11848,7 +11854,12 @@ mod tests {
             .expect("Status V2 retry fixture must be a durable partial commit");
         *state.runtime.write().await = partial;
 
-        let response = get_neutron_status(State(state)).await.into_response();
+        let response = get_neutron_status_with_query(
+            State(state),
+            Query(NeutronStatusQuery::default()),
+        )
+        .await
+        .into_response();
         let (status, body) = response_json_value(response).await;
 
         assert_eq!(status, StatusCode::OK);
