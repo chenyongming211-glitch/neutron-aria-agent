@@ -4156,7 +4156,12 @@ fn domain_status_with_action(
 
 fn acl_domain_status_for(port: &NeutronPortSnapshot) -> NeutronDomainStatus {
     let Some(acl) = &port.acl else {
-        return domain_status("acl", "ready", None);
+        return domain_status_with_action(
+            "acl",
+            "degraded",
+            Some("no_acl_payload".to_string()),
+            Some("bypass".to_string()),
+        );
     };
     let status = if acl.status.trim().is_empty() {
         "ready"
@@ -4847,6 +4852,22 @@ async fn apply_delete_neutron_port(
             },
         );
     };
+
+    if previous.pending_generation.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            NeutronDeleteResponse {
+                port_id: port.port_id,
+                ifname: None,
+                detached: false,
+                status: "blocked".to_string(),
+                error: Some(format!(
+                    "delete_blocked_by_unresolved_pending: pending generation {} is still applying",
+                    previous.pending_generation.unwrap_or_default()
+                )),
+            },
+        );
+    }
 
     let generation = previous.accepted_generation;
     if let Err(e) = state.wal.append_delete_intent(
