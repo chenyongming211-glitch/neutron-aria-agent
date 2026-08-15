@@ -272,6 +272,17 @@ pub fn fragment_context_l4_proto(value: &FragmentContextValue) -> Option<u8> {
     }
 }
 
+/// Recover the authoritative L4 fields from a fragment context value when the
+/// stored L4 flags allow it. Returns (proto, src_port, dst_port). Resolve-stage
+/// drops use this so drop statistics and trace events are attributed to the
+/// real transport protocol instead of the on-wire fragment-header value.
+#[inline(always)]
+pub fn fragment_resolved_l4_fields(
+    value: &FragmentContextValue,
+) -> Option<(u8, u16, u16)> {
+    fragment_context_l4_proto(value).map(|proto| (proto, value.src_port, value.dst_port))
+}
+
 #[inline(always)]
 pub fn fragment_authority_drop_reason(
     tap_id: u32,

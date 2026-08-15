@@ -1,13 +1,13 @@
 use crate::common::{
     fragment_authority_drop_reason, fragment_context_flags_for_l4, fragment_context_l4_proto,
     fragment_first_observation_metric, fragment_install_result, fragment_metric_for_drop_reason,
-    fragment_metric_index, fragment_resolve_decision, fragment_tracking_required,
-    FragmentConfig, FragmentContextKey4, FragmentContextKey6, FragmentContextValue,
-    FragmentInstallDecision, FragmentKind, PipelineCtx, DROP_FRAGMENT_CONFIG_MISSING,
-    DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_EPOCH_MISSING,
-    DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION, FRAGMENT_FAMILY_IPV4,
-    FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW, FRAGMENT_METRIC_INVALID_L4,
-    FRAGMENT_METRIC_NON_INITIAL,
+    fragment_metric_index, fragment_resolve_decision, fragment_resolved_l4_fields,
+    fragment_tracking_required, FragmentConfig, FragmentContextKey4, FragmentContextKey6,
+    FragmentContextValue, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    DROP_FRAGMENT_CONFIG_MISSING, DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_CONTEXT_MISSING,
+    DROP_FRAGMENT_EPOCH_MISSING, DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION,
+    FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW,
+    FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
 };
 use crate::maps::{
     FRAGMENT_CONFIG, FRAGMENT_EPOCH, FRAGMENT_METRICS, FRAG_CONTEXT_V4, FRAG_CONTEXT_V6,
@@ -155,6 +155,12 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     );
     record_metric(p, FRAGMENT_FAMILY_IPV4, decision.metric());
     if decision.drop_reason() != 0 {
+        if let Some((proto, src_port, dst_port)) = fragment_resolved_l4_fields(&value) {
+            info.proto = proto;
+            info.src_port = src_port;
+            info.dst_port = dst_port;
+            p.proto = proto;
+        }
         p.drop_reason = decision.drop_reason();
         return ResolveOutcome::Drop;
     }
@@ -220,6 +226,12 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     );
     record_metric(p, FRAGMENT_FAMILY_IPV6, decision.metric());
     if decision.drop_reason() != 0 {
+        if let Some((proto, src_port, dst_port)) = fragment_resolved_l4_fields(&value) {
+            info.proto = proto;
+            info.src_port = src_port;
+            info.dst_port = dst_port;
+            p.proto = proto;
+        }
         p.drop_reason = decision.drop_reason();
         return ResolveOutcome::Drop;
     }
