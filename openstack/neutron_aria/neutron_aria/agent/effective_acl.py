@@ -159,6 +159,10 @@ def _normalized_direction(direction):
     return str(direction or "ingress").strip().lower()
 
 
+def _normalized_ethertype(ethertype):
+    return str(ethertype or "").strip().lower()
+
+
 def _datapath_directions(direction):
     value = _normalized_direction(direction)
     if value == "both":
@@ -627,8 +631,9 @@ class EffectiveAclIndex(object):
 
         ethertype = rule.get("ethertype")
         if ethertype:
+            normalized_ethertype = _normalized_ethertype(ethertype)
             for cidr in src_cidrs + dst_cidrs:
-                if _ip_version(cidr) != ethertype:
+                if _ip_version(cidr).lower() != normalized_ethertype:
                     return None, "ethertype_cidr_mismatch:%s" % rule.get("id")
 
         return {

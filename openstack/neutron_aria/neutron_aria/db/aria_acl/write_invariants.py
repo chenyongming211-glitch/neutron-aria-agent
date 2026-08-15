@@ -169,6 +169,9 @@ def prepare_rule(repository, values, existing=None):
                 final_values[field] = normalize_ipv4_cidr(final_values[field])
             except AclContractError as exc:
                 raise AriaAclValidationError(str(exc))
+    if final_values.get("ethertype"):
+        if str(final_values["ethertype"]).strip().lower() == "ipv4":
+            final_values["ethertype"] = "IPv4"
     policy_project = _project_id(policy)
     references = set()
     for field in ("src_address_set_id", "dst_address_set_id"):
