@@ -185,25 +185,47 @@ fn inventory_wal(
     }
     let file = File::open(wal_path)
         .map_err(|error| format!("Failed to open WAL for inventory: {}", error))?;
+    inventory_wal_reader(BufReader::new(file), snapshot_checkpoint_id)
+}
+
+fn inventory_wal_reader<R: BufRead>(
+    reader: R,
+    snapshot_checkpoint_id: Option<u64>,
+) -> Result<WalInventory, String> {
     let mut inventory = WalInventory::default();
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        inventory.has_nonempty_line = true;
-        match parse_persisted_wal_record(&line) {
-            Ok(PersistedWalRecord::Mutation(_)) => inventory.mutation_count += 1,
-            Ok(PersistedWalRecord::Checkpoint { wal_checkpoint }) => {
-                inventory.max_checkpoint_id = inventory
-                    .max_checkpoint_id
-                    .max(wal_checkpoint.checkpoint_id);
-                if wal_checkpoint.version == WAL_REPLAY_CURSOR_VERSION
-                    && Some(wal_checkpoint.checkpoint_id) == snapshot_checkpoint_id
-                {
-                    inventory.has_matching_checkpoint = true;
+    let mut lines = reader.lines();
+    loop {
+        match lines.next() {
+            None => break,
+            Some(Ok(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                inventory.has_nonempty_line = true;
+                match parse_persisted_wal_record(&line) {
+                    Ok(PersistedWalRecord::Mutation(_)) => inventory.mutation_count += 1,
+                    Ok(PersistedWalRecord::Checkpoint { wal_checkpoint }) => {
+                        inventory.max_checkpoint_id = inventory
+                            .max_checkpoint_id
+                            .max(wal_checkpoint.checkpoint_id);
+                        if wal_checkpoint.version == WAL_REPLAY_CURSOR_VERSION
+                            && Some(wal_checkpoint.checkpoint_id) == snapshot_checkpoint_id
+                        {
+                            inventory.has_matching_checkpoint = true;
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
-            Err(_) => {}
+            Some(Err(error)) => {
+                // Non-UTF-8 records are tolerated exactly like the replay
+                // path (REVIEW-OPS-027); genuine read I/O errors fail the
+                // inventory so startup never builds a truncated view.
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    continue;
+                }
+                return Err(format!("Failed to read WAL for inventory: {}", error));
+            }
         }
     }
     Ok(inventory)
