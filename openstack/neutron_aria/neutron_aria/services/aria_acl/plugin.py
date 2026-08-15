@@ -517,10 +517,21 @@ class AriaAclPlugin(object):
             status = repository.get_port_status_resource(port_id)
         if status is None:
             return None
-        return project_fields(
-            self._project_port_status(status),
-            fields,
-        )
+        projected = self._project_port_status(status)
+        counter_rows = getattr(repository, "get_port_counters", None)
+        if counter_rows is not None:
+            try:
+                projected["aria_acl_port_counters"] = counter_rows(
+                    port_id,
+                    host=status.get("host"),
+                )
+            except Exception as exc:
+                LOG.warning(
+                    "aria_acl port counter read failed port_id=%s error=%s",
+                    port_id,
+                    exc,
+                )
+        return project_fields(projected, fields)
 
     def delete_aria_acl_port_status(self, context, port_id, host=None):
         repository = self._repo(context)

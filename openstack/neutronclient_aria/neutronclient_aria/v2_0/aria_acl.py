@@ -596,6 +596,32 @@ class AriaAclPortStatusList(_AriaAclList):
         parser.add_argument("--host")
 
 
+# Numeric drop-reason names for the port-status --counters view. This is a
+# CLI-local mirror of neutron_aria.agent.drop_reasons.DROP_REASON_NAMES;
+# keep both in sync when the eBPF ABI reason vocabulary changes.
+DROP_REASON_NAMES = {
+    1: "ACL_DENY",
+    2: "ACL_PORT_DENY",
+    3: "ACL_DEFAULT_DENY",
+    4: "QOS_INGRESS",
+    5: "QOS_EGRESS",
+    6: "FRAGMENT_CONFIG_MISSING",
+    7: "FRAGMENT_TRACKING_DISABLED",
+    8: "FRAGMENT_CONFIG_INVALID",
+    9: "FRAGMENT_EPOCH_MISSING",
+    10: "FRAGMENT_CONTEXT_MISSING",
+    11: "FRAGMENT_CONTEXT_INVALID",
+    12: "FRAGMENT_CONTEXT_EXPIRED",
+    13: "FRAGMENT_CONTEXT_STALE",
+    14: "FRAGMENT_CONTEXT_OVERLAP",
+    15: "FRAGMENT_CONTEXT_UPDATE_FAILED",
+    16: "FRAGMENT_TAP_UNASSIGNED",
+    17: "FRAGMENT_EXPIRY_OVERFLOW",
+    18: "MALFORMED_IP",
+    19: "FRAGMENT_INVALID_L4",
+}
+
+
 class AriaAclPortStatusShow(_AriaAclShow):
     """Show an Aria ACL port runtime status row."""
 
@@ -604,6 +630,83 @@ class AriaAclPortStatusShow(_AriaAclShow):
     path = "/aria-acl-port-statuses"
     id_path = "/aria-acl-port-statuses/%s"
     resource_path = "/aria-acl-port-statuses/%s"
+
+    def add_known_arguments(self, parser):
+        parser.add_argument(
+            "--counters",
+            action="store_true",
+            help=(
+                "Show port counter rows: cumulative policy/drop counters per "
+                "bucket and per drop reason."
+            ),
+        )
+
+    def execute(self, parsed_args):
+        neutron_client = self._client(parsed_args)
+        data = neutron_client.show_ext(self.id_path, parsed_args.id)
+        if getattr(parsed_args, "counters", False):
+            status = data.get(self.resource) or {}
+            status = dict(status)
+            counter_rows = status.get("aria_acl_port_counters") or []
+            bucket_index = 0
+            reason_index = 0
+            for row in counter_rows:
+                kind = row.get("kind")
+                if kind == "bucket":
+                    bucket_index += 1
+                    key = "counters.bucket[%d]" % bucket_index
+                    value = self._format_bucket(row)
+                elif kind == "reason":
+                    reason_index += 1
+                    key = "counters.reason[%d]" % reason_index
+                    value = self._format_reason(row)
+                else:
+                    continue
+                status[key] = value
+            status.pop("aria_acl_port_counters", None)
+            data[self.resource] = status
+        self.format_output_data(data)
+        return self._show_rows(data)
+
+    @staticmethod
+    def _direction_name(direction):
+        if direction == 0:
+            return "ingress"
+        if direction == 1:
+            return "egress"
+        return str(direction)
+
+    @classmethod
+    def _format_bucket(cls, row):
+        return (
+            "src_id=%s dst_id=%s proto=%s dir=%s pkts=%s bytes=%s "
+            "dropped=%s pps=%s bps=%s"
+            % (
+                row.get("src_id"),
+                row.get("dst_id"),
+                row.get("proto"),
+                cls._direction_name(row.get("direction")),
+                row.get("packets"),
+                row.get("bytes"),
+                row.get("dropped_packets"),
+                row.get("pps"),
+                row.get("bps"),
+            )
+        )
+
+    @classmethod
+    def _format_reason(cls, row):
+        return (
+            "reason=%s dir=%s pkts=%s bytes=%s pps=%s bps=%s"
+            % (
+                DROP_REASON_NAMES.get(row.get("reason"), "UNKNOWN"),
+                cls._direction_name(row.get("direction")),
+                row.get("packets"),
+                row.get("bytes"),
+                row.get("pps"),
+                row.get("bps"),
+            )
+        )
 
 
 _CONCRETE_COMMANDS = (

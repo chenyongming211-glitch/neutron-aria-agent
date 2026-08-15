@@ -2264,6 +2264,45 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual(status["port_id"], "p1")
         self.assertEqual(status["status"], "ready")
 
+    def test_port_status_show_attaches_counter_detail_rows(self):
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        plugin.report_aria_acl_port_status(
+            None,
+            {"aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_sampled_at_ms": 2000000,
+                "counters_rows": [{
+                    "port_id": "p1",
+                    "truncated": False,
+                    "reset_detected": False,
+                    "summary": {"policy_packets": 100},
+                    "rows": [{
+                        "kind": "bucket",
+                        "key": {"src_id": 1, "dst_id": 2, "proto": 6,
+                                "direction": 0},
+                        "packets": 100,
+                        "bytes": 1000,
+                        "dropped_packets": 0,
+                        "dropped_bytes": 0,
+                        "pps": None,
+                        "bps": None,
+                    }],
+                }],
+            }},
+        )
+        status = plugin.get_aria_acl_port_status(None, "p1")
+        self.assertIn("aria_acl_port_counters", status)
+        self.assertEqual(len(status["aria_acl_port_counters"]), 1)
+        self.assertEqual(
+            status["aria_acl_port_counters"][0]["kind"], "bucket"
+        )
+        self.assertEqual(
+            status["aria_acl_port_counters"][0]["packets"], 100
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -256,6 +256,72 @@ class AriaAclCliTest(unittest.TestCase):
             client.calls[0],
         )
 
+    def test_status_show_counters_renders_bucket_and_reason_rows(self):
+        class FakeClient(object):
+            def show_ext(self, path, resource_id):
+                return {"aria_acl_port_status": {
+                    "id": resource_id,
+                    "port_id": "port-1",
+                    "host": "compute-1",
+                    "counters_policy_packets": 200,
+                    "counters_drop_packets": 20,
+                    "aria_acl_port_counters": [
+                        {
+                            "kind": "bucket",
+                            "src_id": 1,
+                            "dst_id": 2,
+                            "proto": 6,
+                            "direction": "ingress",
+                            "packets": 100,
+                            "bytes": 1000,
+                            "dropped_packets": 10,
+                            "dropped_bytes": 100,
+                            "pps": 50.0,
+                            "bps": 500.0,
+                        },
+                        {
+                            "kind": "reason",
+                            "reason": 1,
+                            "direction": 0,
+                            "proto": 6,
+                            "packets": 20,
+                            "bytes": 200,
+                            "pps": 10.0,
+                            "bps": 100.0,
+                        },
+                    ],
+                }}
+
+        command = aria_acl.AriaAclPortStatusShow(FakeApp(FakeClient()), None)
+        parsed_args = command.get_parser("aria-acl-port-status-show").parse_args([
+            "status-1",
+            "--counters",
+        ])
+        rows = self._show_result(command.execute(parsed_args))
+        self.assertIn("counters.bucket[1]", rows)
+        self.assertIn("src_id=1 dst_id=2 proto=6 dir=ingress",
+                      rows["counters.bucket[1]"])
+        self.assertIn("pkts=100", rows["counters.bucket[1]"])
+        self.assertIn("counters.reason[1]", rows)
+        self.assertIn("reason=ACL_DENY", rows["counters.reason[1]"])
+        self.assertNotIn("aria_acl_port_counters", rows)
+
+    def test_status_show_without_counters_keeps_default_shape(self):
+        class FakeClient(object):
+            def show_ext(self, path, resource_id):
+                return {"aria_acl_port_status": {
+                    "id": resource_id,
+                    "port_id": "port-1",
+                }}
+
+        command = aria_acl.AriaAclPortStatusShow(FakeApp(FakeClient()), None)
+        parsed_args = command.get_parser("aria-acl-port-status-show").parse_args([
+            "status-1",
+        ])
+        rows = self._show_result(command.execute(parsed_args))
+        self.assertEqual(rows["port_id"], "port-1")
+        self.assertNotIn("counters.bucket[1]", rows)
+
     def test_policy_parser_rejects_default_deny(self):
         parser = argparse.ArgumentParser()
         aria_acl.AriaAclPolicyCreate(None, None).add_known_arguments(parser)
