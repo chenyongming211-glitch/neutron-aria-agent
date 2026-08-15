@@ -1,6 +1,6 @@
 # New-Findings Remediation Program Design
 
-Status: approved plan; Batches 1-2 complete (2026-08-15), Batches 3-5 pending
+Status: approved plan; Batches 1-3 complete (2026-08-15), Batches 4-5 pending
 
 Date: 2026-08-15
 
@@ -197,7 +197,7 @@ baseline established by Batches 1–4:
 ```text
 Batch 1  ACL-106 + ACL-107   Python agent, user-visible P2 fast wins   DONE
 Batch 2  ACL-108 + ACL-109 + ACL-110 + TXN-038   Python robustness    DONE
-Batch 3  ACL-101 + ACL-102 + TXN-037             Rust core ERROR-EXACT
+Batch 3  ACL-101 + ACL-102 + TXN-037             Rust core ERROR-EXACT DONE
 Batch 4  ACL-104 + ACL-105                       eBPF fragment attribution
 Batch 5  TXN-036 + ACL-100                       transaction/status projection
 ```
@@ -217,6 +217,15 @@ failed only the eight intended behaviors; GREEN `9c05dec` + `0ecf0fc` +
 [31853908451](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31853908451)
 and the local full Python suite (652 tests OK). The MySQL same-second and
 power-loss conditionals remain deferred evidence as recorded in the register.
+
+Batch 3 closed 2026-08-15: RED `53b7310` / Build
+[31854525474](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31854525474)
+failed rust-behavior only on the four missing-interface errors; GREEN
+`9b35904` + `128afa4` + `826110c` + `096a9da` passed exact-head Build
+[31856998709](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31856998709)
+with all jobs green. The parallel Phase B line shared the branch during this
+batch; the multi-session coordination rules in `AGENTS.md` record the
+attribution protocol used to isolate this batch's evidence.
 
 The order fixes the two user-visible P2 rows first, then completes the
 same-language Python hardening, then the core error-propagation family, then
