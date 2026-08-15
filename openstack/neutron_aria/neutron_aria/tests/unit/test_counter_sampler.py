@@ -31,7 +31,7 @@ class CounterSamplerTestCase(unittest.TestCase):
 
     def test_first_snapshot_has_no_rates(self):
         rows, reset = diff_port_counters(
-            None, self._port(100, 10, 1000), now_ms=1000.0
+            None, self._port(100, 10, 1000)
         )
         self.assertFalse(reset)
         for row in rows:
@@ -41,8 +41,7 @@ class CounterSamplerTestCase(unittest.TestCase):
     def test_rates_are_differenced_over_elapsed_ms(self):
         rows, reset = diff_port_counters(
             self._port(100, 10, 1000),
-            self._port(200, 20, 2000),
-            now_ms=2000.0,
+            self._port(200, 20, 2000)
         )
         self.assertFalse(reset)
         policy = [r for r in rows if r["kind"] == "port"][0]
@@ -56,8 +55,7 @@ class CounterSamplerTestCase(unittest.TestCase):
     def test_negative_delta_is_reset_and_rates_are_none(self):
         rows, reset = diff_port_counters(
             self._port(100, 10, 1000),
-            self._port(50, 5, 2000),
-            now_ms=2000.0,
+            self._port(50, 5, 2000)
         )
         self.assertTrue(reset)
         for row in rows:
@@ -77,7 +75,7 @@ class CounterSamplerTestCase(unittest.TestCase):
              "packets": 30, "bytes": 300,
              "dropped_packets": 5, "dropped_bytes": 50},
         ]
-        rows, reset = diff_port_counters(previous, current, now_ms=2000.0)
+        rows, reset = diff_port_counters(previous, current)
         self.assertTrue(reset)
         for row in rows:
             self.assertIsNone(row["pps"])
@@ -94,7 +92,7 @@ class CounterSamplerTestCase(unittest.TestCase):
             {"reason": 1, "direction": 0, "proto": 6,
              "packets": 4, "bytes": 40},
         ]
-        rows, reset = diff_port_counters(previous, current, now_ms=2000.0)
+        rows, reset = diff_port_counters(previous, current)
         self.assertTrue(reset)
         for row in rows:
             self.assertIsNone(row["pps"])
@@ -107,7 +105,7 @@ class CounterSamplerTestCase(unittest.TestCase):
              "dropped_bytes": 0}
             for i in range(600)
         ]
-        rows, _ = diff_port_counters(None, current, now_ms=1000.0)
+        rows, _ = diff_port_counters(None, current, )
         self.assertEqual(
             len([r for r in rows if r["kind"] == "bucket"]), MAX_BUCKET_ROWS
         )

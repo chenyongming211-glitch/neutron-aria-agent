@@ -247,6 +247,12 @@ _INDEXES = (
     ),
     ("ix_aria_acl_bindings_target", "aria_acl_bindings", ("target_type", "target_id"), False),
     ("ix_aria_acl_bindings_policy_id", "aria_acl_bindings", ("policy_id",), False),
+    (
+        "uq_aria_acl_port_counters_natural",
+        "aria_acl_port_counters",
+        ("port_id", "host", "kind", "src_id", "dst_id", "proto", "direction", "reason"),
+        True,
+    ),
 )
 
 

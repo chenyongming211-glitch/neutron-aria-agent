@@ -1,7 +1,5 @@
 from __future__ import absolute_import
 
-import time
-
 MAX_BUCKET_ROWS = 512
 
 
@@ -25,7 +23,7 @@ def _row_dict(kind, key_dict, packets, bytes_value, dropped_packets,
     }
 
 
-def diff_port_counters(previous, current, now_ms=None):
+def diff_port_counters(previous, current):
     """Difference two consecutive counter snapshots for one port.
 
     Returns (rows, reset_detected). Rows are dicts with kind in
@@ -33,10 +31,10 @@ def diff_port_counters(previous, current, now_ms=None):
     counters, and pps/bps rates. First snapshot and reset snapshots
     report None rates. A negative cumulative delta on the port summary
     OR on any matched bucket/reason row marks a reset, because bucket
-    sets can be rebuilt while the port total still grows.
+    sets can be rebuilt while the port total still grows. Elapsed time
+    always comes from the datapath `sampled_at_ms` stamps (single clock
+    source per the spec), never from the local wall clock.
     """
-    if now_ms is None:
-        now_ms = time.time() * 1000.0
     current_sampled = float(current.get("sampled_at_ms") or 0)
     previous_sampled = float((previous or {}).get("sampled_at_ms") or 0)
     elapsed = max(0.0, (current_sampled - previous_sampled) / 1000.0)

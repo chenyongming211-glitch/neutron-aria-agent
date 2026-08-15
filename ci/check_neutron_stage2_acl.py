@@ -75,6 +75,7 @@ def check_neutron_server_contract_files():
         "aria_acl_bindings",
         "aria_acl_rbac",
         "aria_acl_port_statuses",
+        "aria_acl_port_counters",
     ):
         if table not in migration:
             raise SystemExit("ERROR: aria_acl migration contract missing %s" % table)
@@ -85,6 +86,10 @@ def check_neutron_server_contract_files():
         "create_table",
         "create_index",
         "drop_table",
+        '"counters_sampled_at"',
+        '"counters_policy_packets"',
+        '"counters_truncated"',
+        '"uq_aria_acl_port_counters_natural"',
     ):
         if term not in migration:
             raise SystemExit("ERROR: aria_acl migration operation missing %s" % term)

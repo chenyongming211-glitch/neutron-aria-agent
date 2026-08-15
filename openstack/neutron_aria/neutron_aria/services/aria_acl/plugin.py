@@ -350,6 +350,10 @@ class AriaAclPlugin(object):
             return None
         if seconds <= 0:
             return None
+        if hasattr(datetime, "timezone"):
+            return datetime.datetime.fromtimestamp(
+                seconds, datetime.timezone.utc
+            ).replace(tzinfo=None)
         return datetime.datetime.utcfromtimestamp(seconds)
 
     @classmethod
