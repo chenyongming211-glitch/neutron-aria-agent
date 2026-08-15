@@ -1,6 +1,6 @@
 # DEBT-CI-001 Hosted Quality Audit Design
 
-**Status:** approved design; implementation plan pending
+**Status:** implemented; first hosted audit active; legacy Clippy scope unresolved
 
 **Scope:** non-privileged full host-workspace tests and source-quality checks
 

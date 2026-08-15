@@ -349,7 +349,28 @@ remediation is defined in
 After both Rust tests were corrected, exact-head Build
 [31890412178](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890412178)
 passed all 487 workspace tests and exposed `DEBT-CI-005` at the first strict
-Clippy step. Rustfmt had not yet run.
+Clippy step. Commit `0157110` fixed that API-structure finding without a lint
+suppression; ordinary exact-head Build
+[31890852231](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890852231)
+then passed the warning-denied Rust/eBPF build and stack-budget gates. The next
+hosted Clippy pass in Build
+[31890857284](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31890857284)
+reached `aria-core` and exposed `DEBT-CI-006`: 107 historical diagnostics in
+17 files, including deliberately deferred QoS, Mirror, TCP-RT, and SSL code.
+Several iterator suggestions would retain existing swallowed-error behavior,
+so this is not a safe mechanical rewrite. Exact-head Build
+[31891297201](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31891297201)
+independently passed the unchanged full Ruff/ShellCheck job in 21 seconds; the
+overall run was cancelled after that job completed because Clippy's separate
+scope decision remained open. Rustfmt has not yet run because the quality-rust
+job stops at Clippy.
+
+The recommended boundary adjustment is explicit rather than silent: existing
+Rust/eBPF jobs retain compiler warnings as errors, while the broad Clippy lane
+denies `correctness`, `suspicious`, and `perf`. Style and complexity findings
+remain visible but non-fatal and stay registered under `DEBT-CI-006`. The
+alternative is a separately authorized multi-module refactor of all 107
+diagnostics. This plan must not choose between those scopes without approval.
 
 ---
 
