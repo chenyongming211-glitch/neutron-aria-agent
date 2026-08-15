@@ -107,6 +107,10 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_rejects_unimplemented_qos_and_mirror_managed_domains",
     "neutron_aria.tests.unit.test_config.ConfigTestCase."
     "test_counters_report_enabled_defaults_false",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_first_snapshot_has_no_rates",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_negative_delta_is_reset_and_rates_are_none",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
     "test_full_resync_builds_and_submits_snapshot",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
