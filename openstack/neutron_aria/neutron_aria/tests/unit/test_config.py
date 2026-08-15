@@ -120,6 +120,32 @@ heartbeat_detail_mode = everything
         finally:
             os.unlink(path)
 
+    def test_counters_report_enabled_defaults_false(self):
+        self.assertFalse(AgentConfig().counters_report_enabled)
+
+    def test_loads_counters_report_enabled(self):
+        path = self._write_config("""
+[agent]
+counters_report_enabled = true
+""")
+        try:
+            config = load_config(path)
+            self.assertTrue(config.counters_report_enabled)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_invalid_counters_report_enabled_boolean(self):
+        path = self._write_config("""
+[agent]
+counters_report_enabled = maybe
+""")
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("counters_report_enabled", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
     def test_rejects_non_positive_page_sizes(self):
         for option in ("port_page_size", "acl_page_size"):
             for value in ("0", "-1"):

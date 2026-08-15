@@ -105,6 +105,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_snapshot_marks_only_regular_ovs_vm_tap_eligible",
     "neutron_aria.tests.unit.test_config.ConfigTestCase."
     "test_rejects_unimplemented_qos_and_mirror_managed_domains",
+    "neutron_aria.tests.unit.test_config.ConfigTestCase."
+    "test_counters_report_enabled_defaults_false",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
     "test_full_resync_builds_and_submits_snapshot",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."

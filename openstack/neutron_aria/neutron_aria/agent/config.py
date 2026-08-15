@@ -11,6 +11,7 @@ DEFAULT_OVS_BRIDGE = "br-int"
 DEFAULT_MANAGED_DOMAINS = ("acl",)
 DEFAULT_REPORT_INTERVAL = 30
 DEFAULT_HEARTBEAT_DETAIL_MODE = "summary_only"
+DEFAULT_COUNTERS_REPORT_ENABLED = False
 DEFAULT_PORT_SOURCE = "disabled"
 DEFAULT_EVENT_MERGE_INTERVAL = 0.2
 DEFAULT_EVENT_MAX_MERGE_DELAY = 5.0
@@ -66,6 +67,7 @@ class AgentConfig(object):
         resync_interval=60,
         report_interval=DEFAULT_REPORT_INTERVAL,
         heartbeat_detail_mode=DEFAULT_HEARTBEAT_DETAIL_MODE,
+        counters_report_enabled=DEFAULT_COUNTERS_REPORT_ENABLED,
         full_resync_enabled=False,
         port_source=DEFAULT_PORT_SOURCE,
         port_page_size=None,
@@ -95,6 +97,7 @@ class AgentConfig(object):
         self.heartbeat_detail_mode = (
             heartbeat_detail_mode or DEFAULT_HEARTBEAT_DETAIL_MODE
         ).strip().lower()
+        self.counters_report_enabled = bool(counters_report_enabled)
         self.full_resync_enabled = bool(full_resync_enabled)
         self.port_source = port_source or DEFAULT_PORT_SOURCE
         self.port_page_size = _optional_positive_int(
@@ -307,6 +310,12 @@ def load_config(path):
             "agent",
             "heartbeat_detail_mode",
             DEFAULT_HEARTBEAT_DETAIL_MODE,
+        ),
+        counters_report_enabled=_parse_bool(
+            _get(parser, "agent", "counters_report_enabled", "false"),
+            default=False,
+            section="agent",
+            option="counters_report_enabled",
         ),
         full_resync_enabled=_parse_bool(
             _get(parser, "agent", "full_resync_enabled", "false"),
