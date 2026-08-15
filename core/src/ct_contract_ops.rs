@@ -25,6 +25,35 @@ fn sum_per_cpu_contract(values: PerCpuValues<CtContractValue>) -> (u64, u64, u64
     (packets, bytes, last_seen)
 }
 
+fn fold_ct_contract_entries<I>(
+    items: I,
+    tap_id: u32,
+) -> Result<Vec<CtContractStatsEntry>, String>
+where
+    I: IntoIterator<Item = Result<(CtContractKey, u64, u64, u64), String>>,
+{
+    let mut entries = Vec::new();
+    for item in items {
+        let (key, packets, bytes, last_seen) = item?;
+        if key.tap_id != tap_id {
+            continue;
+        }
+        if packets > 0 {
+            entries.push(CtContractStatsEntry {
+                hook: key.hook,
+                family: key.family,
+                reason: key.reason,
+                packets,
+                bytes,
+                last_seen,
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| b.packets.cmp(&a.packets));
+    Ok(entries)
+}
+
 pub fn get_ct_contract_stats(
     runtime: TapMapRuntime<'_>,
 ) -> Result<Vec<CtContractStatsEntry>, String> {
@@ -37,28 +66,14 @@ pub fn get_ct_contract_stats(
     )
     .map_err(|e| format!("convert CT_CONTRACT_STATS: {:?}", e))?;
 
-    let mut entries = Vec::new();
-    for item in map.iter() {
-        if let Ok((key, values)) = item {
-            if key.tap_id != runtime.tap_id {
-                continue;
-            }
+    let iterated = map.iter().map(|item| match item {
+        Ok((key, values)) => {
             let (packets, bytes, last_seen) = sum_per_cpu_contract(values);
-            if packets > 0 {
-                entries.push(CtContractStatsEntry {
-                    hook: key.hook,
-                    family: key.family,
-                    reason: key.reason,
-                    packets,
-                    bytes,
-                    last_seen,
-                });
-            }
+            Ok((key, packets, bytes, last_seen))
         }
-    }
-
-    entries.sort_by(|a, b| b.packets.cmp(&a.packets));
-    Ok(entries)
+        Err(error) => Err(format!("iterate CT_CONTRACT_STATS: {:?}", error)),
+    });
+    fold_ct_contract_entries(iterated, runtime.tap_id)
 }
 
 #[cfg(test)]
