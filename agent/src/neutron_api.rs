@@ -8368,14 +8368,15 @@ mod tests {
         let state_path = root.join("tap-groups");
         let state_path = state_path.to_str().expect("valid test path");
         let manager = aria_core::state::StateManager::new(state_path);
-        let second = manager.add_group("src-b", "10.1.0.0/24").unwrap();
-        let first = manager.add_group("src-a", "10.0.0.0/24").unwrap();
+        let first = manager.add_group("src-b", "10.1.0.0/24").unwrap();
+        let second = manager.add_group("src-a", "10.0.0.0/24").unwrap();
         assert!(first < second);
         let groups = counters_groups(state_path);
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].id, first);
-        assert_eq!(groups[0].cidrs, vec!["10.0.0.0/24".to_string()]);
-        assert_eq!(groups[1].cidrs, vec!["10.1.0.0/24".to_string()]);
+        assert_eq!(groups[0].cidrs, vec!["10.1.0.0/24".to_string()]);
+        assert_eq!(groups[1].id, second);
+        assert_eq!(groups[1].cidrs, vec!["10.0.0.0/24".to_string()]);
         let _ = std::fs::remove_dir_all(root);
     }
 
