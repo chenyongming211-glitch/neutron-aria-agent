@@ -1,0 +1,293 @@
+{
+    "fixture_schema_version": 1,
+    "status_contract": {
+        "version": 3,
+        "hash": "v0.9-neutron-status-3",
+        "error_codes_hash": "v0.9-neutron-errors-3",
+        "capability_hash": "v0.9-neutron-capabilities-5",
+        "new_required_action": "retry_snapshot"
+    },
+    "scenarios": [
+        {
+            "id": "first-generation-durable-partial",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "blocked",
+                "overall_readiness": "blocked",
+                "required_action": "retry_snapshot",
+                "recovery_cause": null,
+                "last_classified_generation": 0,
+                "generation": 0,
+                "accepted_generation": 1,
+                "applied_generation": 0,
+                "pending_generation": 1,
+                "desired_hash": "hash-pending-1",
+                "applied_desired_hash": null,
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+                "authority_state": "partial",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": []
+            },
+            "expected_python": {
+                "decision": "retry_snapshot",
+                "mark_ready": false,
+                "generation": 1,
+                "desired_hash": "hash-pending-1"
+            }
+        },
+        {
+            "id": "positive-baseline-durable-partial",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "blocked",
+                "overall_readiness": "blocked",
+                "required_action": "retry_snapshot",
+                "recovery_cause": null,
+                "last_classified_generation": 4,
+                "generation": 4,
+                "accepted_generation": 5,
+                "applied_generation": 4,
+                "pending_generation": 5,
+                "desired_hash": "hash-pending-5",
+                "applied_desired_hash": "hash-applied-4",
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+                "authority_state": "partial",
+                "managed_ports": [
+                    {
+                        "port_id": "port-a",
+                        "ifname": "tap-port-a",
+                        "managed_domains": [
+                            "acl"
+                        ]
+                    }
+                ],
+                "port_statuses": [
+                    {
+                        "port_id": "port-a",
+                        "ifname": "tap-port-a",
+                        "generation": 4,
+                        "desired_hash": "hash-applied-4",
+                        "status": "ready",
+                        "reason": null,
+                        "managed_domains": [
+                            "acl"
+                        ],
+                        "domains": [
+                            {
+                                "domain": "acl",
+                                "status": "ready",
+                                "reason": null,
+                                "effective_action": "enforce",
+                                "support_disposition": "supported"
+                            }
+                        ]
+                    }
+                ],
+                "active_instances": [
+                    "tap-port-a"
+                ]
+            },
+            "expected_python": {
+                "decision": "retry_snapshot",
+                "mark_ready": false,
+                "generation": 5,
+                "desired_hash": "hash-pending-5"
+            }
+        },
+        {
+            "id": "applying-remains-poll",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "pending",
+                "overall_readiness": "unknown",
+                "required_action": "poll",
+                "recovery_cause": null,
+                "last_classified_generation": 4,
+                "generation": 4,
+                "accepted_generation": 5,
+                "applied_generation": 4,
+                "pending_generation": 5,
+                "desired_hash": "hash-pending-5",
+                "applied_desired_hash": "hash-applied-4",
+                "wal_status": "intent",
+                "wal_replay_failures": 0,
+                "authority_state": "applying",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": []
+            },
+            "expected_python": {
+                "decision": "poll",
+                "mark_ready": false
+            }
+        },
+        {
+            "id": "unsafe-blocked-remains-recovery",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "blocked",
+                "overall_readiness": "blocked",
+                "required_action": "recover_pending",
+                "recovery_cause": null,
+                "last_classified_generation": 4,
+                "generation": 4,
+                "accepted_generation": 5,
+                "applied_generation": 4,
+                "pending_generation": 5,
+                "desired_hash": "hash-pending-5",
+                "applied_desired_hash": "hash-applied-4",
+                "wal_status": "commit_failed",
+                "wal_replay_failures": 0,
+                "authority_state": "wal_commit_failed",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": []
+            },
+            "expected_python": {
+                "decision": "recover_pending",
+                "mark_ready": false
+            }
+        },
+        {
+            "id": "same-generation-retry-ready",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "classified",
+                "overall_readiness": "ready",
+                "required_action": "none",
+                "recovery_cause": null,
+                "last_classified_generation": 1,
+                "generation": 1,
+                "accepted_generation": 1,
+                "applied_generation": 1,
+                "pending_generation": null,
+                "desired_hash": "hash-pending-1",
+                "applied_desired_hash": "hash-pending-1",
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+                "authority_state": "ready",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": []
+            },
+            "expected_python": {
+                "decision": "feature_ready",
+                "mark_ready": true
+            }
+        },
+        {
+            "id": "counters-present-single-port",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "blocked",
+                "overall_readiness": "blocked",
+                "required_action": "retry_snapshot",
+                "recovery_cause": null,
+                "last_classified_generation": 0,
+                "generation": 0,
+                "accepted_generation": 1,
+                "applied_generation": 0,
+                "pending_generation": 1,
+                "desired_hash": "hash-pending-1",
+                "applied_desired_hash": null,
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+                "authority_state": "partial",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": [],
+                "counters": {
+                    "counters_schema_version": 1,
+                    "sampled_at_ms": 1789000000000,
+                    "ports": [
+                        {
+                            "port_id": "port-counters-1",
+                            "tap_id": 7,
+                            "policy_packets": 150,
+                            "policy_bytes": 1500,
+                            "policy_allow_packets": 120,
+                            "policy_dropped_packets": 30,
+                            "policy_dropped_bytes": 300,
+                            "drop_packets": 45,
+                            "drop_bytes": 450,
+                            "truncated": false,
+                            "buckets": [
+                                {
+                                    "src_id": 1,
+                                    "dst_id": 2,
+                                    "proto": 6,
+                                    "direction": 0,
+                                    "packets": 100,
+                                    "bytes": 1000,
+                                    "dropped_packets": 30,
+                                    "dropped_bytes": 300
+                                }
+                            ],
+                            "reasons": [
+                                {
+                                    "reason": 1,
+                                    "direction": 0,
+                                    "proto": 6,
+                                    "packets": 30,
+                                    "bytes": 300
+                                },
+                                {
+                                    "reason": 9,
+                                    "direction": 0,
+                                    "proto": 0,
+                                    "packets": 15,
+                                    "bytes": 150
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            "expected_python": {
+                "decision": "retry_snapshot",
+                "mark_ready": false,
+                "generation": 1,
+                "desired_hash": "hash-pending-1"
+            }
+        },
+        {
+            "id": "counters-absent-legacy-datapath",
+            "status": {
+                "status_schema_version": 3,
+                "status_contract_hash": "v0.9-neutron-status-3",
+                "transaction_state": "blocked",
+                "overall_readiness": "blocked",
+                "required_action": "retry_snapshot",
+                "recovery_cause": null,
+                "last_classified_generation": 0,
+                "generation": 0,
+                "accepted_generation": 1,
+                "applied_generation": 0,
+                "pending_generation": 1,
+                "desired_hash": "hash-pending-1",
+                "applied_desired_hash": null,
+                "wal_status": "committed",
+                "wal_replay_failures": 0,
+                "authority_state": "partial",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": []
+            },
+            "expected_python": {
+                "decision": "retry_snapshot",
+                "mark_ready": false,
+                "generation": 1,
+                "desired_hash": "hash-pending-1"
+            }
+        }
+    ]
+}

@@ -28,11 +28,15 @@ NEUTRON_ERROR_CODES_HASH_V2 = "v0.9-neutron-errors-3"
 NEUTRON_CAPABILITY_HASH_V2 = "v0.9-neutron-capabilities-4"
 NEUTRON_STATUS_SCHEMA_VERSION_V2 = 2
 NEUTRON_STATUS_CONTRACT_HASH_V2 = "v0.9-neutron-status-2"
+NEUTRON_CAPABILITY_HASH_V3 = "v0.9-neutron-capabilities-5"
+NEUTRON_STATUS_SCHEMA_VERSION_V3 = 3
+NEUTRON_STATUS_CONTRACT_HASH_V3 = "v0.9-neutron-status-3"
 DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 
 
 STATUS_CONTRACT_V1 = "v1"
 STATUS_CONTRACT_V2 = "v2"
+STATUS_CONTRACT_V3 = "v3"
 STATUS_CONTRACT_LEGACY_V0 = "legacy_v0"
 
 _STATUS_CONTRACTS = {
@@ -46,6 +50,16 @@ _STATUS_CONTRACTS = {
         NEUTRON_STATUS_SCHEMA_VERSION_V2,
         NEUTRON_STATUS_CONTRACT_HASH_V2,
     ): STATUS_CONTRACT_V2,
+    (
+        NEUTRON_STATUS_SCHEMA_VERSION_V2,
+        NEUTRON_STATUS_SCHEMA_VERSION_V3,
+        NEUTRON_STATUS_CONTRACT_HASH_V3,
+    ): STATUS_CONTRACT_V3,
+    (
+        NEUTRON_STATUS_SCHEMA_VERSION_V3,
+        NEUTRON_STATUS_SCHEMA_VERSION_V3,
+        NEUTRON_STATUS_CONTRACT_HASH_V3,
+    ): STATUS_CONTRACT_V3,
 }
 _STATUS_CONTRACT_PROFILES = {
     STATUS_CONTRACT_V1: (
@@ -806,6 +820,19 @@ def _decode_status_v2(body):
     )
 
 
+def _decode_status_v3(body):
+    decoded = _decode_status_versioned(
+        body,
+        NEUTRON_STATUS_SCHEMA_VERSION_V3,
+        NEUTRON_STATUS_CONTRACT_HASH_V3,
+        _STATUS_V2_TRIPLES,
+        allow_retry_snapshot=True,
+    )
+    if isinstance(body.get("counters"), dict):
+        decoded["counters"] = body["counters"]
+    return decoded
+
+
 def _legacy_identity_is_applied(values):
     applied = values["applied_generation"]
     if (
@@ -992,6 +1019,8 @@ def _decode_status(body, negotiated_mode=None):
         return _decode_status_v1(body)
     if declared_mode == STATUS_CONTRACT_V2:
         return _decode_status_v2(body)
+    if declared_mode == STATUS_CONTRACT_V3:
+        return _decode_status_v3(body)
     return _decode_legacy_status_v0(body)
 
 

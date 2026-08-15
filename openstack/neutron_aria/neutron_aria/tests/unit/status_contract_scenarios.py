@@ -27,6 +27,17 @@ V2_SCENARIO_PATH = os.path.abspath(os.path.join(
     "neutron-status-contract-v2-scenarios.json",
 ))
 
+V3_SCENARIO_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "..",
+    "..",
+    "docs",
+    "neutron-status-contract-v3-scenarios.json",
+))
+
 
 def load_status_contract_fixture():
     with open(SCENARIO_PATH, "r") as stream:
@@ -38,11 +49,23 @@ def load_status_contract_v2_fixture():
         return json.load(stream)
 
 
+def load_status_contract_v3_fixture():
+    with open(V3_SCENARIO_PATH, "r") as stream:
+        return json.load(stream)
+
+
 def status_v2_scenario(scenario_id):
     for scenario in load_status_contract_v2_fixture()["scenarios"]:
         if scenario["id"] == scenario_id:
             return copy.deepcopy(scenario)
     raise KeyError("unknown status v2 scenario %s" % scenario_id)
+
+
+def status_v3_scenario(scenario_id):
+    for scenario in load_status_contract_v3_fixture()["scenarios"]:
+        if scenario["id"] == scenario_id:
+            return copy.deepcopy(scenario)
+    raise KeyError("unknown status v3 scenario %s" % scenario_id)
 
 
 def status_scenario(scenario_id):

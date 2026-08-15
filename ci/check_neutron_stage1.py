@@ -132,6 +132,7 @@ REQUIRED_PYTHON_BEHAVIORS = (
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 STATUS_FIXTURE_PATH = "docs/neutron-status-contract-v1-scenarios.json"
 STATUS_V2_FIXTURE_PATH = "docs/neutron-status-contract-v2-scenarios.json"
+STATUS_V3_FIXTURE_PATH = "docs/neutron-status-contract-v3-scenarios.json"
 DOMAIN_STATUS_DOC_PATH = os.path.join(
     "docs", "openstack-neutron-aria-details", "05-domain-status-heartbeat.md"
 )
@@ -347,7 +348,8 @@ def check_uds_contract_artifact():
         "body_max_bytes": uds.NEUTRON_BODY_MAX_BYTES,
         "timeout_ms": uds.NEUTRON_TIMEOUT_MS,
         "error_codes_hash": uds.NEUTRON_ERROR_CODES_HASH_V2,
-        "capability_hash": uds.NEUTRON_CAPABILITY_HASH_V2,
+        "capability_hash": uds.NEUTRON_CAPABILITY_HASH_V3,
+        "counters_v1": True,
     }
     for name, value in expected.items():
         if contract.get(name) != value:
@@ -490,9 +492,10 @@ def check_status_v1_contract():
     contract = read_json(UDS_CONTRACT_PATH)
     fixture = read_json(STATUS_FIXTURE_PATH)
     fixture_v2 = read_json(STATUS_V2_FIXTURE_PATH)
+    fixture_v3 = read_json(STATUS_V3_FIXTURE_PATH)
     expected_contract = {
-        "status_schema_version_min": 2, "status_schema_version_max": 2,
-        "status_contract_hash": "v0.9-neutron-status-2", "status_contract_scenarios_path": STATUS_V2_FIXTURE_PATH,
+        "status_schema_version_min": 2, "status_schema_version_max": 3,
+        "status_contract_hash": "v0.9-neutron-status-3", "status_contract_scenarios_path": STATUS_V3_FIXTURE_PATH,
         "status_v1_compatibility_scenarios_path": STATUS_FIXTURE_PATH,
     }
     for field, value in expected_contract.items():
@@ -516,7 +519,7 @@ def check_status_v1_contract():
         if isinstance(status, dict) and status.get("status_schema_version") not in (None, 1):
             raise SystemExit("ERROR: Status V1 scenario status schema drifted")
     api = read_text(RUST_API_PATH)
-    for constant, expected in (("NEUTRON_STATUS_SCHEMA_VERSION_MIN", "2"), ("NEUTRON_STATUS_SCHEMA_VERSION_MAX", "2"), ("NEUTRON_STATUS_CONTRACT_HASH", "v0.9-neutron-status-2")):
+    for constant, expected in (("NEUTRON_STATUS_SCHEMA_VERSION_MIN", "2"), ("NEUTRON_STATUS_SCHEMA_VERSION_MAX", "3"), ("NEUTRON_STATUS_CONTRACT_HASH", "v0.9-neutron-status-3")):
         if rust_const(api, constant) != expected:
             raise SystemExit("ERROR: public Rust Status constant %s drifted" % constant)
     schema_v2 = fixture_v2.get("status_contract")
@@ -529,6 +532,31 @@ def check_status_v1_contract():
         or schema_v2.get("new_required_action") != "retry_snapshot"
     ):
         raise SystemExit("ERROR: Status V2 fixture contract metadata drifted")
+    if set(fixture_v3) != {"fixture_schema_version", "status_contract", "scenarios"} or fixture_v3.get("fixture_schema_version") != 1:
+        raise SystemExit("ERROR: Status V3 fixture root schema drifted")
+    schema_v3 = fixture_v3.get("status_contract")
+    if (
+        not isinstance(schema_v3, dict)
+        or schema_v3.get("version") != 3
+        or schema_v3.get("hash") != "v0.9-neutron-status-3"
+        or schema_v3.get("error_codes_hash") != "v0.9-neutron-errors-3"
+        or schema_v3.get("capability_hash") != "v0.9-neutron-capabilities-5"
+        or schema_v3.get("new_required_action") != "retry_snapshot"
+    ):
+        raise SystemExit("ERROR: Status V3 fixture contract metadata drifted")
+    v3_scenarios = fixture_v3.get("scenarios")
+    if not isinstance(v3_scenarios, list) or len(v3_scenarios) < 7:
+        raise SystemExit("ERROR: Status V3 scenario inventory drifted")
+    if tuple(item.get("id") for item in v3_scenarios if isinstance(item, dict))[-2:] != (
+        "counters-present-single-port", "counters-absent-legacy-datapath",
+    ):
+        raise SystemExit("ERROR: Status V3 counters scenarios drifted")
+    for scenario in v3_scenarios:
+        status = scenario.get("status")
+        if not isinstance(status, dict) or status.get("status_schema_version") != 3:
+            raise SystemExit("ERROR: Status V3 scenario status schema drifted")
+        if status.get("status_contract_hash") != "v0.9-neutron-status-3":
+            raise SystemExit("ERROR: Status V3 scenario status hash drifted")
     expected_enums = {
         "NeutronStatusTransactionState": ("Idle", "Pending", "Classified", "Blocked", "Recovery"),
         "NeutronStatusOverallReadiness": ("Ready", "Degraded", "Blocked", "Unknown"),
