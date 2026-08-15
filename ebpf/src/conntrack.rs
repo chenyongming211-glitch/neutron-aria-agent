@@ -1,16 +1,20 @@
 use crate::common::{
-    ct_acl_cache_is_current, CtKey4, CtKey6, CtValue, PolicyKey, CT_ESTABLISHED,
-    CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT, CT_FLAG_SEEN_REPLY, CT_NEW, IPPROTO_ICMP,
-    IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP,
+    ct_acl_cache_is_current, ct_apply_confirmed_hit, ct_snapshot_is_stable, CtKey4, CtKey6,
+    CtValue, PolicyKey, CT_ESTABLISHED, CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT, CT_NEW,
+    IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP,
 };
-use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6};
-use aya_ebpf::bindings::BPF_NOEXIST;
+use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6, CT_VALUE_SCRATCH};
+use aya_ebpf::bindings::{BPF_EXIST, BPF_NOEXIST};
 
 // Default timeouts in nanoseconds
 const DEFAULT_TCP_ESTABLISHED_NS: u64 = 300_000_000_000; // 300s
 const DEFAULT_TCP_NEW_NS: u64 = 30_000_000_000; // 30s
 const DEFAULT_UDP_NS: u64 = 60_000_000_000; // 60s
 const DEFAULT_ICMP_NS: u64 = 30_000_000_000; // 30s
+
+const CT_SNAPSHOT_MISSING: u8 = 0;
+const CT_SNAPSHOT_STABLE: u8 = 1;
+const CT_SNAPSHOT_CHANGED: u8 = 2;
 
 #[inline(always)]
 fn get_timeout(proto: u8, state: u8) -> u64 {
@@ -127,6 +131,114 @@ fn extract_matched(entry: &CtValue, tap_id: u32) -> MatchedPolicy {
     }
 }
 
+#[inline(always)]
+unsafe fn copy_ct_value(dst: *mut CtValue, src: *const CtValue) {
+    (*dst).state = (*src).state;
+    (*dst).flags = (*src).flags;
+    (*dst).direction = (*src).direction;
+    (*dst).matched_proto = (*src).matched_proto;
+    (*dst).matched_src_id = (*src).matched_src_id;
+    (*dst).matched_dst_id = (*src).matched_dst_id;
+    (*dst).matched_bank = (*src).matched_bank;
+    (*dst)._pad = (*src)._pad;
+    (*dst).last_seen = (*src).last_seen;
+    (*dst).pkt_count = (*src).pkt_count;
+    (*dst).byte_count = (*src).byte_count;
+}
+
+#[inline(always)]
+unsafe fn confirmed_ct_v4_snapshot(key: &CtKey4) -> u8 {
+    let first = match CT_VALUE_SCRATCH.get_ptr_mut(0) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_CHANGED,
+    };
+    let first_source = match CT_TABLE_V4.get_ptr(key) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_MISSING,
+    };
+    copy_ct_value(first, first_source);
+
+    let second = match CT_VALUE_SCRATCH.get_ptr_mut(1) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_CHANGED,
+    };
+    let second_source = match CT_TABLE_V4.get_ptr(key) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_CHANGED,
+    };
+    copy_ct_value(second, second_source);
+
+    if ct_snapshot_is_stable(&*first, Some(&*second)) {
+        CT_SNAPSHOT_STABLE
+    } else {
+        CT_SNAPSHOT_CHANGED
+    }
+}
+
+#[inline(always)]
+unsafe fn confirmed_ct_v6_snapshot(key: &CtKey6) -> u8 {
+    let first = match CT_VALUE_SCRATCH.get_ptr_mut(0) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_CHANGED,
+    };
+    let first_source = match CT_TABLE_V6.get_ptr(key) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_MISSING,
+    };
+    copy_ct_value(first, first_source);
+
+    let second = match CT_VALUE_SCRATCH.get_ptr_mut(1) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_CHANGED,
+    };
+    let second_source = match CT_TABLE_V6.get_ptr(key) {
+        Some(value) => value,
+        None => return CT_SNAPSHOT_CHANGED,
+    };
+    copy_ct_value(second, second_source);
+
+    if ct_snapshot_is_stable(&*first, Some(&*second)) {
+        CT_SNAPSHOT_STABLE
+    } else {
+        CT_SNAPSHOT_CHANGED
+    }
+}
+
+#[inline(always)]
+unsafe fn confirmed_ct_value() -> Option<*mut CtValue> {
+    CT_VALUE_SCRATCH.get_ptr_mut(0)
+}
+
+#[inline(always)]
+unsafe fn finish_ct_v4_hit(
+    key: &CtKey4,
+    entry: *mut CtValue,
+    now: u64,
+    pkt_len: u32,
+    is_forward: bool,
+) -> CtLookupResult {
+    ct_apply_confirmed_hit(&mut *entry, now, pkt_len, is_forward);
+    let matched = extract_matched(&*entry, key.tap_id);
+    let state = (*entry).state;
+    let _ = CT_TABLE_V4.insert(key, &*entry, BPF_EXIST as u64);
+    CtLookupResult::Hit(matched, is_forward, state)
+}
+
+#[inline(always)]
+unsafe fn finish_ct_v6_hit(
+    key: &CtKey6,
+    entry: *mut CtValue,
+    now: u64,
+    pkt_len: u32,
+    is_forward: bool,
+) -> CtLookupResult {
+    ct_apply_confirmed_hit(&mut *entry, now, pkt_len, is_forward);
+    let matched = extract_matched(&*entry, key.tap_id);
+    let state = (*entry).state;
+    let _ = CT_TABLE_V6.insert(key, &*entry, BPF_EXIST as u64);
+    CtLookupResult::Hit(matched, is_forward, state)
+}
+
 /// Lookup CT for IPv4 packet.
 #[inline(always)]
 pub unsafe fn ct_lookup_v4(
@@ -140,7 +252,12 @@ pub unsafe fn ct_lookup_v4(
         return CtLookupResult::Miss(CtMissReason::Disabled);
     }
     // Forward lookup
-    if let Some(entry) = CT_TABLE_V4.get_ptr_mut(key) {
+    let forward_snapshot = confirmed_ct_v4_snapshot(key);
+    if forward_snapshot == CT_SNAPSHOT_STABLE {
+        let entry = match confirmed_ct_value() {
+            Some(value) => value,
+            None => return CtLookupResult::Miss(CtMissReason::NotFound),
+        };
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
@@ -155,20 +272,18 @@ pub unsafe fn ct_lookup_v4(
             let _ = CT_TABLE_V4.remove(key);
             return CtLookupResult::Miss(CtMissReason::Expired);
         }
-        (*entry).last_seen = now;
-        (*entry).pkt_count += 1;
-        (*entry).byte_count += pkt_len as u64;
-        // Promote to ESTABLISHED when forward direction sees a packet after reply was seen
-        if (*entry).state == CT_NEW && ((*entry).flags & CT_FLAG_SEEN_REPLY) != 0 {
-            (*entry).state = CT_ESTABLISHED;
-        }
-        let matched = extract_matched(&*entry, key.tap_id);
-        return CtLookupResult::Hit(matched, true, (*entry).state);
+        return finish_ct_v4_hit(key, entry, now, pkt_len, true);
+    } else if forward_snapshot == CT_SNAPSHOT_CHANGED {
+        return CtLookupResult::Miss(CtMissReason::NotFound);
     }
 
     // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
     let rev = reverse_key4(key);
-    if let Some(entry) = CT_TABLE_V4.get_ptr_mut(&rev) {
+    if confirmed_ct_v4_snapshot(&rev) == CT_SNAPSHOT_STABLE {
+        let entry = match confirmed_ct_value() {
+            Some(value) => value,
+            None => return CtLookupResult::Miss(CtMissReason::NotFound),
+        };
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
@@ -183,12 +298,7 @@ pub unsafe fn ct_lookup_v4(
             let _ = CT_TABLE_V4.remove(&rev);
             return CtLookupResult::Miss(CtMissReason::Expired);
         }
-        (*entry).last_seen = now;
-        (*entry).pkt_count += 1;
-        (*entry).byte_count += pkt_len as u64;
-        (*entry).flags |= CT_FLAG_SEEN_REPLY;
-        let matched = extract_matched(&*entry, key.tap_id);
-        return CtLookupResult::Hit(matched, false, (*entry).state);
+        return finish_ct_v4_hit(&rev, entry, now, pkt_len, false);
     }
 
     CtLookupResult::Miss(CtMissReason::NotFound)
@@ -207,7 +317,12 @@ pub unsafe fn ct_lookup_v6(
         return CtLookupResult::Miss(CtMissReason::Disabled);
     }
     // Forward lookup
-    if let Some(entry) = CT_TABLE_V6.get_ptr_mut(key) {
+    let forward_snapshot = confirmed_ct_v6_snapshot(key);
+    if forward_snapshot == CT_SNAPSHOT_STABLE {
+        let entry = match confirmed_ct_value() {
+            Some(value) => value,
+            None => return CtLookupResult::Miss(CtMissReason::NotFound),
+        };
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
@@ -222,19 +337,18 @@ pub unsafe fn ct_lookup_v6(
             let _ = CT_TABLE_V6.remove(key);
             return CtLookupResult::Miss(CtMissReason::Expired);
         }
-        (*entry).last_seen = now;
-        (*entry).pkt_count += 1;
-        (*entry).byte_count += pkt_len as u64;
-        if (*entry).state == CT_NEW && ((*entry).flags & CT_FLAG_SEEN_REPLY) != 0 {
-            (*entry).state = CT_ESTABLISHED;
-        }
-        let matched = extract_matched(&*entry, key.tap_id);
-        return CtLookupResult::Hit(matched, true, (*entry).state);
+        return finish_ct_v6_hit(key, entry, now, pkt_len, true);
+    } else if forward_snapshot == CT_SNAPSHOT_CHANGED {
+        return CtLookupResult::Miss(CtMissReason::NotFound);
     }
 
     // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
     let rev = reverse_key6(key);
-    if let Some(entry) = CT_TABLE_V6.get_ptr_mut(&rev) {
+    if confirmed_ct_v6_snapshot(&rev) == CT_SNAPSHOT_STABLE {
+        let entry = match confirmed_ct_value() {
+            Some(value) => value,
+            None => return CtLookupResult::Miss(CtMissReason::NotFound),
+        };
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
@@ -249,12 +363,7 @@ pub unsafe fn ct_lookup_v6(
             let _ = CT_TABLE_V6.remove(&rev);
             return CtLookupResult::Miss(CtMissReason::Expired);
         }
-        (*entry).last_seen = now;
-        (*entry).pkt_count += 1;
-        (*entry).byte_count += pkt_len as u64;
-        (*entry).flags |= CT_FLAG_SEEN_REPLY;
-        let matched = extract_matched(&*entry, key.tap_id);
-        return CtLookupResult::Hit(matched, false, (*entry).state);
+        return finish_ct_v6_hit(&rev, entry, now, pkt_len, false);
     }
 
     CtLookupResult::Miss(CtMissReason::NotFound)

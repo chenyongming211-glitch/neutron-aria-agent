@@ -140,6 +140,50 @@ pub struct CtValue {
     pub byte_count: u64,
 }
 
+/// Accept a conntrack value only when two same-key observations agree in full.
+///
+/// Preallocated LRU hash elements can be deleted and reused while another CPU
+/// still holds the value pointer returned by a lookup. Comparing two complete
+/// copies turns a concurrent delete/reuse into a cache miss instead of using a
+/// mixed or aliased policy decision.
+#[inline(always)]
+pub fn ct_snapshot_is_stable(first: &CtValue, second: Option<&CtValue>) -> bool {
+    let Some(second) = second else {
+        return false;
+    };
+    first.state == second.state
+        && first.flags == second.flags
+        && first.direction == second.direction
+        && first.matched_proto == second.matched_proto
+        && first.matched_src_id == second.matched_src_id
+        && first.matched_dst_id == second.matched_dst_id
+        && first.matched_bank == second.matched_bank
+        && first._pad == second._pad
+        && first.last_seen == second.last_seen
+        && first.pkt_count == second.pkt_count
+        && first.byte_count == second.byte_count
+}
+
+/// Apply the existing conntrack hit transition to a confirmed private copy.
+#[inline(always)]
+pub fn ct_apply_confirmed_hit(
+    entry: &mut CtValue,
+    now: u64,
+    pkt_len: u32,
+    is_forward: bool,
+) {
+    entry.last_seen = now;
+    entry.pkt_count = entry.pkt_count.wrapping_add(1);
+    entry.byte_count = entry.byte_count.wrapping_add(pkt_len as u64);
+    if is_forward {
+        if entry.state == CT_NEW && (entry.flags & CT_FLAG_SEEN_REPLY) != 0 {
+            entry.state = CT_ESTABLISHED;
+        }
+    } else {
+        entry.flags |= CT_FLAG_SEEN_REPLY;
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CtConfig {

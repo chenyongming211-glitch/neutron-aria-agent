@@ -36,6 +36,10 @@ pub static CT_KEY4_SCRATCH: PerCpuArray<CtKey4> = PerCpuArray::with_max_entries(
 #[map(name = "CT_KEY6_SCRATCH")]
 pub static CT_KEY6_SCRATCH: PerCpuArray<CtKey6> = PerCpuArray::with_max_entries(2, 0);
 
+// Two complete same-key observations used to reject concurrent LRU reuse.
+#[map(name = "CT_VALUE_SCRATCH")]
+pub static CT_VALUE_SCRATCH: PerCpuArray<CtValue> = PerCpuArray::with_max_entries(2, 0);
+
 #[map(name = "IFACE_CTX_MAP")]
 pub static IFACE_CTX_MAP: HashMap<u32, IfaceCtx> = HashMap::with_max_entries(1024, 0);
 
