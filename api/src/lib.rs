@@ -37,12 +37,14 @@ pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
 pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
 pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-3";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
-pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-4";
+pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-5";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
 pub const NEUTRON_STATUS_SCHEMA_VERSION_MIN: u32 = 2;
-pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 2;
-pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-2";
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 3;
+pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-3";
+pub const NEUTRON_COUNTERS_SCHEMA_VERSION: u32 = 1;
+pub const NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
@@ -406,6 +408,56 @@ pub struct NeutronStatusPortEvidence {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronCounterBucketV1 {
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub proto: u8,
+    pub direction: u8,
+    pub packets: u64,
+    pub bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronCounterReasonV1 {
+    pub reason: u8,
+    pub direction: u8,
+    pub proto: u8,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronPortCountersV1 {
+    pub port_id: String,
+    pub tap_id: u32,
+    pub policy_packets: u64,
+    pub policy_bytes: u64,
+    pub policy_allow_packets: u64,
+    pub policy_dropped_packets: u64,
+    pub policy_dropped_bytes: u64,
+    pub drop_packets: u64,
+    pub drop_bytes: u64,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub buckets: Vec<NeutronCounterBucketV1>,
+    #[serde(default)]
+    pub reasons: Vec<NeutronCounterReasonV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusCountersV1 {
+    pub counters_schema_version: u32,
+    pub sampled_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counters_error: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<NeutronPortCountersV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
     "api_version": "v1",
     "attach_authority": "neutron_snapshot",
@@ -440,7 +492,7 @@ pub struct NeutronCapabilitiesResponse {
     pub status_schema_version_max: u32,
     /// Stable hash/version for the independent Status response vocabulary.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-status-2")]
+    #[schema(example = "v0.9-neutron-status-3")]
     pub status_contract_hash: String,
     /// Authority model for attach/detach operations.
     #[schema(example = "neutron_snapshot")]
@@ -476,9 +528,12 @@ pub struct NeutronCapabilitiesResponse {
     #[serde(default)]
     #[schema(example = "filesystem_permissions_then_peercred")]
     pub peer_auth_policy: String,
+    /// Whether the status response may carry the counters v1 section.
+    #[serde(default)]
+    pub counters_v1: bool,
     /// Stable hash/version for capability drift detection.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-capabilities-4")]
+    #[schema(example = "v0.9-neutron-capabilities-5")]
     pub capability_hash: String,
 }
 
@@ -505,6 +560,7 @@ impl NeutronCapabilitiesResponse {
             timeout_ms: NEUTRON_UDS_TIMEOUT_MS,
             error_codes_hash: NEUTRON_UDS_ERROR_CODES_HASH.to_string(),
             peer_auth_policy: NEUTRON_UDS_PEER_AUTH_POLICY.to_string(),
+            counters_v1: true,
             capability_hash: NEUTRON_UDS_CAPABILITY_HASH.to_string(),
         }
     }
@@ -590,6 +646,9 @@ pub struct NeutronStatusV1Response {
     #[serde(default)]
     pub port_statuses: Vec<NeutronStatusPortEvidence>,
     pub active_instances: Vec<String>,
+    /// Optional v1 counters section (schema v3 status responses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counters: Option<NeutronStatusCountersV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -2509,10 +2568,10 @@ mod tests {
             .expect("current Neutron capabilities must serialize");
 
         assert_eq!(capabilities["status_schema_version_min"], 2);
-        assert_eq!(capabilities["status_schema_version_max"], 2);
+        assert_eq!(capabilities["status_schema_version_max"], 3);
         assert_eq!(
             capabilities["status_contract_hash"],
-            "v0.9-neutron-status-2"
+            "v0.9-neutron-status-3"
         );
         assert_eq!(
             capabilities["error_codes_hash"],
@@ -2520,8 +2579,47 @@ mod tests {
         );
         assert_eq!(
             capabilities["capability_hash"],
-            "v0.9-neutron-capabilities-4"
+            "v0.9-neutron-capabilities-5"
         );
+        assert_eq!(capabilities["counters_v1"], true);
+    }
+
+    #[test]
+    fn neutron_capabilities_advertise_counters_v1() {
+        let caps = NeutronCapabilitiesResponse::current();
+        assert!(caps.counters_v1);
+        assert_eq!(caps.status_schema_version_min, 2);
+        assert_eq!(caps.status_schema_version_max, 3);
+        assert_eq!(caps.status_contract_hash, "v0.9-neutron-status-3");
+        assert_eq!(caps.capability_hash, "v0.9-neutron-capabilities-5");
+    }
+
+    #[test]
+    fn neutron_status_v3_serializes_without_counters_section() {
+        let response = NeutronStatusV1Response {
+            status_schema_version: 3,
+            status_contract_hash: "v0.9-neutron-status-3".to_string(),
+            transaction_state: NeutronStatusTransactionState::Blocked,
+            overall_readiness: NeutronStatusOverallReadiness::Blocked,
+            required_action: NeutronStatusRequiredAction::RetrySnapshot,
+            recovery_cause: None,
+            last_classified_generation: 0,
+            generation: 0,
+            accepted_generation: 1,
+            applied_generation: 0,
+            pending_generation: Some(1),
+            desired_hash: Some("hash-pending-1".to_string()),
+            applied_desired_hash: None,
+            wal_status: "committed".to_string(),
+            wal_replay_failures: 0,
+            authority_state: "partial".to_string(),
+            managed_ports: Vec::new(),
+            port_statuses: Vec::new(),
+            active_instances: Vec::new(),
+            counters: None,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert!(value.get("counters").is_none());
     }
 
     #[test]

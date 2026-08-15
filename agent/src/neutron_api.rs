@@ -2123,6 +2123,7 @@ async fn build_neutron_status_response(state: &NeutronApiState) -> NeutronStatus
         managed_ports,
         port_statuses: projection.port_statuses,
         active_instances: state.registry.list().await,
+        counters: None,
     }
 }
 
@@ -7593,6 +7594,7 @@ mod tests {
             managed_ports: runtime.ports.values().cloned().collect(),
             port_statuses: projection.port_statuses,
             active_instances: Vec::new(),
+            counters: None,
         })
         .unwrap_or_else(|error| panic!("Status V1 projection must serialize for {id}: {error}"))
     }
@@ -11343,8 +11345,8 @@ mod tests {
         let (status, body) = response_json_value(response).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status_schema_version"], 2);
-        assert_eq!(body["status_contract_hash"], "v0.9-neutron-status-2");
+        assert_eq!(body["status_schema_version"], 3);
+        assert_eq!(body["status_contract_hash"], "v0.9-neutron-status-3");
         assert_eq!(body["transaction_state"], "blocked");
         assert_eq!(body["overall_readiness"], "blocked");
         assert_eq!(body["required_action"], "retry_snapshot");
