@@ -514,6 +514,29 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertNotIn("managed_domains", payload)
         self.assertNotIn("domains", payload)
 
+    def test_port_status_reporter_does_not_default_enforce_without_acl_domain(self):
+        runtime_status = AgentRuntimeStatus("compute-1")
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{
+                "port_id": "port-1",
+                "ifname": "tap-port-1",
+                "desired_hash": "sha256:abc",
+                "managed_domains": ["acl"],
+                "domains": [],
+            }],
+        )
+        api = FakeAriaAclApi()
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="compute-1")
+
+        reporter.report(runtime_status)
+
+        payload = api.statuses[0][1]["aria_acl_port_status"]
+        self.assertEqual("ready", payload["status"])
+        self.assertNotIn("effective_action", payload)
+
     def test_port_status_reporter_retries_exact_host_delete(self):
         class FailOnceAriaAclApi(FakeAriaAclApi):
             def __init__(self):

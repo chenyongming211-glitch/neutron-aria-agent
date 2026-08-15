@@ -7266,6 +7266,83 @@ mod tests {
         assert!(state.require_restore_ready().is_ok());
     }
 
+    #[test]
+    fn neutron_acl_domain_status_acl_less_managed_port_is_degraded_bypass() {
+        let port = NeutronPortSnapshot {
+            port_id: "port-1".to_string(),
+            ifname: "tap-port-1".to_string(),
+            ifindex: None,
+            eligible: true,
+            disposition: Some("eligible_ovs_tap".to_string()),
+            device_owner: Some("compute:nova".to_string()),
+            vif_type: Some("ovs".to_string()),
+            vnic_type: Some("normal".to_string()),
+            network_backend: Some("openvswitch".to_string()),
+            ovs_iface_id: Some("port-1".to_string()),
+            managed_domains: vec!["acl".to_string()],
+            acl: None,
+            qos: None,
+            mirror: None,
+        };
+
+        let status = acl_domain_status_for(&port);
+
+        assert_eq!(status.domain, "acl");
+        assert_eq!(status.status, "degraded");
+        assert_eq!(status.effective_action.as_deref(), Some("bypass"));
+        assert!(
+            status
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no_acl_payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_delete_blocked_by_unresolved_pending() {
+        let root = temp_root("delete-pending-guard");
+        let state = test_neutron_state(&root);
+        let runtime_ref = Arc::clone(&state.runtime);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.pending_generation = Some(42);
+            runtime.desired_hash = Some("sha256:test".to_string());
+            runtime.authority_state = "partial".to_string();
+            runtime.ports.insert(
+                "port-1".to_string(),
+                ManagedNeutronPort {
+                    port_id: "port-1".to_string(),
+                    ifname: "tapmissing".to_string(),
+                    ifindex: None,
+                    managed_domains: vec!["acl".to_string()],
+                    domain_desired_hashes: BTreeMap::new(),
+                },
+            );
+        }
+
+        let (status, response) =
+            apply_delete_neutron_port(state, "port-1".to_string()).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(response.port_id, "port-1");
+        assert!(!response.detached);
+        assert_eq!(response.status, "blocked");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("delete_blocked_by_unresolved_pending")
+        );
+
+        let runtime = runtime_ref.read().await;
+        assert_eq!(runtime.pending_generation, Some(42));
+        assert_eq!(runtime.authority_state, "partial");
+        assert!(runtime.ports.contains_key("port-1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn neutron_snapshot_ovs_inventory_command_timeout_is_bounded_and_stops_command_sequence() {
         let root = temp_root("ovs-command-timeout");
