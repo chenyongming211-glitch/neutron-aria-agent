@@ -789,7 +789,17 @@ mod tests {
             true,
             registry.control_plane.trace_map_mode(),
         );
-        instance.reserve_persisted_live_iface().unwrap();
+        std::fs::create_dir_all(&registry.base_state_path).unwrap();
+        std::fs::write(
+            registry
+                .base_state_path
+                .join(format!(".{}.live-ifaces.json", MANAGED_SHARED_PIN_NAMESPACE)),
+            format!(
+                r#"{{"schema_version":2,"ifaces":[{{"iface":"{}","ifindex":4242,"active":false}}]}}"#,
+                ifname
+            ),
+        )
+        .unwrap();
 
         instance
             .detach_orphaned_managed_links()
