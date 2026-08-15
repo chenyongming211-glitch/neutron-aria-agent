@@ -8,6 +8,7 @@ use crate::common::{
     FRAGMENT_METRIC_CONTEXT_STALE, FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
     FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
 };
+use crate::ebpf_ops::execute_counted_map_delete_batch;
 use aya::maps::{HashMap, Map, MapData, MapType, PerCpuArray, PerCpuHashMap, PerCpuValues};
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -1007,19 +1008,21 @@ pub fn clear_rule_stats_for_policy(
     )
     .map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
 
-    for bank in [0u8, 1u8] {
-        let key = PolicyKey {
-            tap_id: runtime.tap_id,
-            src_id,
-            dst_id,
-            proto,
-            direction,
-            bank,
-            pad: [0; 1],
-        };
-        let _ = map.remove(&key);
-    }
-    Ok(())
+    let keys = [0u8, 1u8].map(|bank| PolicyKey {
+        tap_id: runtime.tap_id,
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        bank,
+        pad: [0; 1],
+    });
+    execute_counted_map_delete_batch(
+        keys,
+        |key| map.remove(key),
+        "remove RULE_STATS entry",
+    )
+    .map(|_| ())
 }
 
 /// Remove all GROUP_STATS entries for a specific group id (both directions).
@@ -1034,16 +1037,18 @@ pub fn clear_group_stats_for_id(runtime: TapMapRuntime<'_>, group_id: u32) -> Re
     .map_err(|e| format!("convert GROUP_STATS: {:?}", e))?;
 
     // GROUP_STATS is keyed by (tap_id, group_id, direction); remove both directions.
-    for direction in [0u8, 1u8] {
-        let key = GroupStatsKey {
-            tap_id: runtime.tap_id,
-            group_id,
-            direction,
-            pad: [0; 3],
-        };
-        let _ = map.remove(&key);
-    }
-    Ok(())
+    let keys = [0u8, 1u8].map(|direction| GroupStatsKey {
+        tap_id: runtime.tap_id,
+        group_id,
+        direction,
+        pad: [0; 3],
+    });
+    execute_counted_map_delete_batch(
+        keys,
+        |key| map.remove(key),
+        "remove GROUP_STATS entry",
+    )
+    .map(|_| ())
 }
 
 /// Remove the QOS_STATS entry for a specific QoS rule key.

@@ -2,7 +2,10 @@ use crate::common::{
     TapMapRuntime, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
     DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP,
 };
-use aya::maps::{HashMap, MapData};
+use crate::ebpf_ops::{
+    classify_map_delete, collect_iterated_items, execute_counted_map_delete_batch,
+};
+use aya::maps::{HashMap, MapData, MapError};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug)]
@@ -188,6 +191,13 @@ pub fn clear_trace_filter(runtime: TapMapRuntime<'_>) -> Result<(), String> {
     delete_trace_filter(runtime).map(|_| ())
 }
 
+fn delete_trace_filter_entry<F>(remove: F, context: &str) -> Result<bool, String>
+where
+    F: FnOnce() -> Result<(), MapError>,
+{
+    classify_map_delete(remove(), context)
+}
+
 pub fn delete_trace_filter(runtime: TapMapRuntime<'_>) -> Result<bool, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_FILTER", pin_path);
@@ -196,13 +206,10 @@ pub fn delete_trace_filter(runtime: TapMapRuntime<'_>) -> Result<bool, String> {
     let mut map = HashMap::<_, u32, TraceFilter>::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert TRACE_FILTER: {:?}", e))?;
 
-    if map.get(&runtime.tap_id, 0).is_err() {
-        return Ok(false);
-    }
-
-    map.remove(&runtime.tap_id)
-        .map_err(|e| format!("remove TRACE_FILTER: {:?}", e))?;
-    Ok(true)
+    delete_trace_filter_entry(
+        || map.remove(&runtime.tap_id),
+        &format!("remove TRACE_FILTER tap {}", runtime.tap_id),
+    )
 }
 
 pub fn scrub_trace_filter(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
@@ -264,34 +271,67 @@ pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         HashMap::<_, TraceEventKey, TraceEvent>::try_from(aya::maps::Map::LruHashMap(map_data))
             .map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
 
-    let keys: Vec<TraceEventKey> = map
-        .iter()
-        .filter_map(|item| item.ok().map(|(key, _)| key))
+    let keys: Vec<TraceEventKey> = collect_iterated_items(map.iter(), "TRACE_LOG")?
+        .into_iter()
+        .map(|(key, _)| key)
         .filter(|key| key.tap_id == runtime.tap_id)
         .collect();
-    let mut count = keys.len() as u64;
-    for key in keys {
-        let _ = map.remove(&key);
-    }
 
     let v6_map_path = format!("{}/TRACE_LOG_V6", pin_path);
-    if let Ok(v6_map_data) = MapData::from_pin(&v6_map_path) {
-        if let Ok(mut v6_map) = HashMap::<_, TraceEventKey, TraceEventV6>::try_from(
-            aya::maps::Map::LruHashMap(v6_map_data),
-        ) {
-            let keys: Vec<TraceEventKey> = v6_map
-                .iter()
-                .filter_map(|item| item.ok().map(|(key, _)| key))
-                .filter(|key| key.tap_id == runtime.tap_id)
-                .collect();
-            count += keys.len() as u64;
-            for key in keys {
-                let _ = v6_map.remove(&key);
-            }
-        }
-    }
+    let mut v6_map = match MapData::from_pin(&v6_map_path) {
+        Ok(v6_map_data) => Some(
+            HashMap::<_, TraceEventKey, TraceEventV6>::try_from(aya::maps::Map::LruHashMap(
+                v6_map_data,
+            ))
+            .map_err(|e| format!("convert TRACE_LOG_V6: {:?}", e))?,
+        ),
+        Err(error) if pin_missing(&error) => None,
+        Err(error) => return Err(format!("open TRACE_LOG_V6: {:?}", error)),
+    };
+    let v6_keys = match v6_map.as_ref() {
+        Some(map) => collect_iterated_items(map.iter(), "TRACE_LOG_V6")?
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.tap_id == runtime.tap_id)
+            .collect(),
+        None => Vec::new(),
+    };
 
-    Ok(count)
+    let v4_result = execute_counted_map_delete_batch(
+        keys,
+        |key| map.remove(key),
+        "remove TRACE_LOG entry",
+    );
+    let v6_result = match v6_map.as_mut() {
+        Some(map) => execute_counted_map_delete_batch(
+            v6_keys,
+            |key| map.remove(key),
+            "remove TRACE_LOG_V6 entry",
+        ),
+        None => Ok(0),
+    };
+
+    match (v4_result, v6_result) {
+        (Ok(v4), Ok(v6)) => Ok(v4 + v6),
+        (Err(v4), Ok(_)) => Err(v4),
+        (Ok(_), Err(v6)) => Err(v6),
+        (Err(v4), Err(v6)) => Err(format!("{}; {}", v4, v6)),
+    }
+}
+
+fn pin_missing(error: &MapError) -> bool {
+    match error {
+        MapError::SyscallError(syscall) => {
+            syscall.io_error.kind() == std::io::ErrorKind::NotFound
+        }
+        MapError::PinError { error: pin_error, .. } => match pin_error {
+            aya::pin::PinError::SyscallError(syscall) => {
+                syscall.io_error.kind() == std::io::ErrorKind::NotFound
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 #[cfg(test)]

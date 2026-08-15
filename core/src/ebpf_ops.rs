@@ -72,6 +72,7 @@ pub use runtime::{
     update_firewall_config, update_runtime_config, write_tap_config,
 };
 pub use scrub::{scrub_acl_bank, scrub_managed_runtime_state, scrub_standalone_runtime_state};
+pub(crate) use scrub::collect_iterated_items;
 
 const TAP_LPM_PREFIX_BITS: u32 = 32;
 
@@ -148,7 +149,7 @@ fn open_pinned_tap_config(pin_path: &str) -> Result<HashMap<MapData, u32, TapCon
 
 /// Classify one idempotent map deletion without collapsing operational faults
 /// into a false "not found" success.
-fn classify_map_delete(
+pub(crate) fn classify_map_delete(
     result: Result<(), aya::maps::MapError>,
     context: &str,
 ) -> Result<bool, String> {
@@ -161,6 +162,35 @@ fn classify_map_delete(
             Ok(false)
         }
         Err(error) => Err(format!("{}: {}", context, error)),
+    }
+}
+
+/// Execute every requested delete, count only entries that were actually
+/// removed, and aggregate all non-idempotent failures.
+pub(crate) fn execute_counted_map_delete_batch<T, I, F>(
+    items: I,
+    mut remove: F,
+    context: &str,
+) -> Result<u64, String>
+where
+    T: std::fmt::Debug,
+    I: IntoIterator<Item = T>,
+    F: FnMut(&T) -> Result<(), aya::maps::MapError>,
+{
+    let mut removed = 0u64;
+    let mut errors = Vec::new();
+    for item in items {
+        let item_context = format!("{} {:?}", context, item);
+        match classify_map_delete(remove(&item), &item_context) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+    if errors.is_empty() {
+        Ok(removed)
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -255,7 +285,7 @@ mod map_delete_tests {
             [1u16, 2, 3],
             |port| {
                 attempted.push(*port);
-                match port {
+                match *port {
                     2 => Err(MapError::KeyNotFound),
                     _ => Ok(()),
                 }
@@ -275,7 +305,7 @@ mod map_delete_tests {
             [1u16, 2, 3, 4],
             |port| {
                 attempted.push(*port);
-                match port {
+                match *port {
                     1 => Err(MapError::InvalidKeySize {
                         size: 1,
                         expected: 8,

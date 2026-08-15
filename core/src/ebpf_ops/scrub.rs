@@ -58,7 +58,7 @@ impl HasTapId for GlobalMirrorKey {
     }
 }
 
-fn collect_iterated_items<Item, E: std::fmt::Debug>(
+pub(crate) fn collect_iterated_items<Item, E: std::fmt::Debug>(
     items: impl IntoIterator<Item = Result<Item, E>>,
     map_name: &str,
 ) -> Result<Vec<Item>, String> {

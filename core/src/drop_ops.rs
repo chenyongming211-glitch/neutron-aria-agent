@@ -1,4 +1,5 @@
 use crate::common::{DropKey, DropValue, TapMapRuntime};
+use crate::ebpf_ops::{collect_iterated_items, execute_counted_map_delete_batch};
 use aya::maps::{MapData, PerCpuHashMap, PerCpuValues};
 
 pub struct DropStatsEntry {
@@ -71,14 +72,13 @@ pub fn flush_drop_stats(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         PerCpuHashMap::<_, DropKey, DropValue>::try_from(aya::maps::Map::PerCpuHashMap(map_data))
             .map_err(|e| format!("convert DROP_REASON_STATS: {:?}", e))?;
 
-    let keys: Vec<DropKey> = map
-        .keys()
-        .filter_map(|k| k.ok())
+    let keys: Vec<DropKey> = collect_iterated_items(map.keys(), "DROP_REASON_STATS")?
+        .into_iter()
         .filter(|key| key.tap_id == runtime.tap_id)
         .collect();
-    let count = keys.len() as u64;
-    for key in keys {
-        let _ = map.remove(&key);
-    }
-    Ok(count)
+    execute_counted_map_delete_batch(
+        keys,
+        |key| map.remove(key),
+        "remove DROP_REASON_STATS entry",
+    )
 }
