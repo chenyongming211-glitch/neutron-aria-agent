@@ -7,6 +7,21 @@ MODE="${MODE:-system}"
 case "${MODE}" in system|tap) ;; *) echo "ERROR: MODE must be system or tap" >&2; exit 2 ;; esac
 [ "${EUID}" -eq 0 ] || { echo "ERROR: root is required" >&2; exit 2; }
 
+# These names and records are a field-matrix interface.  They do not claim
+# traffic success: absent prerequisites use status="deferred/pending".
+FIELD_EVIDENCE_STATUS="${FIELD_EVIDENCE_STATUS:-deferred/pending}"
+STANDALONE_ETHERTYPE_ANY_SMOKE="${STANDALONE_ETHERTYPE_ANY_SMOKE:-0}"
+ETHERTYPE_ANY_EXPANSION_COMMAND="${ETHERTYPE_ANY_EXPANSION_COMMAND:-}"
+CASE_IPV4_ONLY="ipv4-only"
+CASE_IPV6_ONLY="ipv6-only"
+CASE_DUAL_STACK="dual-stack"
+CASE_WILDCARD_ISOLATION="wildcard-isolation"
+CASE_FRAGMENT="fragment"
+CASE_STATEFUL_REPLY="stateful-reply"
+CASE_UPGRADE="upgrade"
+CASE_ROLLBACK="rollback"
+FIELD_CASES=("${CASE_IPV4_ONLY}" "${CASE_IPV6_ONLY}" "${CASE_DUAL_STACK}" "${CASE_WILDCARD_ISOLATION}" "${CASE_FRAGMENT}" "${CASE_STATEFUL_REPLY}" "${CASE_UPGRADE}" "${CASE_ROLLBACK}")
+
 RUN_ID="${RUN_ID:-standalone-tc-acl-$(date +%Y%m%d%H%M%S)-$$-${RANDOM}-${RANDOM}}"
 WORK_DIR="${WORK_DIR:-/tmp/${RUN_ID}}"
 TC_HEALTH_WAIT_SECS="${TC_HEALTH_WAIT_SECS:-12}"
@@ -81,6 +96,67 @@ XDP_REPORTED_NOT_READY=false
 XDP_STALE_PIN_NOT_CLAIMED=false
 XDP_TC_ACL_INDEPENDENT=false
 cleanup_errors=()
+
+record_field_case() {
+    local case_name="$1" command="$2" expected_verdict="$3" observed_verdict="$4" status="$5" ifindex="unknown"
+    [ -n "${HOST_IF}" ] && [ -r "/sys/class/net/${HOST_IF}/ifindex" ] && ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
+    CASE_NAME="${case_name}" CASE_COMMAND="${command}" EXPECTED_VERDICT="${expected_verdict}" \
+    OBSERVED_VERDICT="${observed_verdict}" CASE_STATUS="${status}" CASE_IFINDEX="${ifindex}" \
+    python3 - <<'PY' >>"${WORK_DIR}/field-case-results.jsonl"
+import json,os,platform
+print(json.dumps({
+    "case": os.environ["CASE_NAME"], "command": os.environ["CASE_COMMAND"],
+    "expected_verdict": os.environ["EXPECTED_VERDICT"], "observed_verdict": os.environ["OBSERVED_VERDICT"],
+    "interface": os.environ.get("HOST_IF", "unknown"), "ifindex": os.environ["CASE_IFINDEX"],
+    "kernel": platform.release(), "agent_version": os.environ.get("AGENT_VERSION", "unknown"),
+    "datapath_version": os.environ.get("DATAPATH_VERSION", "unknown"),
+    "status_snapshot": "pending capture", "counter_snapshot": "pending capture",
+    "status": os.environ["CASE_STATUS"],
+}, sort_keys=True))
+PY
+}
+
+record_deferred_field_cases() {
+    local case_name
+    for case_name in "${FIELD_CASES[@]}"; do
+        record_field_case "${case_name}" "ethertype=any expansion and field topology prerequisite" "traffic verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    done
+}
+
+run_ethertype_any_expansion_smoke() {
+    case "${STANDALONE_ETHERTYPE_ANY_SMOKE}" in
+        0)
+            record_deferred_field_cases
+            return 0
+            ;;
+        1) ;;
+        *) die "STANDALONE_ETHERTYPE_ANY_SMOKE must be 0 or 1" ;;
+    esac
+    if [ -z "${ETHERTYPE_ANY_EXPANSION_COMMAND}" ]; then
+        record_deferred_field_cases
+        return 0
+    fi
+    # The supplied standalone CLI/API command must create ethertype=any and
+    # print its materialized rules.  Assert expansion, rather than accepting a
+    # wildcard family or a single implicit IPv4 rule.
+    sh -c "${ETHERTYPE_ANY_EXPANSION_COMMAND}" >"${WORK_DIR}/ethertype-any-expansion.json"
+    python3 - "${WORK_DIR}/ethertype-any-expansion.json" <<'PY' || die "ethertype=any did not expand to both families"
+import json,sys
+payload=json.load(open(sys.argv[1],encoding="utf-8"))
+rows=payload.get("rules") or payload.get("aria_acl_rules") or payload
+assert isinstance(rows,list),payload
+families={row.get("ethertype") for row in rows}
+assert families=={"IPv4","IPv6"},families
+PY
+    record_field_case "${CASE_WILDCARD_ISOLATION}" "${ETHERTYPE_ANY_EXPANSION_COMMAND}" "ethertype=any expands IPv4+IPv6" "two family-qualified rules observed" "pass"
+    record_field_case "${CASE_IPV4_ONLY}" "standalone IPv4 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_IPV6_ONLY}" "standalone IPv6 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_DUAL_STACK}" "standalone dual-stack fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_FRAGMENT}" "field topology prerequisite" "fragment verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_STATEFUL_REPLY}" "field topology prerequisite" "stateful reply verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_UPGRADE}" "field topology prerequisite" "upgrade verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_ROLLBACK}" "field topology prerequisite" "rollback verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+}
 
 die() {
     FAILURE_REASON="$*"
@@ -1461,6 +1537,8 @@ need_command tc
 need_command umount
 [ -x "${ARIA_AGENT_BIN}" ] || die "ARIA_AGENT_BIN is not executable: ${ARIA_AGENT_BIN}"
 [ -r "${EBPF_OBJECT}" ] || die "EBPF_OBJECT is not readable: ${EBPF_OBJECT}"
+# A standalone fixture has no managed ports; zero managed ports is a failure
+# in managed smoke, never a PASS.
 
 derive_fixture_identity
 select_http_addr
@@ -1491,6 +1569,7 @@ else
 fi
 run_fragment_tracking_field_smoke
 run_xdp_link_identity_field_smoke
+run_ethertype_any_expansion_smoke
 
 BODY_SUCCEEDED=true
 FAILURE_REASON=""

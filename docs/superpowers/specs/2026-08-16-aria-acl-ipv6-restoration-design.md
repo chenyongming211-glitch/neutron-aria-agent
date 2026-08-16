@@ -661,3 +661,21 @@ IPv6 ACL restoration is complete when all of the following are true:
 - the real OpenStack/4.18 field matrix passes with evidence; and
 - production enablement remains default-off until that field evidence is
   reviewed and accepted.
+
+## 18. Task 11 integration status
+
+Status: **implementation complete pending exact-head hosted CI**. Fixed CI
+discovers non-zero `acl_family_`, `acl_ipv6_`, `neutron_acl_ipv6_`, and
+`acl_runtime_schema_` Rust filters plus the high-value Python family,
+migration, and counters behaviors. Smoke entrypoints expose case names and
+evidence fields only; they do not report privileged traffic as PASS. Missing
+case prerequisites are recorded `deferred/pending`, while zero managed ports
+is a failure.
+
+The product contract remains one-rule/one-family (omitted `ethertype=IPv4`,
+`any` expands); ICMP is family-mapped, there is no hidden ND bypass, and
+address sets/runtime/counters are family-qualified. Python-first deployment,
+runtime schema 3/policy-key schema 2 rebuild, symmetric rollback, and
+default-off IPv6/counters remain mandatory. The exact-head CI URL is appended
+only after that run passes; Task 12 remains the sole producer of OpenStack/4.18
+field PASS evidence.

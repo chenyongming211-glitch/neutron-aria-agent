@@ -9,6 +9,108 @@ MIN_HIT_PACKETS="${MIN_HIT_PACKETS:-8}"
 : "${VM_IP:?VM_IP is required}"
 mkdir -p "${WORK_DIR}"
 
+# Field matrix records are deliberately distinct from this script's local
+# cleanup result.  They are deferred until a real OpenStack/4.18 run supplies
+# the matching topology; status="deferred/pending" is never a PASS.
+FIELD_EVIDENCE_STATUS="${FIELD_EVIDENCE_STATUS:-deferred/pending}"
+FIELD_DUAL_STACK_SMOKE="${FIELD_DUAL_STACK_SMOKE:-0}"
+VM_IPV4="${VM_IPV4:-}"
+VM_IPV6="${VM_IPV6:-}"
+CASE_IPV4_ONLY="ipv4-only"
+CASE_IPV6_ONLY="ipv6-only"
+CASE_DUAL_STACK="dual-stack"
+CASE_WILDCARD_ISOLATION="wildcard-isolation"
+CASE_FRAGMENT="fragment"
+CASE_STATEFUL_REPLY="stateful-reply"
+CASE_UPGRADE="upgrade"
+CASE_ROLLBACK="rollback"
+FIELD_CASES=("${CASE_IPV4_ONLY}" "${CASE_IPV6_ONLY}" "${CASE_DUAL_STACK}" "${CASE_WILDCARD_ISOLATION}" "${CASE_FRAGMENT}" "${CASE_STATEFUL_REPLY}" "${CASE_UPGRADE}" "${CASE_ROLLBACK}")
+
+record_field_case() {
+    local case_name="$1" command="$2" expected_verdict="$3" observed_verdict="$4" status="$5"
+    local ifindex="unknown"
+    [ -r "/sys/class/net/${EXPECTED_IFNAME}/ifindex" ] && ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")"
+    CASE_NAME="${case_name}" CASE_COMMAND="${command}" EXPECTED_VERDICT="${expected_verdict}" \
+    OBSERVED_VERDICT="${observed_verdict}" CASE_STATUS="${status}" CASE_IFINDEX="${ifindex}" \
+    python3 - <<'PY' >>"${WORK_DIR}/field-case-results.jsonl"
+import json,os,platform
+print(json.dumps({
+    "case": os.environ["CASE_NAME"], "command": os.environ["CASE_COMMAND"],
+    "expected_verdict": os.environ["EXPECTED_VERDICT"], "observed_verdict": os.environ["OBSERVED_VERDICT"],
+    "interface": os.environ.get("EXPECTED_IFNAME", "unknown"), "ifindex": os.environ["CASE_IFINDEX"],
+    "kernel": platform.release(), "agent_version": os.environ.get("AGENT_VERSION", "unknown"),
+    "datapath_version": os.environ.get("DATAPATH_VERSION", "unknown"),
+    "status_snapshot": "pending capture", "counter_snapshot": "pending capture",
+    "status": os.environ["CASE_STATUS"],
+}, sort_keys=True))
+PY
+}
+
+record_deferred_field_cases() {
+    local case_name
+    for case_name in "${FIELD_CASES[@]}"; do
+        record_field_case "${case_name}" "field topology prerequisite" "traffic verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    done
+}
+
+create_field_family_rule() {
+    local direction="$1" ethertype="$2" protocol="$3" body id
+    body="$(printf '{"aria_acl_rule":{"policy_id":"%s","direction":"%s","priority":90,"action":"allow","protocol":"%s","ethertype":"%s"}}' \
+        "${policy_id}" "${direction}" "${protocol}" "${ethertype}")"
+    id="$(curl_body POST aria-acl-rules "${body}" | json_field aria_acl_rule.id)"
+    [ -n "${id}" ] || die "failed to create ${ethertype} ${direction} field rule"
+    rule_ids+=("${id}")
+    created_rule_ids+=("${id}")
+}
+
+run_field_family_traffic() {
+    local case_name="$1" family_flag="$2" destination="$3" protocol="$4" source label
+    label="field-${case_name}"
+    source="$(ip "${family_flag}" route get "${destination}" | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')"
+    [ -n "${source}" ] || die "${case_name} has no routed source for ${destination}"
+    set_trace_filter "${source}" "${destination}"
+    capture "${label}-before"
+    ping "${family_flag}" -c 2 -W 1 -s "${PING_PAYLOAD_BYTES}" "${destination}" >"${WORK_DIR}/${label}-traffic.log" 2>&1 \
+        || die "${case_name} VM traffic failed"
+    capture "${label}-after"
+    record_field_case "${case_name}" "ping ${family_flag} ${destination}" "allow in both TC directions" "allow observed" "pass"
+}
+
+run_dual_stack_field_smoke() {
+    case "${FIELD_DUAL_STACK_SMOKE}" in
+        0)
+            record_deferred_field_cases
+            return 0
+            ;;
+        1) ;;
+        *) die "FIELD_DUAL_STACK_SMOKE must be 0 or 1" ;;
+    esac
+    if [ -z "${VM_IPV4}" ] || [ -z "${VM_IPV6}" ]; then
+        record_deferred_field_cases
+        return 0
+    fi
+    curl_body GET aria-acl-port-statuses >"${WORK_DIR}/field-managed-port-status.json"
+    python3 - "${WORK_DIR}/field-managed-port-status.json" "${EXPECTED_PORT_ID}" <<'PY' || die "zero managed ports is a field failure"
+import json,sys
+rows=json.load(open(sys.argv[1],encoding="utf-8")).get("aria_acl_port_statuses") or []
+assert any(row.get("port_id")==sys.argv[2] for row in rows),rows
+PY
+    create_field_family_rule ingress IPv4 icmp
+    create_field_family_rule egress IPv4 icmp
+    create_field_family_rule ingress IPv6 58
+    create_field_family_rule egress IPv6 58
+    run_full_resync >"${WORK_DIR}/field-dual-stack-resync.log"
+    wait_port_enforced || die "managed port did not enforce the dual-stack field rules"
+    run_field_family_traffic "${CASE_IPV4_ONLY}" -4 "${VM_IPV4}" icmp
+    run_field_family_traffic "${CASE_IPV6_ONLY}" -6 "${VM_IPV6}" 58
+    record_field_case "${CASE_DUAL_STACK}" "IPv4 and IPv6 VM ping matrix" "both families allow" "both single-family cases observed" "pass"
+    record_field_case "${CASE_WILDCARD_ISOLATION}" "field topology prerequisite" "opposite family remains isolated" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_FRAGMENT}" "field topology prerequisite" "fragment verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_STATEFUL_REPLY}" "field topology prerequisite" "stateful reply verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_UPGRADE}" "field topology prerequisite" "upgrade verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_field_case "${CASE_ROLLBACK}" "field topology prerequisite" "rollback verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+}
+
 SERVICE_NAME="${SERVICE_NAME:-neutron_aria_agent}"
 EXEC_USER="${EXEC_USER:-neutron}"
 ADMIN_RC_FILE="${ADMIN_RC_FILE:-/etc/kolla/.adminrc}"
@@ -2051,6 +2153,8 @@ need_command ip
 need_command ping
 need_command tc
 [ -n "${EXPECTED_PORT_ID}" ] || die "EXPECTED_PORT_ID is required"
+# Zero managed ports is a failure, never a PASS; do not convert this preflight
+# into a skipped field case.
 [ -r "${ADMIN_RC_FILE}" ] || die "Kolla credentials file is not readable: ${ADMIN_RC_FILE}"
 [ -S "${NEUTRON_UDS}" ] || die "Neutron UDS is not available: ${NEUTRON_UDS}"
 ip link show dev "${EXPECTED_IFNAME}" >/dev/null 2>&1 || die "EXPECTED_IFNAME does not exist"
@@ -2145,6 +2249,7 @@ case "${SELECTOR_FIXTURE_SCOPE}" in
     *) die "unsupported SELECTOR_FIXTURE_SCOPE: ${SELECTOR_FIXTURE_SCOPE}" ;;
 esac
 run_fragment_tracking_field_smoke
+run_dual_stack_field_smoke
 
 BODY_SUCCEEDED=true
 FAILURE_REASON=""

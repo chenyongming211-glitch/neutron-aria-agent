@@ -59,8 +59,9 @@ NEUTRON_GID=42435 \
 
 MIDDLE_FIELD_MISMATCH="${TMP_DIR}/middle-field-mismatch.toml"
 cp "${FIRST_RENDER}" "${MIDDLE_FIELD_MISMATCH}"
-sed -i 's/^neutron_peercred_allowed_gids = \[42435\]$/neutron_peercred_allowed_gids = []/' \
+sed -i.bak 's/^neutron_peercred_allowed_gids = \[42435\]$/neutron_peercred_allowed_gids = []/' \
     "${MIDDLE_FIELD_MISMATCH}"
+rm -f "${MIDDLE_FIELD_MISMATCH}.bak"
 bash -c 'source "$1"; type check_config >/dev/null' _ "${INSTALLER}"
 if CONFIG_PATH="${MIDDLE_FIELD_MISMATCH}" \
     NEUTRON_UID=42435 \

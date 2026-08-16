@@ -61,3 +61,9 @@ Counter reporting ships disabled (`counters_report_enabled=false`) until field
 RED/GREEN evidence exists. No field evidence is claimed for this pipeline; any
 evidence recorded in `docs/evidence` follows the deferred/pending rules in
 AGENTS.md.
+
+IPv4 and IPv6 counter buckets and reason rows are family-qualified. Runtime
+schema 3 and policy-key schema 2 require a rebuild on upgrade and the same
+gate-off/detach/rebuild/verify/attach sequence on rollback; they must not reuse
+mixed live maps. This observability contract does not enable counters by
+default or convert field `deferred/pending` rows into PASS.

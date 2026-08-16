@@ -18,6 +18,16 @@ SUMMARY_FIELDS = (
     '"failure_reason"', '"work_dir"', '"run_id"', '"host_if"', '"netns"',
     '"http_addr"',
 )
+FIELD_CASES = (
+    "CASE_IPV4_ONLY", "CASE_IPV6_ONLY", "CASE_DUAL_STACK",
+    "CASE_WILDCARD_ISOLATION", "CASE_FRAGMENT", "CASE_STATEFUL_REPLY",
+    "CASE_UPGRADE", "CASE_ROLLBACK",
+)
+FIELD_EVIDENCE_FIELDS = (
+    '"command"', '"expected_verdict"', '"observed_verdict"', '"interface"',
+    '"ifindex"', '"kernel"', '"agent_version"', '"datapath_version"',
+    '"status_snapshot"', '"counter_snapshot"', '"status"',
+)
 
 
 def main():
@@ -41,7 +51,9 @@ def main():
         'MODE="${MODE:-system}"', 'case "${MODE}" in system|tap)', "write_summary() {",
         "curl() {", 'command curl -q "$@"',
         "summary.json.tmp", 'mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json"',
-    ) + SUMMARY_FIELDS
+        "record_field_case()", "record_deferred_field_cases()", "run_ethertype_any_expansion_smoke()",
+        "ethertype=any expansion", "FIELD_EVIDENCE_STATUS=\"${FIELD_EVIDENCE_STATUS:-deferred/pending}\"",
+    ) + SUMMARY_FIELDS + FIELD_CASES + FIELD_EVIDENCE_FIELDS
     missing = [term for term in required if term not in source]
     if missing:
         print("ERROR: standalone TC ACL smoke public contract missing %s" % ", ".join(missing))
@@ -49,7 +61,7 @@ def main():
     if "--fail-with-body" in source:
         print("ERROR: standalone TC ACL smoke requires curl newer than the legacy target")
         return 1
-    print("Standalone TC ACL smoke entrypoint and evidence schema: OK")
+    print("Standalone TC ACL smoke entrypoint and static field-evidence schema: OK")
     return 0
 
 

@@ -219,3 +219,12 @@ Minimum tests:
 | Snapshot with ACL apply failure | ACL domain degraded, `effective_action=bypass`, OVS forwarding unaffected. |
 | Neutron communication failure after accepted snapshot | Remains Neutron-managed/degraded; local writes for managed domains stay blocked. |
 | Break-glass, if enabled | Explicit only; writes local override WAL; rejoin defaults to Neutron wins. |
+
+## Dual-stack ACL identity
+
+Managed ACL compilation produces one rule per family: omitted `ethertype` is
+`IPv4`, and `any` is explicit IPv4 plus IPv6 expansion. `icmp` is mapped by
+the selected family and there is no hidden Neighbor Discovery bypass. Every
+address set is single-family; policy runtime and counter rows carry the family
+so equal selector IDs cannot alias. Packaged IPv6 ACL and counters remain
+default-off, and field execution is `deferred/pending` until Task 12.

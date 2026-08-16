@@ -763,3 +763,13 @@ Break-glass is not a default product path. If implemented:
 - it must write a local override WAL, not Neutron WAL;
 - rejoin must default to Neutron wins;
 - local overrides must be archived or discarded before full resync resumes.
+
+## IPv6 ACL upgrade and rollback gate
+
+Use Python-first expand-contract rollout: deploy the compatibility client with
+`ipv6_acl_enabled=false` and counters disabled, then deploy the runtime. The
+runtime upgrade rebuilds policy-key schema 2 and runtime schema 3 rather than
+reusing live maps. Rollback is symmetric: gate off, detach, rebuild the prior
+schema/maps, verify, attach, then enable. Do not enable IPv6 in a packaged
+environment until the Task 12 OpenStack/4.18 matrix is recorded as real
+evidence; before then every field row is `deferred/pending`.

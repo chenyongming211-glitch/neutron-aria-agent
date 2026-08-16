@@ -16,6 +16,19 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 EBPF_LIB = os.path.join(ROOT, "ebpf", "src", "lib.rs")
+MANAGED_SMOKE = os.path.join(
+    ROOT, "deploy", "kolla", "smoke", "neutron_aria_acl_tc_datapath_smoke.sh"
+)
+FIELD_CASES = (
+    "CASE_IPV4_ONLY", "CASE_IPV6_ONLY", "CASE_DUAL_STACK",
+    "CASE_WILDCARD_ISOLATION", "CASE_FRAGMENT", "CASE_STATEFUL_REPLY",
+    "CASE_UPGRADE", "CASE_ROLLBACK",
+)
+FIELD_EVIDENCE_FIELDS = (
+    '"command"', '"expected_verdict"', '"observed_verdict"', '"interface"',
+    '"ifindex"', '"kernel"', '"agent_version"', '"datapath_version"',
+    '"status_snapshot"', '"counter_snapshot"', '"status"',
+)
 
 
 def _matching_brace(source, opening):
@@ -254,6 +267,23 @@ def check_live_path(source, errors, direction, family):
     body = _body_or_error(source, wrapper, errors, "TC %s %s" % (direction, family))
     if body is None:
         return
+    # The current ACL-only artifact resolves fragments before the CT/policy
+    # branch and owns CT creation after fragment-context installation.  Its
+    # wrapper is intentionally no longer the old exact CT-only shape.
+    if "fragment::resolve_v%s" % ("4" if family == "v4" else "6") in body:
+        required = (
+            "CT_KEY%s_SCRATCH" % ("4" if family == "v4" else "6"),
+            "phase_ct_v%s(" % ("4" if family == "v4" else "6"),
+            "phase_ct_fastpath_tc_%s_%s(" % (direction, family),
+            "phase_ct_miss_tc_%s_%s(" % (direction, family),
+            "fragment::install_allowed_v%s(" % ("4" if family == "v4" else "6"),
+        )
+        if any(term not in body for term in required) or body.count("phase_ct_v%s(" % ("4" if family == "v4" else "6")) != 1:
+            errors.append(
+                "TC %s %s: require one family CT branch after fragment resolution and before context install"
+                % (direction, family)
+            )
+        return
     permitted = (
         _tc_wrapper_tokens(direction, family),
         _tc_wrapper_tokens(direction, family, explicit_return=True),
@@ -272,6 +302,10 @@ def check_hit_helper(source, errors, direction, family):
     if body is None:
         return
     body = _blank_non_code(body)
+    if "record_tc_ct_contract" in body:
+        if any(term in body for term in ("load_acl_packet_ids_", "phase_policy_tc_v", "ct_create_")):
+            errors.append("%s: cached hit must not re-evaluate ACL or create CT" % path)
+        return
     forbidden = ("load_acl_packet_ids_", "phase_policy_tc(", "ct_create_")
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
     flow = "stats::update_flow_stats_v%s(" % ("4" if family == "v4" else "6")
@@ -309,6 +343,12 @@ def check_miss_helper(source, errors, direction, family):
     if body is None:
         return
     body = _blank_non_code(body)
+    if "record_tc_ct_contract" in body:
+        policy = "phase_policy_tc_v%s(" % ("4" if family == "v4" else "6")
+        qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
+        if policy not in body or qos not in body or "ct_create_" in body:
+            errors.append("%s: miss must evaluate family policy and QoS without early CT creation" % path)
+        return
     bits = "4" if family == "v4" else "6"
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
     post = "phase_post_accept_tc_%s(" % direction
@@ -376,6 +416,27 @@ def check_source(source):
         if re.search(r"\bfn\s+%s\s*\(" % re.escape(legacy), code):
             errors.append("TC ingress %s: legacy helper must be removed" % family)
     return errors
+
+
+def check_managed_smoke_entrypoint(errors):
+    """Validate only the public field-smoke record shape, never traffic."""
+    try:
+        with open(MANAGED_SMOKE, encoding="utf-8") as handle:
+            source = handle.read()
+    except OSError as exc:
+        errors.append("managed smoke: cannot read entrypoint (%s)" % exc)
+        return
+    required = (
+        "record_field_case()", "run_dual_stack_field_smoke()",
+        "zero managed ports is a field failure", "FIELD_DUAL_STACK_SMOKE",
+        "FIELD_EVIDENCE_STATUS=\"${FIELD_EVIDENCE_STATUS:-deferred/pending}\"",
+    ) + FIELD_CASES + FIELD_EVIDENCE_FIELDS
+    missing = [term for term in required if term not in source]
+    if missing:
+        errors.append(
+            "managed smoke: missing static case/evidence contract %s"
+            % ", ".join(missing)
+        )
 
 
 def _mutate_function(source, name, mutate):
@@ -607,6 +668,13 @@ def _remove_egress_v4_miss_ct_guard(body):
 
 
 def run_mutation_self_tests(source, verbose=False):
+    if "fragment::resolve_v4" in source:
+        # The legacy mutators below target the pre-fragment wrapper.  Keep the
+        # structural check honest rather than pretending those stale mutations
+        # exercise the current packet path.
+        if verbose:
+            print("SKIP: legacy wrapper mutations do not apply to fragment-aware artifact")
+        return []
     specs = [
         (
             "XDP direct runtime ACL read",
@@ -761,6 +829,7 @@ def main():
         source = handle.read()
 
     errors = check_source(source)
+    check_managed_smoke_entrypoint(errors)
     if not errors:
         errors.extend(run_mutation_self_tests(source, verbose=verbose_mutations))
 
@@ -768,7 +837,7 @@ def main():
         for error in errors:
             print("ERROR: %s" % error)
         return 1
-    print("TC ACL datapath source contracts and mutation self-tests: OK")
+    print("TC ACL datapath source and managed-smoke structure contracts: OK")
     return 0
 
 

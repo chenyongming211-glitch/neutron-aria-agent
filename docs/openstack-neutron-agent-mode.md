@@ -4403,3 +4403,12 @@ python -m pytest -q
 - 多租户按 Neutron project/RBAC 关系适配，使用 scoped object key 隔离 state、WAL、refcount 和 pinned map ID。
 - Group、Conntrack、Monitoring、WAL、Netlink、Pinned Maps 作为必选支撑能力随 N1/N2 一起落地。
 - trace、drops、ssl、diagnose、service chain 等其它已有能力代码保留，但不作为 OpenStack agent mode 对外功能暴露。
+
+### IPv6 ACL rollout boundary
+
+Deploy the Python expand-contract client first, with `ipv6_acl_enabled=false`
+and counters default-off. A rule is one family (omitted `ethertype=IPv4`);
+`any` is expanded into two isolated rules. ICMP is family-mapped and ND has no
+implicit allow path. Address-set, runtime-policy, and counter identities are
+family-qualified. OpenStack/4.18 smoke rows remain `deferred/pending` until
+Task 12 supplies real commands and observations.

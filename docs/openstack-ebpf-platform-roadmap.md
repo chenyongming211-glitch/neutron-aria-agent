@@ -406,3 +406,13 @@ but the current product commitment is ACL first: Neutron `aria_acl` input,
 `neutron-aria-agent` snapshot sync, `aria-datapath` UDS/WAL apply, runtime status,
 and safe rollback. QoS, Mirror, and broader observability remain staged domain
 expansions, not current ACL-stage commitments.
+
+### IPv6 ACL field gate
+
+The current ACL-only generation includes dual-stack contracts but keeps
+`ipv6_acl_enabled=false` and counters default-off. Python expand-contract
+compatibility precedes the runtime rebuild to schema 3/policy-key schema 2;
+rollback is symmetric and does not reuse live maps. The OpenStack/4.18 smoke
+matrix, including IPv4-only, IPv6-only, dual-stack, fragment, stateful reply,
+upgrade, and rollback, is `deferred/pending` until Task 12. It is not a claim
+that the bounded monolithic TC path has received new non-ACL functionality.

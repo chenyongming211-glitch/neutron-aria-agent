@@ -59,6 +59,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod", "fragment_"],
     ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod", "acl_family_"],
     ["test", "--locked", "-p", "aria-core", "acl_ipv6_"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_acl_ipv6_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_tc_acl_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_runtime_transition_is_atomic"],
@@ -105,7 +106,21 @@ RUST_TESTS = [
     ["test", "-p", "aria-agent", "startup_mode"],
 ]
 
+# These filters are a release contract, not a best-effort test selection.  The
+# runner below rejects a command that succeeds after executing zero tests.
+IPV6_REQUIRED_RUST_FILTERS = (
+    "acl_family_", "acl_ipv6_", "neutron_acl_ipv6_", "acl_runtime_schema_",
+)
+
 REQUIRED_PYTHON_BEHAVIORS = (
+    "neutron_aria.tests.unit.test_acl_contract.AclContractTestCase."
+    "test_rule_accepts_ipv6_and_resolves_icmp_by_family",
+    "neutron_aria.tests.unit.test_acl_contract.AclContractTestCase."
+    "test_address_set_family_is_single_and_computed",
+    "neutron_aria.tests.unit.test_aria_acl_write_migration.AriaAclWriteMigrationTestCase."
+    "test_runtime_upgrade_rejects_partially_migrated_schema",
+    "neutron_aria.tests.unit.test_aria_acl_counter_migration.AriaAclCounterMigrationTestCase."
+    "test_counter_migration_adds_nullable_family_and_rebuilds_unique_index",
     "neutron_aria.tests.unit.test_agent_inventory.AgentInventoryTestCase."
     "test_snapshot_marks_only_regular_ovs_vm_tap_eligible",
     "neutron_aria.tests.unit.test_config.ConfigTestCase."
@@ -195,6 +210,18 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
     "test_sqlite_counter_rows_replace_clear_and_sort_by_natural_key",
 )
+
+IPV6_REQUIRED_PYTHON_BEHAVIORS = REQUIRED_PYTHON_BEHAVIORS[:4]
+DUAL_STACK_SMOKE_CASES = (
+    "ipv4-only", "ipv6-only", "dual-stack", "wildcard-isolation",
+    "fragment", "stateful-reply", "upgrade", "rollback",
+)
+SMOKE_EVIDENCE_FIELDS = (
+    "command", "expected_verdict", "observed_verdict", "interface",
+    "ifindex", "kernel", "agent_version", "datapath_version",
+    "status_snapshot", "counter_snapshot", "status",
+)
+FIELD_EVIDENCE_STATUS = "deferred/pending"
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 STATUS_FIXTURE_PATH = "docs/neutron-status-contract-v1-scenarios.json"
@@ -330,11 +357,18 @@ def run_neutronclient_extension_tests():
 
 
 def rust_test_filter(command):
-    package = command.index("-p") + 2
-    tail = command[package:]
-    if not tail or tail[0].startswith("--"):
-        return None
-    return tail[0]
+    package = command.index("-p") + 1
+    tail = command[package + 1:]
+    index = 0
+    while index < len(tail):
+        value = tail[index]
+        if value == "--features":
+            index += 2
+        elif value.startswith("-"):
+            index += 1
+        else:
+            return value
+    return None
 
 
 def _iter_test_cases(suite):
@@ -759,6 +793,25 @@ def check_public_smoke_entrypoints():
             raise SystemExit("ERROR: public smoke entrypoint is missing: %s" % path)
 
 
+def check_dual_stack_smoke_contract():
+    """Check field-smoke entrypoint structure without claiming traffic passed."""
+    print("==> checking dual-stack smoke entrypoint contracts (static only)")
+    for path in (TC_ACL_DATAPATH_SMOKE_PATH, STANDALONE_TC_ACL_SMOKE_PATH):
+        source = read_text(path)
+        required = [
+            "record_field_case()", "FIELD_EVIDENCE_STATUS=\"${FIELD_EVIDENCE_STATUS:-deferred/pending}\"",
+            "zero managed ports", "status=\"deferred/pending\"",
+        ]
+        required.extend("CASE_%s" % case.upper().replace("-", "_") for case in DUAL_STACK_SMOKE_CASES)
+        required.extend('"%s"' % field for field in SMOKE_EVIDENCE_FIELDS)
+        missing = [term for term in required if term not in source]
+        if missing:
+            raise SystemExit(
+                "ERROR: dual-stack smoke contract missing %s in %s"
+                % (", ".join(missing), path)
+            )
+
+
 def run_smoke_syntax():
     bash = shutil.which("bash")
     if not bash:
@@ -898,6 +951,7 @@ def run_fast_contracts():
     check_drop_reason_name_sync()
     check_uds_contract_artifact()
     check_public_smoke_entrypoints()
+    check_dual_stack_smoke_contract()
     run_smoke_syntax()
     run_readiness_endpoint_smoke_contract_test()
     run_heartbeat_v2_smoke_contract_test()

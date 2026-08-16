@@ -3935,3 +3935,15 @@ neutron-openvswitch-agent 当前只启用 mirror extension；Aria QoS 路线不�
 当前 tap -> br-int + iface-id 证据支持 Aria 端口发现路径。
 SR-IOV 和 LinuxBridge 存在但不纳入 Aria ACL/QoS 管理范围。
 ```
+
+## IPv6 delivery and field boundary
+
+An ACL rule has exactly one family: omitted `ethertype` means `IPv4`, while
+`any` expands to independent IPv4 and IPv6 rules. `icmp` resolves by family
+(1 for IPv4, 58 for IPv6); there is no hidden ND bypass. Address sets are
+single-family. Runtime policy and counter identity include that family.
+
+The packaged defaults remain `ipv6_acl_enabled=false` and counters disabled.
+Python compatibility is deployed before the runtime/schema update. Field
+OpenStack/4.18 evidence is `deferred/pending` until Task 12; static checks and
+hosted CI do not claim packet delivery.
