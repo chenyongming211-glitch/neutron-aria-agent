@@ -77,7 +77,6 @@ fn reverse_key6(key: &CtKey6) -> CtKey6 {
 /// Matched policy info cached in CT entry, returned on fast-path hit.
 #[derive(Copy, Clone)]
 pub struct MatchedPolicy {
-    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
@@ -89,9 +88,9 @@ pub struct MatchedPolicy {
 
 impl MatchedPolicy {
     #[inline(always)]
-    pub fn to_policy_key(&self) -> PolicyKey {
+    pub fn to_policy_key(&self, tap_id: u32) -> PolicyKey {
         PolicyKey {
-            tap_id: self.tap_id,
+            tap_id,
             src_id: self.src_id,
             dst_id: self.dst_id,
             proto: self.proto,
@@ -120,9 +119,8 @@ pub enum CtLookupResult {
 }
 
 #[inline(always)]
-fn extract_matched(entry: &CtValue, tap_id: u32) -> MatchedPolicy {
+fn extract_matched(entry: &CtValue) -> MatchedPolicy {
     MatchedPolicy {
-        tap_id,
         src_id: entry.matched_src_id,
         dst_id: entry.matched_dst_id,
         proto: entry.matched_proto,
@@ -222,7 +220,7 @@ unsafe fn finish_ct_v4_hit(
     is_forward: bool,
 ) -> CtLookupResult {
     ct_apply_confirmed_hit(&mut *entry, now, pkt_len, is_forward);
-    let matched = extract_matched(&*entry, key.tap_id);
+    let matched = extract_matched(&*entry);
     let state = (*entry).state;
     let _ = CT_TABLE_V4.insert(key, &*entry, BPF_EXIST as u64);
     CtLookupResult::Hit(matched, is_forward, state)
@@ -237,7 +235,7 @@ unsafe fn finish_ct_v6_hit(
     is_forward: bool,
 ) -> CtLookupResult {
     ct_apply_confirmed_hit(&mut *entry, now, pkt_len, is_forward);
-    let matched = extract_matched(&*entry, key.tap_id);
+    let matched = extract_matched(&*entry);
     let state = (*entry).state;
     let _ = CT_TABLE_V6.insert(key, &*entry, BPF_EXIST as u64);
     CtLookupResult::Hit(matched, is_forward, state)

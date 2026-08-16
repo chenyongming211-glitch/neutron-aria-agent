@@ -653,7 +653,6 @@ unsafe fn set_matched(p: &mut PipelineCtx, m: &conntrack::MatchedPolicy) {
 #[inline(always)]
 fn get_matched(p: &PipelineCtx) -> conntrack::MatchedPolicy {
     conntrack::MatchedPolicy {
-        tap_id: p.tap_id,
         src_id: p.matched_src_id,
         dst_id: p.matched_dst_id,
         proto: p.matched_proto,
@@ -985,7 +984,7 @@ unsafe fn phase_ct_fastpath_tc_ingress_v4(
     );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
-        stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
+        stats::update_rule_stats(&matched.to_policy_key(p.tap_id), p.pkt_len, false);
     }
     if need_tc_post_ids(p) {
         load_packet_ids_v4(info, p);
@@ -1014,7 +1013,7 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
     );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
-        stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
+        stats::update_rule_stats(&matched.to_policy_key(p.tap_id), p.pkt_len, false);
     }
     if need_tc_post_ids(p) {
         load_packet_ids_v6(info, p);
@@ -1131,7 +1130,7 @@ unsafe fn phase_ct_fastpath_tc_egress_v4(
     );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
-        stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
+        stats::update_rule_stats(&matched.to_policy_key(p.tap_id), p.pkt_len, false);
     }
     if need_tc_post_ids(p) {
         load_packet_ids_v4(info, p);
@@ -1160,7 +1159,7 @@ unsafe fn phase_ct_fastpath_tc_egress_v6(
     );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
-        stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
+        stats::update_rule_stats(&matched.to_policy_key(p.tap_id), p.pkt_len, false);
     }
     if need_tc_post_ids(p) {
         load_packet_ids_v6(info, p);
