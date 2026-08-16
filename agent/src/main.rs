@@ -27,6 +27,7 @@ mod instance;
 mod kernel_drop_manager;
 mod kernel_drop_support;
 mod netlink;
+mod neutron_acl_ip;
 mod neutron_api;
 mod neutron_wal;
 mod openapi;

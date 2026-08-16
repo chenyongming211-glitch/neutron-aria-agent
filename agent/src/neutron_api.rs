@@ -1,5 +1,5 @@
 use aria_api::{
-    action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
+    action_from_string, direction_from_string, ManagedNeutronPort,
     NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronCounterBucketV1,
     NeutronCounterGroupV1, NeutronCounterReasonV1, NeutronDeleteResponse, NeutronDomainStatus,
     NeutronPortApplyResult, NeutronPortCountersV1, NeutronPortSnapshot, NeutronPortStatus,
@@ -39,6 +39,7 @@ use crate::control_plane::{
     ManagedProjectionHealth, OwnedAclGroupSpec, OwnedAclPolicySpec, OwnedAclReconcileReport,
 };
 use crate::fault_injection;
+use crate::neutron_acl_ip::{acl_protocol, AclCidr, IpFamily};
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::tap_registry::{RuntimeReconcileResult, TapRegistry};
 
@@ -248,6 +249,7 @@ struct AclPolicyPlan {
     proto: u8,
     action: u8,
     direction: u8,
+    ip_family: u8,
     ports: Option<String>,
 }
 
@@ -257,107 +259,56 @@ struct AclEffectivePolicyKey {
     dst_group: String,
     proto: u8,
     direction: u8,
+    family: IpFamily,
 }
 
 const MAX_ACL_RULES_PER_POLICY: usize = 1000;
 const MAX_ACL_SELECTOR_MEMBERS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct AclIpv4Cidr {
-    network: u32,
-    prefix: u8,
+struct AclSelectorId {
+    family: IpFamily,
+    ordinal: Option<usize>,
 }
-
-impl AclIpv4Cidr {
-    fn parse(value: &str) -> Result<Self, String> {
-        let text = value.trim();
-        let mut pieces = text.split('/');
-        let address = pieces
-            .next()
-            .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
-        let prefix = pieces
-            .next()
-            .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
-        if pieces.next().is_some() {
-            return Err(format!("invalid IPv4 CIDR {}", value));
-        }
-
-        let octets: Vec<&str> = address.split('.').collect();
-        if octets.len() != 4 {
-            return Err(format!("invalid IPv4 CIDR {}", value));
-        }
-        let mut values = [0u8; 4];
-        for (index, octet) in octets.iter().enumerate() {
-            if octet.is_empty()
-                || !octet.as_bytes().iter().all(u8::is_ascii_digit)
-                || (octet.len() > 1 && octet.starts_with('0'))
-            {
-                return Err(format!("invalid IPv4 CIDR {}", value));
-            }
-            values[index] = octet
-                .parse::<u8>()
-                .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
-        }
-        if prefix.is_empty() || !prefix.as_bytes().iter().all(u8::is_ascii_digit) {
-            return Err(format!("invalid IPv4 CIDR {}", value));
-        }
-        let prefix = prefix
-            .parse::<u8>()
-            .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
-        if prefix > 32 {
-            return Err(format!("invalid IPv4 CIDR {}", value));
-        }
-        let address = u32::from_be_bytes(values);
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - prefix)
-        };
-        Ok(Self {
-            network: address & mask,
-            prefix,
-        })
-    }
-
-    fn end(self) -> u32 {
-        let host_mask = if self.prefix == 32 {
-            0
-        } else {
-            u32::MAX >> self.prefix
-        };
-        self.network | host_mask
-    }
-
-    fn canonical(self) -> String {
-        format!(
-            "{}/{}",
-            std::net::Ipv4Addr::from(self.network),
-            self.prefix
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct AclSelectorId(usize);
 
 impl AclSelectorId {
-    const ANY: Self = Self(0);
+    fn any(family: IpFamily) -> Self {
+        Self {
+            family,
+            ordinal: None,
+        }
+    }
+
+    fn concrete(family: IpFamily, ordinal: usize) -> Self {
+        Self {
+            family,
+            ordinal: Some(ordinal),
+        }
+    }
+
+    fn is_any(self) -> bool {
+        self.ordinal.is_none()
+    }
 
     fn group_ordinal(self) -> usize {
-        self.0 - 1
+        self.ordinal
+            .expect("concrete ACL selector requires an ordinal")
     }
 }
+
+type AclSelectorTables = Vec<Vec<AclCidr>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CanonicalAclRule {
     id: String,
     direction: String,
     priority: i64,
+    family: IpFamily,
     directions: Vec<u8>,
     proto: u8,
     action: u8,
-    src_cidrs: Vec<AclIpv4Cidr>,
-    dst_cidrs: Vec<AclIpv4Cidr>,
+    src_cidrs: Vec<AclCidr>,
+    dst_cidrs: Vec<AclCidr>,
     ports: Vec<(u16, u16)>,
 }
 
@@ -366,6 +317,7 @@ struct NormalizedAclRule {
     id: String,
     direction: String,
     priority: i64,
+    family: IpFamily,
     directions: Vec<u8>,
     proto: u8,
     action: u8,
@@ -378,8 +330,8 @@ struct NormalizedAclRule {
 enum AclValidatedTemplate {
     Ready {
         rules: Vec<NormalizedAclRule>,
-        src_selectors: Vec<Vec<AclIpv4Cidr>>,
-        dst_selectors: Vec<Vec<AclIpv4Cidr>>,
+        src_selectors: AclSelectorTables,
+        dst_selectors: AclSelectorTables,
     },
     ForceBypass(String),
 }
@@ -5679,26 +5631,17 @@ fn neutron_acl_to_datapath_directions(direction: u8) -> Vec<u8> {
     }
 }
 
-fn ensure_ipv4_cidrs(cidrs: &[String], rule_id: &str) -> Result<(), String> {
-    for cidr in cidrs {
-        if cidr.contains(':') {
-            return Err(format!(
-                "rule {} uses IPv6 CIDR {}; unsupported",
-                rule_id, cidr
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn canonical_acl_cidrs(
     cidrs: &[String],
+    family: IpFamily,
     rule_id: &str,
-) -> Result<Vec<AclIpv4Cidr>, String> {
-    ensure_ipv4_cidrs(cidrs, rule_id)?;
+) -> Result<Vec<AclCidr>, String> {
     let mut normalized = BTreeSet::new();
     for cidr in cidrs {
-        normalized.insert(AclIpv4Cidr::parse(cidr)?);
+        normalized.insert(
+            AclCidr::parse(cidr, family)
+                .map_err(|error| format!("rule {}: {}", rule_id, error))?,
+        );
     }
     Ok(normalized.into_iter().collect())
 }
@@ -5857,18 +5800,11 @@ fn normalize_acl_rule(
     index: usize,
 ) -> Result<CanonicalAclRule, String> {
     let rule_id = acl_rule_id(rule, index);
-    if rule
-        .ethertype
-        .as_deref()
-        .map(|ethertype| ethertype.eq_ignore_ascii_case("IPv6"))
-        .unwrap_or(false)
-    {
-        return Err(format!("rule {} uses IPv6 ethertype; unsupported", rule_id));
-    }
-
-    let src_cidrs = canonical_acl_cidrs(&rule.src_cidrs, &rule_id)?;
-    let dst_cidrs = canonical_acl_cidrs(&rule.dst_cidrs, &rule_id)?;
-    let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any").trim())
+    let family = IpFamily::parse_ethertype(rule.ethertype.as_deref())
+        .map_err(|error| format!("rule {}: {}", rule_id, error))?;
+    let src_cidrs = canonical_acl_cidrs(&rule.src_cidrs, family, &rule_id)?;
+    let dst_cidrs = canonical_acl_cidrs(&rule.dst_cidrs, family, &rule_id)?;
+    let proto = acl_protocol(rule.protocol.as_deref(), family)
         .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
     let action = action_from_string(rule.action.as_deref().unwrap_or("allow").trim())
         .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
@@ -5886,6 +5822,7 @@ fn normalize_acl_rule(
         id: rule_id,
         direction: normalized_acl_direction(direction),
         priority: rule.priority,
+        family,
         directions,
         proto,
         action,
@@ -5906,9 +5843,11 @@ fn acl_selector_relation(
     left: AclSelectorId,
     right: AclSelectorId,
 ) -> AclSelectorRelation {
-    if left == right {
+    if left.family != right.family {
+        AclSelectorRelation::Disjoint
+    } else if left == right {
         AclSelectorRelation::Identical
-    } else if left == AclSelectorId::ANY || right == AclSelectorId::ANY {
+    } else if left.is_any() || right.is_any() {
         AclSelectorRelation::Intersecting
     } else {
         AclSelectorRelation::Disjoint
@@ -5917,18 +5856,17 @@ fn acl_selector_relation(
 
 fn acl_selector_tables(
     rules: &[CanonicalAclRule],
-) -> (Vec<Vec<AclIpv4Cidr>>, Vec<Vec<AclIpv4Cidr>>) {
-    let mut src_selectors = BTreeSet::new();
-    let mut dst_selectors = BTreeSet::new();
+) -> (AclSelectorTables, AclSelectorTables) {
+    let mut src_selectors = BTreeSet::<Vec<AclCidr>>::new();
+    let mut dst_selectors = BTreeSet::<Vec<AclCidr>>::new();
     for rule in rules {
-        if !rule.src_cidrs.is_empty() && !src_selectors.contains(&rule.src_cidrs) {
+        if !rule.src_cidrs.is_empty() {
             src_selectors.insert(rule.src_cidrs.clone());
         }
-        if !rule.dst_cidrs.is_empty() && !dst_selectors.contains(&rule.dst_cidrs) {
+        if !rule.dst_cidrs.is_empty() {
             dst_selectors.insert(rule.dst_cidrs.clone());
         }
     }
-
     let mut src_table = vec![Vec::new()];
     src_table.extend(src_selectors);
     let mut dst_table = vec![Vec::new()];
@@ -5937,24 +5875,46 @@ fn acl_selector_tables(
 }
 
 fn acl_selector_id(
-    selector: &[AclIpv4Cidr],
-    selectors: &[Vec<AclIpv4Cidr>],
+    family: IpFamily,
+    selector: &[AclCidr],
+    selectors: &AclSelectorTables,
 ) -> AclSelectorId {
     if selector.is_empty() {
-        return AclSelectorId::ANY;
+        return AclSelectorId::any(family);
     }
-    let ordinal = selectors[1..]
-        .binary_search_by(|candidate| candidate.as_slice().cmp(selector))
+    let ordinal = selectors
+        .iter()
+        .skip(1)
+        .filter(|candidate| candidate.first().map(|cidr| cidr.family()) == Some(family))
+        .position(|candidate| candidate.as_slice() == selector)
         .expect("canonical ACL selector must be interned");
-    AclSelectorId(ordinal + 1)
+    AclSelectorId::concrete(family, ordinal)
+}
+
+fn acl_selector_table_index(
+    selector_id: AclSelectorId,
+    selectors: &AclSelectorTables,
+) -> Option<usize> {
+    if selector_id.is_any() {
+        return None;
+    }
+    selectors
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, selector)| {
+            selector.first().map(|cidr| cidr.family()) == Some(selector_id.family)
+        })
+        .nth(selector_id.group_ordinal())
+        .map(|(index, _)| index)
 }
 
 fn intern_acl_rules(
     canonical_rules: Vec<CanonicalAclRule>,
 ) -> (
     Vec<NormalizedAclRule>,
-    Vec<Vec<AclIpv4Cidr>>,
-    Vec<Vec<AclIpv4Cidr>>,
+    AclSelectorTables,
+    AclSelectorTables,
 ) {
     let (src_selectors, dst_selectors) = acl_selector_tables(&canonical_rules);
     let rules = canonical_rules
@@ -5963,24 +5923,25 @@ fn intern_acl_rules(
             id: rule.id,
             direction: rule.direction,
             priority: rule.priority,
+            family: rule.family,
             directions: rule.directions,
             proto: rule.proto,
             action: rule.action,
-            src_selector_id: acl_selector_id(&rule.src_cidrs, &src_selectors),
-            dst_selector_id: acl_selector_id(&rule.dst_cidrs, &dst_selectors),
+            src_selector_id: acl_selector_id(rule.family, &rule.src_cidrs, &src_selectors),
+            dst_selector_id: acl_selector_id(rule.family, &rule.dst_cidrs, &dst_selectors),
             ports: rule.ports,
         })
         .collect();
     (rules, src_selectors, dst_selectors)
 }
 
-fn acl_selector_intervals(selector: &[AclIpv4Cidr]) -> Vec<(u32, u32)> {
+fn acl_selector_intervals(selector: &[AclCidr]) -> Vec<(u128, u128)> {
     let mut intervals = selector
         .iter()
-        .map(|cidr| (cidr.network, cidr.end()))
+        .map(|cidr| cidr.interval())
         .collect::<Vec<_>>();
     intervals.sort_unstable();
-    let mut merged = Vec::<(u32, u32)>::new();
+    let mut merged = Vec::<(u128, u128)>::new();
     for (start, end) in intervals {
         if let Some((_, active_end)) = merged.last_mut() {
             if start <= *active_end {
@@ -5994,11 +5955,18 @@ fn acl_selector_intervals(selector: &[AclIpv4Cidr]) -> Vec<(u32, u32)> {
 }
 
 fn acl_selector_best_overlap(
-    selectors: &[Vec<AclIpv4Cidr>],
+    family: IpFamily,
+    selectors: &[Vec<AclCidr>],
     first_rule_indexes: &[Option<usize>],
 ) -> Option<(usize, usize)> {
     let mut intervals = Vec::new();
+    let mut family_ordinal = 0;
     for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
+        if selector.first().map(|cidr| cidr.family()) != Some(family) {
+            continue;
+        }
+        let selector_id = AclSelectorId::concrete(family, family_ordinal);
+        family_ordinal += 1;
         if first_rule_indexes
             .get(selector_index)
             .copied()
@@ -6007,14 +5975,13 @@ fn acl_selector_best_overlap(
         {
             continue;
         }
-        let selector_id = AclSelectorId(selector_index);
         for (start, end) in acl_selector_intervals(selector) {
             intervals.push((start, end, selector_id));
         }
     }
     intervals.sort_unstable();
 
-    let mut active_ends = BinaryHeap::<Reverse<(u32, AclSelectorId)>>::new();
+    let mut active_ends = BinaryHeap::<Reverse<(u128, AclSelectorId)>>::new();
     let mut active_counts = BTreeMap::<AclSelectorId, usize>::new();
     let mut active_selectors = BTreeSet::<(usize, AclSelectorId)>::new();
     let mut best = None;
@@ -6036,13 +6003,17 @@ fn acl_selector_best_overlap(
             };
             if remove_selector {
                 active_counts.remove(&expired_selector_id);
-                let first_rule_index = first_rule_indexes[expired_selector_id.0]
+                let table_index = acl_selector_table_index(expired_selector_id, selectors)
+                    .expect("active ACL selector must exist in its table");
+                let first_rule_index = first_rule_indexes[table_index]
                     .expect("active ACL selector must have a first rule index");
                 active_selectors.remove(&(first_rule_index, expired_selector_id));
             }
         }
 
-        let first_rule_index = first_rule_indexes[selector_id.0]
+        let table_index = acl_selector_table_index(selector_id, selectors)
+            .expect("swept ACL selector must exist in its table");
+        let first_rule_index = first_rule_indexes[table_index]
             .expect("swept ACL selector must have a first rule index");
         if let Some((other_first_rule_index, _)) = active_selectors
             .iter()
@@ -6071,10 +6042,10 @@ fn acl_selector_best_overlap(
 
 fn acl_priority_overlap_reason(
     rules: &[NormalizedAclRule],
-    src_selectors: &[Vec<AclIpv4Cidr>],
-    dst_selectors: &[Vec<AclIpv4Cidr>],
+    src_selectors: &AclSelectorTables,
+    dst_selectors: &AclSelectorTables,
 ) -> Option<String> {
-    let mut priorities = BTreeMap::<(String, i64), String>::new();
+    let mut priorities = BTreeMap::<(IpFamily, String, i64), String>::new();
     for rule in rules {
         if rule.priority < 0 {
             return Some(format!(
@@ -6082,7 +6053,7 @@ fn acl_priority_overlap_reason(
                 rule.id, rule.priority
             ));
         }
-        let key = (rule.direction.clone(), rule.priority);
+        let key = (rule.family, rule.direction.clone(), rule.priority);
         if let Some(first_id) = priorities.get(&key) {
             return Some(format!(
                 "duplicate_acl_priority:{}:{}:{}:{}",
@@ -6099,22 +6070,37 @@ fn acl_priority_overlap_reason(
             .then_with(|| left.priority.cmp(&right.priority))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut src_first_rule_indexes = vec![None; src_selectors.len()];
-    let mut dst_first_rule_indexes = vec![None; dst_selectors.len()];
-    for (rule_index, rule) in ordered.iter().enumerate() {
-        if rule.src_selector_id != AclSelectorId::ANY
-            && src_first_rule_indexes[rule.src_selector_id.0].is_none()
-        {
-            src_first_rule_indexes[rule.src_selector_id.0] = Some(rule_index);
+    let selector_overlap = |tables: &AclSelectorTables, source: bool| {
+        let mut best = None;
+        for family in [IpFamily::Ipv4, IpFamily::Ipv6] {
+            let mut first_rule_indexes = vec![None; tables.len()];
+            for (rule_index, rule) in ordered.iter().enumerate() {
+                let selector_id = if source {
+                    rule.src_selector_id
+                } else {
+                    rule.dst_selector_id
+                };
+                if selector_id.family != family || selector_id.is_any() {
+                    continue;
+                }
+                let table_index = acl_selector_table_index(selector_id, tables)
+                    .expect("normalized ACL selector must exist in its table");
+                if first_rule_indexes[table_index].is_none() {
+                    first_rule_indexes[table_index] = Some(rule_index);
+                }
+            }
+            if let Some(candidate) =
+                acl_selector_best_overlap(family, tables, &first_rule_indexes)
+            {
+                best = Some(best.map_or(candidate, |current: (usize, usize)| {
+                    current.min(candidate)
+                }));
+            }
         }
-        if rule.dst_selector_id != AclSelectorId::ANY
-            && dst_first_rule_indexes[rule.dst_selector_id.0].is_none()
-        {
-            dst_first_rule_indexes[rule.dst_selector_id.0] = Some(rule_index);
-        }
-    }
-    let src_best = acl_selector_best_overlap(src_selectors, &src_first_rule_indexes);
-    let dst_best = acl_selector_best_overlap(dst_selectors, &dst_first_rule_indexes);
+        best
+    };
+    let src_best = selector_overlap(src_selectors, true);
+    let dst_best = selector_overlap(dst_selectors, false);
     let cidr_candidate = match (src_best, dst_best) {
         (Some(src), Some(dst)) if src <= dst => Some((src.0, src.1, "src")),
         (Some(_), Some(dst)) => Some((dst.0, dst.1, "dst")),
@@ -6125,6 +6111,9 @@ fn acl_priority_overlap_reason(
 
     for (left_index, left) in ordered.iter().enumerate() {
         for (right_index, right) in ordered.iter().enumerate().skip(left_index + 1) {
+            if left.family != right.family {
+                continue;
+            }
             if let Some((cidr_left_index, cidr_right_index, side)) = cidr_candidate {
                 if (left_index, right_index) == (cidr_left_index, cidr_right_index) {
                     return Some(format!(
@@ -6267,23 +6256,36 @@ fn cached_neutron_acl_template(
 fn acl_selector_registry(
     port_id: &str,
     side: &str,
-    selectors: &[Vec<AclIpv4Cidr>],
-) -> Vec<AclGroupPlan> {
+    selectors: &AclSelectorTables,
+) -> Result<Vec<AclGroupPlan>, String> {
     let mut groups = Vec::new();
-    for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
-        let selector_id = AclSelectorId(selector_index);
-        let name = format!(
-            "{}{}:selector:{}",
-            neutron_acl_prefix(port_id),
-            side,
-            selector_id.group_ordinal()
-        );
+    let mut ordinals = BTreeMap::<IpFamily, usize>::new();
+    for selector in selectors.iter().skip(1) {
+        let Some(family) = selector.first().map(|cidr| cidr.family()) else {
+            return Err(format!("empty concrete ACL selector for {}", side));
+        };
+        let ordinal = ordinals.entry(family).or_default();
+        if selector.iter().any(|cidr| cidr.family() != family) {
+            return Err(format!(
+                "mixed ACL selector family for {} {} ordinal {}",
+                family.label(),
+                side,
+                *ordinal
+            ));
+        }
         groups.push(AclGroupPlan {
-            name,
+            name: format!(
+                "{}{}:selector:{}:{}",
+                neutron_acl_prefix(port_id),
+                side,
+                family.label(),
+                *ordinal,
+            ),
             cidrs: selector.iter().map(|cidr| cidr.canonical()).collect(),
         });
+        *ordinal += 1;
     }
-    groups
+    Ok(groups)
 }
 
 fn acl_group_for_selector(
@@ -6291,13 +6293,14 @@ fn acl_group_for_selector(
     side: &str,
     selector_id: AclSelectorId,
 ) -> String {
-    if selector_id == AclSelectorId::ANY {
+    if selector_id.is_any() {
         "any".to_string()
     } else {
         format!(
-            "{}{}:selector:{}",
+            "{}{}:selector:{}:{}",
             neutron_acl_prefix(port_id),
             side,
+            selector_id.family.label(),
             selector_id.group_ordinal(),
         )
     }
@@ -6307,11 +6310,11 @@ fn render_neutron_acl_plan(
     port_id: &str,
     acl: &NeutronAclSnapshot,
     normalized_rules: &[NormalizedAclRule],
-    src_selectors: &[Vec<AclIpv4Cidr>],
-    dst_selectors: &[Vec<AclIpv4Cidr>],
+    src_selectors: &AclSelectorTables,
+    dst_selectors: &AclSelectorTables,
 ) -> Result<AclApplyPlan, String> {
-    let mut groups = acl_selector_registry(port_id, "src", src_selectors);
-    let mut dst_groups = acl_selector_registry(port_id, "dst", dst_selectors);
+    let mut groups = acl_selector_registry(port_id, "src", src_selectors)?;
+    let mut dst_groups = acl_selector_registry(port_id, "dst", dst_selectors)?;
     groups.append(&mut dst_groups);
 
     let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
@@ -6326,6 +6329,7 @@ fn render_neutron_acl_plan(
                 dst_group: dst_group.clone(),
                 proto: rule.proto,
                 direction: *direction,
+                family: rule.family,
             };
             if let Some(existing) = policies_by_key.get_mut(&key) {
                 if existing.action != rule.action {
@@ -6350,6 +6354,7 @@ fn render_neutron_acl_plan(
                     proto: rule.proto,
                     action: rule.action,
                     direction: *direction,
+                    ip_family: rule.family.as_u8(),
                     ports: ports.clone(),
                 },
             );
@@ -6625,7 +6630,7 @@ async fn reconcile_neutron_acl(
             proto: policy.proto,
             action: policy.action,
             direction: policy.direction,
-            ip_family: aria_core::common::IP_FAMILY_V4,
+            ip_family: policy.ip_family,
             ports: policy.ports.clone(),
         })
         .collect();
@@ -9872,16 +9877,40 @@ mod tests {
         src_selector_id: usize,
         dst_selector_id: usize,
     ) -> NormalizedAclRule {
+        let selector_id = |value| {
+            if value == 0 {
+                AclSelectorId::any(IpFamily::Ipv4)
+            } else {
+                AclSelectorId::concrete(IpFamily::Ipv4, value - 1)
+            }
+        };
         NormalizedAclRule {
             id: id.to_string(),
             direction: "egress".to_string(),
             priority,
+            family: IpFamily::Ipv4,
             directions: vec![0],
             proto,
             action: 1,
-            src_selector_id: AclSelectorId(src_selector_id),
-            dst_selector_id: AclSelectorId(dst_selector_id),
+            src_selector_id: selector_id(src_selector_id),
+            dst_selector_id: selector_id(dst_selector_id),
             ports: Vec::new(),
+        }
+    }
+
+    struct AclIpv4Cidr;
+
+    impl AclIpv4Cidr {
+        fn parse(value: &str) -> Result<AclCidr, String> {
+            AclCidr::parse(value, IpFamily::Ipv4)
+        }
+    }
+
+    fn v4_selector_id(value: usize) -> AclSelectorId {
+        if value == 0 {
+            AclSelectorId::any(IpFamily::Ipv4)
+        } else {
+            AclSelectorId::concrete(IpFamily::Ipv4, value - 1)
         }
     }
 
@@ -14349,15 +14378,16 @@ mod tests {
         let empty = AclApplyPlan::default();
         let nonempty = AclApplyPlan {
             groups: vec![AclGroupPlan {
-                name: "neutron:port-1:src:selector:0".to_string(),
+                name: "neutron:port-1:src:selector:ipv4:0".to_string(),
                 cidrs: vec!["192.0.2.2/32".to_string()],
             }],
             policies: vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:selector:0".to_string(),
+                src_group: "neutron:port-1:src:selector:ipv4:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 6,
                 action: 1,
                 direction: 1,
+                ip_family: 4,
                 ports: None,
             }],
             conntrack_enabled: Some(true),
@@ -15405,6 +15435,7 @@ mod tests {
                 proto: 6,
                 action: 1,
                 direction: 1,
+                ip_family: 4,
                 ports: Some("8080,18081".to_string()),
             }]
         );
@@ -15685,8 +15716,8 @@ mod tests {
     fn neutron_acl_normalized_rules_store_only_selector_ids() {
         let rule = normalized_acl_rule_with_selectors("id-only", 10, 6, 1, 2);
 
-        assert_eq!(rule.src_selector_id, AclSelectorId(1));
-        assert_eq!(rule.dst_selector_id, AclSelectorId(2));
+        assert_eq!(rule.src_selector_id, v4_selector_id(1));
+        assert_eq!(rule.dst_selector_id, v4_selector_id(2));
     }
 
     #[test]
@@ -15721,7 +15752,9 @@ mod tests {
             panic!("expected ready template");
         };
         assert_eq!(rules.len(), MAX_ACL_RULES_PER_POLICY);
-        assert!(rules.iter().all(|rule| rule.src_selector_id == AclSelectorId(1)));
+        assert!(rules
+            .iter()
+            .all(|rule| rule.src_selector_id == v4_selector_id(1)));
         assert_eq!(src_selectors, vec![Vec::new(), selector]);
         assert_eq!(dst_selectors, vec![Vec::new()]);
     }
@@ -15879,7 +15912,7 @@ mod tests {
         let first_rule_indexes = vec![None, Some(1), Some(0)];
 
         assert_eq!(
-            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            acl_selector_best_overlap(IpFamily::Ipv4, &selectors, &first_rule_indexes),
             Some((0, 1)),
         );
     }
@@ -15898,7 +15931,7 @@ mod tests {
         let first_rule_indexes = vec![None, Some(0), Some(1), Some(2)];
 
         assert_eq!(
-            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            acl_selector_best_overlap(IpFamily::Ipv4, &selectors, &first_rule_indexes),
             Some((0, 1)),
         );
     }
@@ -15917,7 +15950,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            acl_selector_best_overlap(IpFamily::Ipv4, &selectors, &first_rule_indexes),
             Some((0, 1)),
         );
     }
@@ -15967,10 +16000,10 @@ mod tests {
         };
         assert_eq!(src_selectors, dst_selectors);
         assert_eq!(src_selectors.len(), 2);
-        assert_eq!(rules[0].src_selector_id, AclSelectorId(1));
-        assert_eq!(rules[0].dst_selector_id, AclSelectorId(0));
-        assert_eq!(rules[1].src_selector_id, AclSelectorId(0));
-        assert_eq!(rules[1].dst_selector_id, AclSelectorId(1));
+        assert_eq!(rules[0].src_selector_id, v4_selector_id(1));
+        assert_eq!(rules[0].dst_selector_id, v4_selector_id(0));
+        assert_eq!(rules[1].src_selector_id, v4_selector_id(0));
+        assert_eq!(rules[1].dst_selector_id, v4_selector_id(1));
     }
 
     #[test]
@@ -15997,8 +16030,8 @@ mod tests {
             .groups
             .iter()
             .all(|group| group.name.starts_with("neutron:port-2:")));
-        assert_eq!(first.groups[0].name, "neutron:port-1:src:selector:0");
-        assert_eq!(second.groups[0].name, "neutron:port-2:src:selector:0");
+        assert_eq!(first.groups[0].name, "neutron:port-1:src:selector:ipv4:0");
+        assert_eq!(second.groups[0].name, "neutron:port-2:src:selector:ipv4:0");
 
         let mut changed_revision = acl.clone();
         changed_revision.revision += 1;
@@ -16141,6 +16174,7 @@ mod tests {
             proto: 6,
             action: 1,
             direction: 1,
+            ip_family: 4,
             ports: Some("8080".to_string()),
         };
         let quiesced = AclRuntimeFeatureState {
@@ -16276,18 +16310,19 @@ mod tests {
         assert_eq!(
             plan.groups,
             vec![AclGroupPlan {
-                name: "neutron:port-1:src:selector:0".to_string(),
+                name: "neutron:port-1:src:selector:ipv4:0".to_string(),
                 cidrs: vec!["192.0.2.2/32".to_string()],
             }]
         );
         assert_eq!(
             plan.policies,
             vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:selector:0".to_string(),
+                src_group: "neutron:port-1:src:selector:ipv4:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
                 direction: 1,
+                ip_family: 4,
                 ports: None,
             }]
         );
@@ -16325,15 +16360,16 @@ mod tests {
 
         let plan = AclApplyPlan {
             groups: vec![AclGroupPlan {
-                name: "neutron:port-1:src:selector:0".to_string(),
+                name: "neutron:port-1:src:selector:ipv4:0".to_string(),
                 cidrs: vec!["192.0.2.2/32".to_string()],
             }],
             policies: vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:selector:0".to_string(),
+                src_group: "neutron:port-1:src:selector:ipv4:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
                 direction: 1,
+                ip_family: 4,
                 ports: None,
             }],
             conntrack_enabled: Some(true),
