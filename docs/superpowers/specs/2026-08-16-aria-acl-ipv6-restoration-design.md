@@ -1,15 +1,17 @@
 # Aria ACL IPv6 Restoration Design
 
-**Status:** Tasks 1-3 implemented; Task 4 monolithic datapath attempt stopped.
-Datapath completion now follows
-`2026-08-16-tail-call-datapath-architecture-design.md`; field evidence remains
-pending.
+**Status:** Tasks 1-4 implemented in source. The current ACL-only product uses
+the bounded monolithic TC artifact with the approved 480-byte temporary ceiling
+defined by
+`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. Hosted GREEN
+and field evidence remain pending.
 
 **Scope:** restore complete IPv6 support to the existing Neutron-managed and
 standalone Aria ACL product while preserving failure boundaries, Python 2.7
-compatibility, and default-off production enablement discipline. The TC
-datapath is migrated to the approved single tail-call architecture rather than
-extended through the exhausted monolithic call graph.
+compatibility, and default-off production enablement discipline. The current
+TC datapath remains monolithic for this ACL-only low-kernel generation and is
+frozen against new non-ACL datapath features. Tail-call migration is deferred
+until a later product generation raises the minimum kernel contract.
 
 ## 1. Objective
 
@@ -224,11 +226,12 @@ and `repr(C)` contract checks continue to enforce existing sizes and offsets.
 
 ### 5.5 Stack and program constraints
 
-IPv6 enforcement is completed inside the approved tail-call pipeline. Every
-attached and tail-called program is independently limited to 448 verifier-
-charged bytes; programs above 416 bytes require architecture review. Hosted
-warning-denied builds and exact 4.18-kernel behavior remain mandatory. The
-stack gate covers every stage rather than only `tc_ingress` and `tc_egress`.
+IPv6 enforcement is completed in the current ACL-only bounded monolithic TC
+artifact. The complete linked call graph from each TC entry is limited to 480
+verifier-charged bytes, leaving 32 bytes below the 512-byte kernel limit. This
+is a frozen exception: no new non-ACL datapath behavior may consume the
+remaining margin, and the ceiling cannot be raised. Hosted warning-denied
+builds and exact maintained-4.18-kernel load/behavior remain mandatory.
 
 ## 6. Family-Qualified Selector Groups
 
@@ -572,8 +575,8 @@ No local Cargo build, check, or test is run. GitHub Actions must provide:
 
 - Rust and eBPF tests with warnings denied;
 - ABI layout and `repr(C)` checks;
-- linked-artifact 448-byte stack verification for every attached and
-  tail-called TC program;
+- linked-artifact 480-byte combined stack verification from each attached TC
+  entry;
 - Python 2.7-compatible unit/contract tests;
 - migration and CLI tests; and
 - the existing repository quality gates.
@@ -591,8 +594,8 @@ The field matrix covers:
 - allow/deny, wildcard, CIDR, address-set, TCP, UDP, ICMP, and ICMPv6;
 - Neighbor Discovery behavior under explicit allow and deny-any policies;
 - IPv6 first/non-first fragments and stateful replies;
-- ACL policy-bank update, tail-call program-bank update, agent restart, host
-  reboot, detach/reattach, and rollback;
+- ACL policy-bank update, complete-artifact update, agent restart, host reboot,
+  detach/reattach, and rollback;
 - mixed-version expand-contract deployment; and
 - counters v2 identity when the separate counters gate is enabled for testing.
 
@@ -608,7 +611,7 @@ Implementation is divided into independently reviewable batches:
 | --- | --- |
 | B0 | Freeze product/ABI/group/capability contracts, dependencies, gates, migration order, and exact RED tests. |
 | B1 | Add family to ABI, normalized persistence, local WAL, Neutron WAL/pending-intent migration, and runtime schema checks. |
-| B2 | Replace the stopped monolithic datapath task with the approved tail-call foundation, then update eBPF/core policy, conntrack, drop, replay, preimage, layout, and per-stage stack behavior. |
+| B2 | Complete family-isolated eBPF/core policy, conntrack, drop, replay, preimage and layout behavior in the frozen ACL-only monolithic artifact; enforce the 480-byte exception. |
 | B3 | Implement the Rust dual-stack compiler, family-qualified group namespace, and per-family selector numbering. |
 | B4 | Enable strict Python API/DB/CLI dual-stack validation with the pinned `netaddr` range. |
 | B5 | Complete capability expand-contract support, contract checkers, counters v2, DB migration, and operator documentation. |

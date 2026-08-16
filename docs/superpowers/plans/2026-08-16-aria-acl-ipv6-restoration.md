@@ -1,10 +1,11 @@
 # Aria ACL IPv6 Restoration Implementation Plan
 
-> **Execution status (2026-08-16):** Tasks 1-3 are retained. Task 4 and all
-> later datapath-dependent steps in this plan are stopped and must not be
-> executed against the monolithic TC pipeline. They will be replaced by a new
-> implementation plan after user review of
-> `docs/superpowers/specs/2026-08-16-tail-call-datapath-architecture-design.md`.
+> **Execution status (2026-08-16):** Tasks 1-4 are retained. The product owner
+> approved the temporary ACL-only legacy-kernel exception: complete IPv6 ACL on
+> the existing monolithic TC pipeline with a frozen 480-byte ceiling. Tail-call
+> migration is deferred until a later product generation adds non-ACL datapath
+> features and raises the minimum kernel contract. See
+> `docs/superpowers/specs/2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -27,7 +28,9 @@
 - Source-port matching stays unsupported; priority remains metadata; overlap with different actions stays a controller validation error.
 - No hidden ND/RA/MLD bypass and no ICMPv6 type/code matching are added.
 - Existing limits remain 1,000 effective rules per port and 2,048 address-set members.
-- Preserve the 448-byte linked TC stack gate and warning-denied hosted builds.
+- Preserve the ACL-only 480-byte linked TC ceiling and warning-denied hosted
+  builds. This exception leaves 32 bytes below the 512-byte kernel limit and
+  cannot be raised or consumed by a new non-ACL datapath feature.
 - `ipv6_acl_enabled` and Phase B counters remain default `false`; field evidence stays `deferred/pending` until actually executed on the real OpenStack/4.18 environment.
 - Reference design: `docs/superpowers/specs/2026-08-16-aria-acl-ipv6-restoration-design.md`.
 
@@ -639,7 +642,11 @@ Carry `PolicyKey.ip_family` into `RuleStatsEntry`/`PortPolicyCounter` identities
 
 - [ ] **Step 6: Push GREEN and require all Rust/eBPF gates**
 
-Commit `feat(acl): isolate IPv4 and IPv6 datapath state`, push, then require exact-head `rust-behavior`, warning-denied `rust-build`, full workspace tests, ABI layout, legacy packet bounds, and 448-byte stack-budget jobs to pass.
+Commit `feat(acl): isolate IPv4 and IPv6 datapath state`, push, then require
+exact-head `rust-behavior`, warning-denied `rust-build`, full workspace tests,
+ABI layout, legacy packet bounds, and the approved ACL-only 480-byte
+stack-budget job to pass. A value above 480 is a hard failure and cannot be
+waived for another feature.
 
 ---
 

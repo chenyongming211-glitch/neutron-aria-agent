@@ -254,7 +254,7 @@ jobs:
           python3 -m unittest ci.test_ebpf_stack_budget
           python3 ci/check_ebpf_stack_budget.py \
             --artifact ebpf-artifacts/libebpf_firewall.so \
-            --max-path-bytes 448 \
+            --max-path-bytes 480 \
             --report ebpf-artifacts/stack-budget.json
 
       - name: Upload eBPF stack diagnostics

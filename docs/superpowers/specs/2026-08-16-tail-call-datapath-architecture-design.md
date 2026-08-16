@@ -2,15 +2,26 @@
 
 **Date:** 2026-08-16
 
-**Status:** long-term direction approved; written specification awaiting user review
+**Status:** deferred design reserve. It is not implemented for the current
+ACL-only low-kernel product generation. Reopen only when a new datapath feature
+also raises and revalidates the minimum kernel contract.
 
 **Supersedes:** the bounded monolithic TC pipeline as the long-term architecture
 in `2026-08-04-ebpf-legacy-stack-budget-design.md`
 
-## 1. Decision
+## 1. Deferred Decision Boundary
 
-Aria will use one long-term eBPF datapath architecture: a fixed, versioned
-tail-call pipeline. The product will not retain a monolithic TC runtime mode.
+The current delivery decision is defined by
+`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. IPv6 ACL is
+completed on the bounded monolithic TC artifact with a frozen 480-byte ceiling.
+Nothing in this document authorizes tail-call implementation in that product
+generation.
+
+When a later product generation adds Mirror, QoS, load balancing, DDoS,
+broadcast-storm suppression, or another datapath feature, Aria will reconsider
+one fixed, versioned tail-call pipeline after setting a higher minimum kernel
+and completing exact-kernel capability canaries. The product will not retain a
+monolithic/tail-call dual runtime after that migration.
 
 The implementation may use two program banks for atomic upgrade and rollback.
 Those banks contain two generations of the same tail-call architecture; they

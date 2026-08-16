@@ -349,7 +349,7 @@ def analyze_artifact(path, entries, max_path_bytes):
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", required=True)
-    parser.add_argument("--max-path-bytes", type=int, default=448)
+    parser.add_argument("--max-path-bytes", type=int, default=480)
     parser.add_argument("--report")
     parser.add_argument("--entry", action="append", dest="entries")
     return parser.parse_args(argv)

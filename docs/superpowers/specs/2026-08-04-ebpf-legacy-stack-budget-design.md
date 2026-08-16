@@ -2,11 +2,12 @@
 
 Date: 2026-08-04
 
-Status: implemented historical baseline; its recorded tail-call escalation
-condition was reached during IPv6 ACL datapath work. The long-term architecture
-is superseded by `2026-08-16-tail-call-datapath-architecture-design.md`. This
-document remains authoritative for the 448-byte measurement model, maintained
-kernel contract, and historical evidence.
+Status: implemented historical 448-byte baseline. The current ACL-only IPv6
+generation uses the explicit frozen 480-byte exception in
+`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`; this document
+remains authoritative for the measurement model, maintained kernel contract,
+and historical evidence. Tail-call escalation is deferred until a later
+product generation raises the minimum kernel contract.
 
 Analyzed target: `origin/v0.9-neutron-agent@850832b`
 

@@ -8,11 +8,40 @@ from ci.check_ebpf_stack_budget import (
     BudgetExceeded,
     analyze_function_stack,
     longest_path,
+    parse_args,
     validate_budget,
 )
 
 
 class EbpfStackBudgetTest(unittest.TestCase):
+    def test_cli_default_preserves_acl_only_legacy_kernel_headroom(self):
+        args = parse_args(("--artifact", "libebpf_firewall.so"))
+
+        self.assertEqual(args.max_path_bytes, 480)
+
+    def test_acl_only_legacy_ceiling_accepts_480_and_rejects_512(self):
+        frames = {
+            "tc_ingress": 24,
+            "dispatch": 32,
+            "ipv6": 176,
+            "fastpath": 168,
+            "memset": 0,
+        }
+        calls = {
+            "tc_ingress": {"dispatch"},
+            "dispatch": {"ipv6"},
+            "ipv6": {"fastpath"},
+            "fastpath": {"memset"},
+            "memset": set(),
+        }
+
+        report = validate_budget(("tc_ingress",), frames, calls, 480)
+        self.assertEqual(report["tc_ingress"]["total_bytes"], 480)
+
+        frames["fastpath"] = 200
+        with self.assertRaisesRegex(BudgetExceeded, "512 bytes exceeds 480"):
+            validate_budget(("tc_ingress",), frames, calls, 480)
+
     def test_longest_path_sums_nested_frames(self):
         frames = {"tc_ingress": 32, "parse": 96, "policy": 80, "short": 16}
         calls = {
