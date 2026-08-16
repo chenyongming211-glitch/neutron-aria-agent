@@ -5877,7 +5877,7 @@ fn acl_selector_tables(
 fn acl_selector_id(
     family: IpFamily,
     selector: &[AclCidr],
-    selectors: &AclSelectorTables,
+    selectors: &[Vec<AclCidr>],
 ) -> AclSelectorId {
     if selector.is_empty() {
         return AclSelectorId::any(family);
@@ -5893,7 +5893,7 @@ fn acl_selector_id(
 
 fn acl_selector_table_index(
     selector_id: AclSelectorId,
-    selectors: &AclSelectorTables,
+    selectors: &[Vec<AclCidr>],
 ) -> Option<usize> {
     if selector_id.is_any() {
         return None;
@@ -6042,8 +6042,8 @@ fn acl_selector_best_overlap(
 
 fn acl_priority_overlap_reason(
     rules: &[NormalizedAclRule],
-    src_selectors: &AclSelectorTables,
-    dst_selectors: &AclSelectorTables,
+    src_selectors: &[Vec<AclCidr>],
+    dst_selectors: &[Vec<AclCidr>],
 ) -> Option<String> {
     let mut priorities = BTreeMap::<(IpFamily, String, i64), String>::new();
     for rule in rules {
@@ -6070,7 +6070,7 @@ fn acl_priority_overlap_reason(
             .then_with(|| left.priority.cmp(&right.priority))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let selector_overlap = |tables: &AclSelectorTables, source: bool| {
+    let selector_overlap = |tables: &[Vec<AclCidr>], source: bool| {
         let mut best = None;
         for family in [IpFamily::Ipv4, IpFamily::Ipv6] {
             let mut first_rule_indexes = vec![None; tables.len()];
@@ -6256,7 +6256,7 @@ fn cached_neutron_acl_template(
 fn acl_selector_registry(
     port_id: &str,
     side: &str,
-    selectors: &AclSelectorTables,
+    selectors: &[Vec<AclCidr>],
 ) -> Result<Vec<AclGroupPlan>, String> {
     let mut groups = Vec::new();
     let mut ordinals = BTreeMap::<IpFamily, usize>::new();
@@ -6310,8 +6310,8 @@ fn render_neutron_acl_plan(
     port_id: &str,
     acl: &NeutronAclSnapshot,
     normalized_rules: &[NormalizedAclRule],
-    src_selectors: &AclSelectorTables,
-    dst_selectors: &AclSelectorTables,
+    src_selectors: &[Vec<AclCidr>],
+    dst_selectors: &[Vec<AclCidr>],
 ) -> Result<AclApplyPlan, String> {
     let mut groups = acl_selector_registry(port_id, "src", src_selectors)?;
     let mut dst_groups = acl_selector_registry(port_id, "dst", dst_selectors)?;
