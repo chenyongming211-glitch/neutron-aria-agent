@@ -1,7 +1,7 @@
 use crate::common::{
     ct_acl_cache_is_current, ct_apply_confirmed_hit, ct_snapshot_is_stable, CtKey4, CtKey6,
     CtValue, PolicyKey, CT_ESTABLISHED, CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT, CT_NEW,
-    IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP,
+    IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IP_FAMILY_V4,
 };
 use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6, CT_VALUE_SCRATCH};
 use aya_ebpf::bindings::{BPF_EXIST, BPF_NOEXIST};
@@ -96,7 +96,7 @@ impl MatchedPolicy {
             proto: self.proto,
             direction: self.direction,
             bank: self.bank,
-            pad: [0; 1],
+            ip_family: IP_FAMILY_V4,
         }
     }
 }
@@ -140,9 +140,9 @@ unsafe fn copy_ct_value(dst: *mut CtValue, src: *const CtValue) {
     (*dst).matched_src_id = (*src).matched_src_id;
     (*dst).matched_dst_id = (*src).matched_dst_id;
     (*dst).matched_bank = (*src).matched_bank;
+    (*dst).matched_family = (*src).matched_family;
     (*dst)._pad[0] = (*src)._pad[0];
     (*dst)._pad[1] = (*src)._pad[1];
-    (*dst)._pad[2] = (*src)._pad[2];
     (*dst).last_seen = (*src).last_seen;
     (*dst).pkt_count = (*src).pkt_count;
     (*dst).byte_count = (*src).byte_count;
@@ -263,8 +263,10 @@ pub unsafe fn ct_lookup_v4(
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
+            (*entry).matched_family,
             validate_acl_bank,
             expected_acl_bank,
+            IP_FAMILY_V4,
         ) {
             let _ = CT_TABLE_V4.remove(key);
             return CtLookupResult::Miss(CtMissReason::StaleBank);
@@ -289,8 +291,10 @@ pub unsafe fn ct_lookup_v4(
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
+            (*entry).matched_family,
             validate_acl_bank,
             expected_acl_bank,
+            IP_FAMILY_V4,
         ) {
             let _ = CT_TABLE_V4.remove(&rev);
             return CtLookupResult::Miss(CtMissReason::StaleBank);
@@ -328,8 +332,10 @@ pub unsafe fn ct_lookup_v6(
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
+            (*entry).matched_family,
             validate_acl_bank,
             expected_acl_bank,
+            IP_FAMILY_V4,
         ) {
             let _ = CT_TABLE_V6.remove(key);
             return CtLookupResult::Miss(CtMissReason::StaleBank);
@@ -354,8 +360,10 @@ pub unsafe fn ct_lookup_v6(
         if !ct_acl_cache_is_current(
             (*entry).flags,
             (*entry).matched_bank,
+            (*entry).matched_family,
             validate_acl_bank,
             expected_acl_bank,
+            IP_FAMILY_V4,
         ) {
             let _ = CT_TABLE_V6.remove(&rev);
             return CtLookupResult::Miss(CtMissReason::StaleBank);
@@ -399,7 +407,8 @@ pub unsafe fn ct_create_v4(
         matched_src_id: matched.src_id,
         matched_dst_id: matched.dst_id,
         matched_bank: matched.bank,
-        _pad: [0; 3],
+        matched_family: IP_FAMILY_V4,
+        _pad: [0; 2],
         last_seen: now,
         pkt_count: 1,
         byte_count: pkt_len as u64,
@@ -436,7 +445,8 @@ pub unsafe fn ct_create_v6(
         matched_src_id: matched.src_id,
         matched_dst_id: matched.dst_id,
         matched_bank: matched.bank,
-        _pad: [0; 3],
+        matched_family: IP_FAMILY_V4,
+        _pad: [0; 2],
         last_seen: now,
         pkt_count: 1,
         byte_count: pkt_len as u64,

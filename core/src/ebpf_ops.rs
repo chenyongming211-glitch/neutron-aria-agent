@@ -3,7 +3,7 @@ use crate::common::{
     FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
     MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey,
     QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime, TokenBucket, ACL_BANK_PRIMARY,
-    ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC, TAP_ID_UNASSIGNED,
+    ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC, IP_FAMILY_V4, TAP_ID_UNASSIGNED,
 };
 use crate::state::FirewallState;
 use aya::maps::lpm_trie::Key;

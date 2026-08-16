@@ -1,4 +1,4 @@
-use crate::common::DropKey;
+use crate::common::{DropKey, IP_FAMILY_UNSPECIFIED};
 use crate::maps::{DROP_REASON_STATS, DROP_VALUE_BUF};
 
 #[repr(C)]
@@ -23,7 +23,7 @@ pub unsafe fn record_drop(args: &DropArgs) {
         reason: args.reason,
         direction: args.direction,
         proto: args.proto,
-        pad: 0,
+        ip_family: IP_FAMILY_UNSPECIFIED,
         src_id: args.src_id,
         dst_id: args.dst_id,
     };

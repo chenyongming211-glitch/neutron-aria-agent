@@ -88,7 +88,7 @@ fn policy_key_for_bank(
         proto,
         direction,
         bank: normalize_acl_bank(bank),
-        pad: [0; 1],
+        ip_family: IP_FAMILY_V4,
     }
 }
 
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(key.proto, 6);
         assert_eq!(key.direction, 1);
         assert_eq!(key.bank, 1);
-        assert_eq!(key.pad, [0; 1]);
+        assert_eq!(key.ip_family, IP_FAMILY_V4);
 
         let normalized = policy_key_for_bank(9, 10, 11, 6, 1, 42);
         assert_eq!(normalized.bank, 0);

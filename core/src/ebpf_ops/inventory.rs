@@ -426,7 +426,7 @@ fn validate_strict_pinned_runtime_state(
             proto: rule.proto,
             direction: rule.direction,
             bank: active_acl_bank,
-            pad: [0; 1],
+            ip_family: IP_FAMILY_V4,
         };
         let policy_value = PolicyValue {
             action: stored_policy_action(rule.action, has_port_filter != 0),

@@ -43,7 +43,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
             proto,
             direction: p.direction,
             bank: p.matched_bank,
-            pad: [0; 1],
+            ip_family: p.ip_family,
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);

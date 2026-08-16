@@ -12,7 +12,7 @@ pub struct PolicyKey {
     pub proto: u8,
     pub direction: u8, // 0=ingress, 1=egress
     pub bank: u8,
-    pub pad: [u8; 1],
+    pub ip_family: u8,
 }
 
 #[repr(C)]
@@ -31,6 +31,20 @@ pub const IPPROTO_TCP: u8 = 6;
 pub const IPPROTO_UDP: u8 = 17;
 pub const IPPROTO_ICMP: u8 = 1;
 pub const IPPROTO_ICMPV6: u8 = 58;
+
+pub const IP_FAMILY_UNSPECIFIED: u8 = 0;
+pub const IP_FAMILY_V4: u8 = 4;
+pub const IP_FAMILY_V6: u8 = 6;
+
+#[inline(always)]
+pub const fn policy_family_is_valid(family: u8) -> bool {
+    family == IP_FAMILY_V4 || family == IP_FAMILY_V6
+}
+
+#[inline(always)]
+pub const fn drop_family_is_valid(family: u8) -> bool {
+    family == IP_FAMILY_UNSPECIFIED || policy_family_is_valid(family)
+}
 
 pub const DIR_INGRESS: u8 = 0;
 pub const DIR_EGRESS: u8 = 1;
@@ -111,15 +125,23 @@ pub fn ct_acl_bank_is_current(
 }
 
 #[inline(always)]
+pub fn ct_acl_family_is_current(matched_family: u8, expected_family: u8) -> bool {
+    policy_family_is_valid(expected_family) && matched_family == expected_family
+}
+
+#[inline(always)]
 pub fn ct_acl_cache_is_current(
     flags: u8,
     matched_bank: u8,
+    matched_family: u8,
     validate_acl_bank: u8,
     expected_acl_bank: u8,
+    expected_family: u8,
 ) -> bool {
     validate_acl_bank == 0
         || ((flags & CT_FLAG_ACL_EVALUATED) != 0
-            && ct_acl_bank_is_current(matched_bank, validate_acl_bank, expected_acl_bank))
+            && ct_acl_bank_is_current(matched_bank, validate_acl_bank, expected_acl_bank)
+            && ct_acl_family_is_current(matched_family, expected_family))
 }
 
 #[repr(C)]
@@ -134,7 +156,8 @@ pub struct CtValue {
     // Keep the 8-byte alignment before last_seen explicit so older verifiers
     // do not see an uninitialized padding hole during map_update_elem.
     pub matched_bank: u8,
-    pub _pad: [u8; 3],
+    pub matched_family: u8,
+    pub _pad: [u8; 2],
     pub last_seen: u64,
     pub pkt_count: u64,
     pub byte_count: u64,
@@ -158,9 +181,9 @@ pub fn ct_snapshot_is_stable(first: &CtValue, second: Option<&CtValue>) -> bool 
         && first.matched_src_id == second.matched_src_id
         && first.matched_dst_id == second.matched_dst_id
         && first.matched_bank == second.matched_bank
+        && first.matched_family == second.matched_family
         && first._pad[0] == second._pad[0]
         && first._pad[1] == second._pad[1]
-        && first._pad[2] == second._pad[2]
         && first.last_seen == second.last_seen
         && first.pkt_count == second.pkt_count
         && first.byte_count == second.byte_count
@@ -416,7 +439,7 @@ pub struct DropKey {
     pub reason: u8,
     pub direction: u8,
     pub proto: u8,
-    pub pad: u8,
+    pub ip_family: u8,
     pub src_id: u32,
     pub dst_id: u32,
 }
@@ -619,7 +642,7 @@ pub struct PipelineCtx {
     pub matched_proto: u8,
     pub matched_direction: u8,
     pub matched_bank: u8,
-    pub _pad2: [u8; 1],
+    pub ip_family: u8,
 
     // One-packet authority snapshot, sampled after tap resolution.
     pub fragment_epoch_snapshot: u64,
@@ -648,7 +671,7 @@ impl PipelineCtx {
         self.matched_proto = 0;
         self.matched_direction = 0;
         self.matched_bank = 0;
-        self._pad2 = [0; 1];
+        self.ip_family = IP_FAMILY_V4;
         self.fragment_epoch_snapshot = 0;
         self.acl_bank_snapshot = 0;
         self.fragment_epoch_present = 0;
@@ -910,8 +933,8 @@ pub mod userspace {
         FRAGMENT_METRIC_MAX, FRAGMENT_METRIC_NON_INITIAL, FRAGMENT_METRIC_TAP_UNASSIGNED,
         FRAGMENT_METRIC_TRACKING_DISABLED, FRAGMENT_RUNTIME_MODE_MANAGED,
         FRAGMENT_RUNTIME_MODE_STANDALONE, KERNEL_DROP_FLAG_HAS_LOCATION,
-        KERNEL_DROP_FLAG_HAS_PROTOCOL, KERNEL_DROP_FLAG_HAS_REASON, TAP_ID_UNASSIGNED,
-        TRACE_RESULT_DROP_FRAGMENT,
+        IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6, KERNEL_DROP_FLAG_HAS_PROTOCOL,
+        KERNEL_DROP_FLAG_HAS_REASON, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_FRAGMENT,
     };
 }
 
@@ -1026,10 +1049,32 @@ mod tests {
 
     #[test]
     fn tc_ct_cache_requires_acl_evaluation_when_acl_turns_on() {
-        assert!(ct_acl_cache_is_current(0, 0, 0, 0));
-        assert!(!ct_acl_cache_is_current(0, 0, 1, 0));
-        assert!(ct_acl_cache_is_current(CT_FLAG_ACL_EVALUATED, 0, 1, 0,));
-        assert!(!ct_acl_cache_is_current(CT_FLAG_ACL_EVALUATED, 0, 1, 1,));
+        assert!(ct_acl_cache_is_current(0, 0, IP_FAMILY_V4, 0, 0, IP_FAMILY_V4));
+        assert!(!ct_acl_cache_is_current(0, 0, IP_FAMILY_V4, 1, 0, IP_FAMILY_V4));
+        assert!(ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            IP_FAMILY_V4,
+            1,
+            0,
+            IP_FAMILY_V4,
+        ));
+        assert!(!ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            IP_FAMILY_V4,
+            1,
+            1,
+            IP_FAMILY_V4,
+        ));
+        assert!(!ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            IP_FAMILY_V6,
+            1,
+            0,
+            IP_FAMILY_V4,
+        ));
     }
 
     fn ct_concurrency_fixture() -> CtValue {
@@ -1041,7 +1086,8 @@ mod tests {
             matched_src_id: 101,
             matched_dst_id: 202,
             matched_bank: ACL_BANK_SHADOW,
-            _pad: [0; 3],
+            matched_family: IP_FAMILY_V4,
+            _pad: [0; 2],
             last_seen: 1_000,
             pkt_count: 7,
             byte_count: 700,
@@ -1085,7 +1131,11 @@ mod tests {
                 ..first
             },
             CtValue {
-                _pad: [1, 0, 0],
+                matched_family: IP_FAMILY_V6,
+                ..first
+            },
+            CtValue {
+                _pad: [1, 0],
                 ..first
             },
             CtValue {

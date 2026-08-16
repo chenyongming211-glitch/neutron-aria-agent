@@ -2,7 +2,7 @@ use crate::common::{
     fragment_metric_index, CtKey4, CtKey6, CtValue, FlowStatsValue, FragmentContextKey4,
     FragmentContextKey6, FragmentContextValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
     MirrorKey, MirrorStatsValue, PolicyKey, QosKey, QosStatsValue, RuleStatsValue, TapMapRuntime,
-    TcpRtValue, CT_ESTABLISHED, CT_NEW, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
+    TcpRtValue, CT_ESTABLISHED, CT_NEW, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6, IP_FAMILY_V4,
     FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_HIT, FRAGMENT_METRIC_CONTEXT_INSERTED,
     FRAGMENT_METRIC_CONTEXT_MISSING, FRAGMENT_METRIC_CONTEXT_OVERLAP,
     FRAGMENT_METRIC_CONTEXT_STALE, FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
@@ -1015,7 +1015,7 @@ pub fn clear_rule_stats_for_policy(
         proto,
         direction,
         bank,
-        pad: [0; 1],
+        ip_family: IP_FAMILY_V4,
     });
     execute_counted_map_delete_batch(
         keys,

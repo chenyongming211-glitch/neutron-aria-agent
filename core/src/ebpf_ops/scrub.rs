@@ -603,7 +603,7 @@ mod tests {
             proto: 6,
             direction: 1,
             bank: 1,
-            pad: [0; 1],
+            ip_family: IP_FAMILY_V4,
         };
 
         assert!(policy_key_matches_bank(&key, 3, 1));

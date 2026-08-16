@@ -496,7 +496,7 @@ fn replay_state_from_snapshot_with_mode(
                         proto: rule.proto,
                         direction: rule.direction,
                         bank: 0,
-                        pad: [0; 1],
+                        ip_family: IP_FAMILY_V4,
                     };
                     let value = PolicyValue {
                         action: stored_policy_action(rule.action, has_port_filter != 0),

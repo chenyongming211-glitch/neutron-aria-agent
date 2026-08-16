@@ -1,7 +1,7 @@
 use aya::maps::{MapData, MapError, PerCpuHashMap};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::common::{DropKey, DropValue, PolicyKey, RuleStatsValue};
+use crate::common::{DropKey, DropValue, PolicyKey, RuleStatsValue, IP_FAMILY_V4};
 use crate::drop_ops::{sum_per_cpu_drop, DropStatsEntry};
 use crate::monitoring::{sum_per_cpu_rule_stats, RuleStatsEntry};
 
@@ -276,7 +276,7 @@ mod tests {
                 proto,
                 direction: dir,
                 bank: 0,
-                pad: [0; 1],
+                ip_family: IP_FAMILY_V4,
             },
             packets,
             bytes,
