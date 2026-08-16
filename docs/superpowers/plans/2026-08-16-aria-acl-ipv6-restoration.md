@@ -57,6 +57,8 @@ Tasks 2 through 10 change shared ABI or contract files. Execute them serially an
 - Modify: `openstack/neutron_aria/neutron_aria/tests/unit/test_config.py`
 - Modify: `deploy/kolla/config/neutron-aria-agent.ini`
 - Modify: `ci/check_neutron_stage1.py`
+- Modify: `docs/openstack-neutron-aria-details/01-ini-contract.md`
+- Modify: `docs/openstack-neutron-agent-mode.md`
 
 **Interfaces:**
 - Consumes: the approved `IPv4|IPv6`, ICMP, CIDR, address-set, and default-off contracts.
@@ -194,6 +196,8 @@ Keep `normalize_ipv4_cidr(value)` as a compatibility wrapper around `normalize_c
 
 Add `DEFAULT_IPV6_ACL_ENABLED = False`, an `ipv6_acl_enabled` constructor field, `[acl]` parsing, and packaged `ipv6_acl_enabled = false`. Extend `check_packaged_ini_contract`, `check_documented_ini_contract`, and `REQUIRED_PYTHON_BEHAVIORS` with the exact new default test.
 
+Document the new default-off option in the two authoritative configuration-contract documents in this task, so the documented-INI gate remains truthful from the first implementation commit. Task 11 later expands the operator and rollout guidance; it does not defer this contract declaration.
+
 Declare the dependency as:
 
 ```text
@@ -214,12 +218,12 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 git diff --check
 ```
 
-Expected: all selected unit tests pass, fast contracts exit `0`, and `git diff --check` prints nothing.
+Expected locally: all selected unit tests pass and `git diff --check` prints nothing. The full fast-contract command may reach the repository's macOS-incompatible peer-credential shell fixture; if so, record that pre-existing environment-specific failure exactly and do not claim the full gate passed. The authoritative full fast-contract result is the exact-head hosted CI job in Step 5.
 
 - [ ] **Step 5: Commit and push Task 1**
 
 ```bash
-git add openstack/neutron_aria deploy/kolla/config/neutron-aria-agent.ini ci/check_neutron_stage1.py
+git add openstack/neutron_aria deploy/kolla/config/neutron-aria-agent.ini ci/check_neutron_stage1.py docs/openstack-neutron-aria-details/01-ini-contract.md docs/openstack-neutron-agent-mode.md
 git commit -m "feat(acl): define dual-stack Python family contract"
 git push origin main
 ```
