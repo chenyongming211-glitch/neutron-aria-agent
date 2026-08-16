@@ -58,6 +58,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod"],
     ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod", "fragment_"],
     ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod", "acl_family_"],
+    ["test", "--locked", "-p", "aria-core", "acl_ipv6_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_tc_acl_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_runtime_transition_is_atomic"],
