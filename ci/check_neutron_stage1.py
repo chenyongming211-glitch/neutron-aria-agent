@@ -126,6 +126,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_tap_id_change_resets_the_sample",
     "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
     "test_non_increasing_sample_time_resets_the_sample",
+    "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
+    "test_counter_rows_keep_same_selector_ids_in_two_families",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
     "test_full_resync_builds_and_submits_snapshot",
     "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
@@ -140,6 +142,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_global_degraded_rewrites_cached_acl_rows_to_bypass",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
     "test_port_counters_blob_builds_rows_when_present",
+    "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
+    "test_port_counters_blob_preserves_v2_family_identity",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
     "test_port_counters_blob_is_none_without_counters",
     "neutron_aria.tests.unit.test_status_reporter.CountersReportTestCase."
@@ -162,6 +166,12 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_ipv4_snapshot_remains_allowed_during_capability_rollout",
     "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
     "test_status_v3_counters_section_is_preserved",
+    "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
+    "test_counters_v1_remains_accepted_with_unknown_family",
+    "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
+    "test_counters_v2_bucket_requires_ipv4_or_ipv6_family",
+    "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
+    "test_counters_v2_reason_accepts_non_ip_family_zero",
     "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
     "test_status_v3_without_counters_still_decodes",
     "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
@@ -405,8 +415,10 @@ def check_uds_contract_artifact():
         "body_max_bytes": uds.NEUTRON_BODY_MAX_BYTES,
         "timeout_ms": uds.NEUTRON_TIMEOUT_MS,
         "error_codes_hash": uds.NEUTRON_ERROR_CODES_HASH_V2,
-        "capability_hash": uds.NEUTRON_CAPABILITY_HASH_V3,
+        "capability_hash": uds.NEUTRON_CAPABILITY_HASH_V4,
         "counters_v1": True,
+        "acl_ipv6_v1": True,
+        "counters_v2": True,
     }
     for name, value in expected.items():
         if contract.get(name) != value:
@@ -597,7 +609,7 @@ def check_status_v1_contract():
         or schema_v3.get("version") != 3
         or schema_v3.get("hash") != "v0.9-neutron-status-3"
         or schema_v3.get("error_codes_hash") != "v0.9-neutron-errors-3"
-        or schema_v3.get("capability_hash") != "v0.9-neutron-capabilities-5"
+        or schema_v3.get("capability_hash") != "v0.9-neutron-capabilities-6"
         or schema_v3.get("new_required_action") != "retry_snapshot"
     ):
         raise SystemExit("ERROR: Status V3 fixture contract metadata drifted")
@@ -621,9 +633,17 @@ def check_status_v1_contract():
     if counters_scenario is None:
         raise SystemExit("ERROR: Status V3 counters scenario missing")
     counters = counters_scenario.get("status", {}).get("counters")
-    if not isinstance(counters, dict) or counters.get("counters_schema_version") != 1:
+    if not isinstance(counters, dict) or counters.get("counters_schema_version") != 2:
         raise SystemExit("ERROR: Status V3 counters section metadata drifted")
     sample_port = (counters.get("ports") or [{}])[0]
+    if any(
+        row.get("ip_family") not in (4, 6)
+        for row in sample_port.get("buckets") or []
+    ) or any(
+        row.get("ip_family") not in (0, 4, 6)
+        for row in sample_port.get("reasons") or []
+    ):
+        raise SystemExit("ERROR: Status V3 counter family metadata drifted")
     if not isinstance(sample_port.get("groups"), list) or not (
         sample_port["groups"]
         and set(sample_port["groups"][0]) == {"id", "cidrs"}

@@ -830,7 +830,7 @@ def _decode_status_v2(body):
     )
 
 
-def _decode_counters_v1(counters):
+def _decode_counters(counters, expected_version):
     if not isinstance(counters, dict):
         raise LocalApiContractError("counters must be an object")
     decoded = {
@@ -845,7 +845,7 @@ def _decode_counters_v1(counters):
             minimum=0,
         ),
     }
-    if decoded["counters_schema_version"] != 1:
+    if decoded["counters_schema_version"] != expected_version:
         raise LocalApiContractError("unsupported counters schema version")
     counters_error = counters.get("counters_error")
     if counters_error is not None:
@@ -896,7 +896,7 @@ def _decode_counters_v1(counters):
             row_prefix = "%s.buckets[%s]" % (prefix, row_index)
             if not isinstance(row, dict):
                 raise LocalApiContractError("invalid %s %r" % (row_prefix, row))
-            decoded_buckets.append({
+            decoded_bucket = {
                 "src_id": _strict_int(_required(row, "src_id"), "%s.src_id" % row_prefix, minimum=0),
                 "dst_id": _strict_int(_required(row, "dst_id"), "%s.dst_id" % row_prefix, minimum=0),
                 "proto": _strict_int(_required(row, "proto"), "%s.proto" % row_prefix, minimum=0),
@@ -905,7 +905,20 @@ def _decode_counters_v1(counters):
                 "bytes": _strict_int(_required(row, "bytes"), "%s.bytes" % row_prefix, minimum=0),
                 "dropped_packets": _strict_int(_required(row, "dropped_packets"), "%s.dropped_packets" % row_prefix, minimum=0),
                 "dropped_bytes": _strict_int(_required(row, "dropped_bytes"), "%s.dropped_bytes" % row_prefix, minimum=0),
-            })
+            }
+            if expected_version == 1:
+                decoded_bucket["ip_family"] = None
+            else:
+                decoded_bucket["ip_family"] = _strict_int(
+                    _required(row, "ip_family"),
+                    "%s.ip_family" % row_prefix,
+                    minimum=0,
+                )
+                if decoded_bucket["ip_family"] not in (4, 6):
+                    raise LocalApiContractError(
+                        "invalid %s.ip_family" % row_prefix
+                    )
+            decoded_buckets.append(decoded_bucket)
             if decoded_buckets[-1]["direction"] not in (0, 1):
                 raise LocalApiContractError("invalid %s.direction" % row_prefix)
             if decoded_buckets[-1]["proto"] > 255:
@@ -919,13 +932,26 @@ def _decode_counters_v1(counters):
             row_prefix = "%s.reasons[%s]" % (prefix, row_index)
             if not isinstance(row, dict):
                 raise LocalApiContractError("invalid %s %r" % (row_prefix, row))
-            decoded_reasons.append({
+            decoded_reason = {
                 "reason": _strict_int(_required(row, "reason"), "%s.reason" % row_prefix, minimum=0),
                 "direction": _strict_int(_required(row, "direction"), "%s.direction" % row_prefix, minimum=0),
                 "proto": _strict_int(_required(row, "proto"), "%s.proto" % row_prefix, minimum=0),
                 "packets": _strict_int(_required(row, "packets"), "%s.packets" % row_prefix, minimum=0),
                 "bytes": _strict_int(_required(row, "bytes"), "%s.bytes" % row_prefix, minimum=0),
-            })
+            }
+            if expected_version == 1:
+                decoded_reason["ip_family"] = None
+            else:
+                decoded_reason["ip_family"] = _strict_int(
+                    _required(row, "ip_family"),
+                    "%s.ip_family" % row_prefix,
+                    minimum=0,
+                )
+                if decoded_reason["ip_family"] not in (0, 4, 6):
+                    raise LocalApiContractError(
+                        "invalid %s.ip_family" % row_prefix
+                    )
+            decoded_reasons.append(decoded_reason)
             if decoded_reasons[-1]["direction"] not in (0, 1):
                 raise LocalApiContractError("invalid %s.direction" % row_prefix)
             if decoded_reasons[-1]["reason"] > 255 or decoded_reasons[-1]["proto"] > 255:
@@ -953,6 +979,20 @@ def _decode_counters_v1(counters):
     return decoded
 
 
+def _decode_counters_v1(counters):
+    return _decode_counters(counters, 1)
+
+
+def _decode_counters_v2(counters):
+    return _decode_counters(counters, 2)
+
+
+def _counter_decoder(counters):
+    if isinstance(counters, dict) and counters.get("counters_schema_version") == 2:
+        return _decode_counters_v2, "invalid_counters_v2", 2
+    return _decode_counters_v1, "invalid_counters_v1", 1
+
+
 def _decode_status_v3(body):
     decoded = _decode_status_versioned(
         body,
@@ -962,13 +1002,14 @@ def _decode_status_v3(body):
         allow_retry_snapshot=True,
     )
     if "counters" in body:
+        decoder, error_code, schema_version = _counter_decoder(body["counters"])
         try:
-            decoded["counters"] = _decode_counters_v1(body["counters"])
+            decoded["counters"] = decoder(body["counters"])
         except LocalApiContractError as exc:
             decoded["counters"] = {
-                "counters_schema_version": 1,
+                "counters_schema_version": schema_version,
                 "sampled_at_ms": 0,
-                "counters_error": "invalid_counters_v1: %s" % exc,
+                "counters_error": "%s: %s" % (error_code, exc),
                 "ports": [],
             }
     return decoded

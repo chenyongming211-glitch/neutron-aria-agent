@@ -1,9 +1,9 @@
 use aria_api::{
     action_from_string, direction_from_string, ManagedNeutronPort,
-    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronCounterBucketV1,
-    NeutronCounterGroupV1, NeutronCounterReasonV1, NeutronDeleteResponse, NeutronDomainStatus,
-    NeutronPortApplyResult, NeutronPortCountersV1, NeutronPortSnapshot, NeutronPortStatus,
-    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusCountersV1,
+    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronCounterBucketV2,
+    NeutronCounterGroupV1, NeutronCounterReasonV2, NeutronDeleteResponse, NeutronDomainStatus,
+    NeutronPortApplyResult, NeutronPortCountersV2, NeutronPortSnapshot, NeutronPortStatus,
+    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusCountersV2,
     NeutronStatusDomainEvidence, NeutronStatusDomainState, NeutronStatusEffectiveAction,
     NeutronStatusOverallReadiness, NeutronStatusPortEvidence, NeutronStatusRecoveryCause,
     NeutronStatusRequiredAction, NeutronStatusSupportDisposition, NeutronStatusTransactionState,
@@ -12,6 +12,7 @@ use aria_api::{
     NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
 use aria_core::port_counters::read_port_counters;
+use aria_core::common::{drop_family_is_valid, policy_family_is_valid};
 use axum::{
     extract::DefaultBodyLimit,
     extract::{Path, Query, State},
@@ -2188,7 +2189,7 @@ fn counters_groups(state_path: &str) -> Vec<NeutronCounterGroupV1> {
     groups
 }
 
-/// Build the optional counters v1 section for a status response.
+/// Build the optional counters v2 section for a status response.
 ///
 /// Best-effort by design: reads the shared managed pin path maps once and maps
 /// rows back to managed ports via the ifname -> tap_id snapshot. Any tap id
@@ -2200,7 +2201,7 @@ fn build_neutron_counters_section(
     ports: &BTreeMap<String, ManagedNeutronPort>,
     tap_ids: &std::collections::HashMap<String, u32>,
     state_paths: &std::collections::HashMap<String, std::path::PathBuf>,
-) -> Option<NeutronStatusCountersV1> {
+) -> Option<NeutronStatusCountersV2> {
     let sampled_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -2209,7 +2210,7 @@ fn build_neutron_counters_section(
 
     let (tap_to_port, tap_list) = counters_tap_mapping(ports, tap_ids);
     if tap_list.is_empty() {
-        return Some(NeutronStatusCountersV1 {
+        return Some(NeutronStatusCountersV2 {
             counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
             sampled_at_ms,
             counters_error: None,
@@ -2226,10 +2227,22 @@ fn build_neutron_counters_section(
         let Some(port_id) = tap_to_port.get(&summary.tap_id) else {
             continue;
         };
-        let buckets: Vec<NeutronCounterBucketV1> = summary
+        if summary
             .buckets
             .iter()
-            .map(|b| NeutronCounterBucketV1 {
+            .any(|bucket| !policy_family_is_valid(bucket.ip_family))
+            || summary
+                .reasons
+                .iter()
+                .any(|reason| !drop_family_is_valid(reason.ip_family))
+        {
+            return Some(error_section("invalid_counter_ip_family".to_string()));
+        }
+        let buckets: Vec<NeutronCounterBucketV2> = summary
+            .buckets
+            .iter()
+            .map(|b| NeutronCounterBucketV2 {
+                ip_family: b.ip_family,
                 src_id: b.src_id,
                 dst_id: b.dst_id,
                 proto: b.proto,
@@ -2240,10 +2253,11 @@ fn build_neutron_counters_section(
                 dropped_bytes: b.dropped_bytes,
             })
             .collect();
-        let reasons: Vec<NeutronCounterReasonV1> = summary
+        let reasons: Vec<NeutronCounterReasonV2> = summary
             .reasons
             .iter()
-            .map(|r| NeutronCounterReasonV1 {
+            .map(|r| NeutronCounterReasonV2 {
+                ip_family: r.ip_family,
                 reason: r.reason,
                 direction: r.direction,
                 proto: r.proto,
@@ -2257,7 +2271,7 @@ fn build_neutron_counters_section(
             .and_then(|state_path| state_path.to_str())
             .map(counters_groups)
             .unwrap_or_default();
-        counter_ports.push(NeutronPortCountersV1 {
+        counter_ports.push(NeutronPortCountersV2 {
             port_id: port_id.clone(),
             tap_id: summary.tap_id,
             policy_packets: summary.policy_packets,
@@ -2273,7 +2287,7 @@ fn build_neutron_counters_section(
             groups,
         });
     }
-    Some(NeutronStatusCountersV1 {
+    Some(NeutronStatusCountersV2 {
         counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
         sampled_at_ms,
         counters_error: None,
@@ -2281,8 +2295,8 @@ fn build_neutron_counters_section(
     })
 }
 
-fn neutron_counters_error(sampled_at_ms: u64, reason: String) -> NeutronStatusCountersV1 {
-    NeutronStatusCountersV1 {
+fn neutron_counters_error(sampled_at_ms: u64, reason: String) -> NeutronStatusCountersV2 {
+    NeutronStatusCountersV2 {
         counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
         sampled_at_ms,
         counters_error: Some(reason),
@@ -2291,9 +2305,9 @@ fn neutron_counters_error(sampled_at_ms: u64, reason: String) -> NeutronStatusCo
 }
 
 fn enforce_neutron_counters_budget(
-    section: NeutronStatusCountersV1,
+    section: NeutronStatusCountersV2,
     budget: usize,
-) -> NeutronStatusCountersV1 {
+) -> NeutronStatusCountersV2 {
     match serde_json::to_vec(&section) {
         Ok(encoded) if encoded.len() <= budget => section,
         _ => neutron_counters_error(
@@ -8383,7 +8397,7 @@ mod tests {
 
     #[test]
     fn neutron_status_counters_oversize_section_becomes_bounded_error() {
-        let port = NeutronPortCountersV1 {
+        let port = NeutronPortCountersV2 {
             port_id: "p".repeat(1024),
             tap_id: 1,
             policy_packets: 1,
@@ -8398,7 +8412,7 @@ mod tests {
             reasons: Vec::new(),
             groups: Vec::new(),
         };
-        let section = NeutronStatusCountersV1 {
+        let section = NeutronStatusCountersV2 {
             counters_schema_version: NEUTRON_COUNTERS_SCHEMA_VERSION,
             sampled_at_ms: 1000,
             counters_error: None,
@@ -8478,7 +8492,7 @@ mod tests {
         let section =
             build_neutron_counters_section("/nonexistent", &ports, &tap_ids, &state_paths);
         let section = section.expect("empty section must be present");
-        assert_eq!(section.counters_schema_version, 1);
+        assert_eq!(section.counters_schema_version, 2);
         assert!(section.counters_error.is_none());
         assert!(section.ports.is_empty());
     }

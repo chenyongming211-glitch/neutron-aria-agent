@@ -680,6 +680,16 @@ class AriaAclPortStatusShow(_AriaAclShow):
             return "egress"
         return str(direction)
 
+    @staticmethod
+    def _family_name(ip_family):
+        if ip_family == 4:
+            return "IPv4"
+        if ip_family == 6:
+            return "IPv6"
+        if ip_family == 0:
+            return "non-ip/unknown"
+        return "unknown"
+
     @classmethod
     def _group_label(cls, group_id, group_map):
         if group_id is None:
@@ -696,9 +706,10 @@ class AriaAclPortStatusShow(_AriaAclShow):
     def _format_bucket(cls, row, group_map=None):
         group_map = group_map or {}
         return (
-            "src=%s dst=%s proto=%s dir=%s pkts=%s bytes=%s "
+            "family=%s src=%s dst=%s proto=%s dir=%s pkts=%s bytes=%s "
             "dropped=%s pps=%s bps=%s"
             % (
+                cls._family_name(row.get("ip_family")),
                 cls._group_label(row.get("src_id"), group_map),
                 cls._group_label(row.get("dst_id"), group_map),
                 row.get("proto"),
@@ -718,8 +729,9 @@ class AriaAclPortStatusShow(_AriaAclShow):
         if reason_name is None:
             reason_name = "UNKNOWN(%s)" % reason_id
         return (
-            "reason=%s dir=%s pkts=%s bytes=%s pps=%s bps=%s"
+            "family=%s reason=%s dir=%s pkts=%s bytes=%s pps=%s bps=%s"
             % (
+                cls._family_name(row.get("ip_family")),
                 reason_name,
                 cls._direction_name(row.get("direction")),
                 row.get("packets"),

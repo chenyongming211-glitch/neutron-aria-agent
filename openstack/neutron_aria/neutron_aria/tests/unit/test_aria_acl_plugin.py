@@ -2409,6 +2409,44 @@ class AriaAclPluginTestCase(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_counter_replace_keeps_same_selector_ids_in_two_families(self):
+        repository = InMemoryAriaAclRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        shared = {
+            "src_id": 1,
+            "dst_id": 2,
+            "direction": 0,
+            "proto": 6,
+        }
+        rows = []
+        for family in (4, 6):
+            key = dict(shared, ip_family=family)
+            rows.append({
+                "kind": "bucket",
+                "key": key,
+                "packets": family,
+                "bytes": family * 10,
+            })
+
+        plugin.report_aria_acl_port_status(
+            None,
+            {"aria_acl_port_status": {
+                "port_id": "p1",
+                "host": "h1",
+                "status": "ready",
+                "counters_sampled_at_ms": 2000000,
+                "counters_rows": [{
+                    "port_id": "p1",
+                    "summary": {},
+                    "rows": rows,
+                }],
+            }},
+        )
+
+        stored = repository.get_port_counters("p1", host="h1")
+        self.assertEqual(len(stored), 2)
+        self.assertEqual([row["ip_family"] for row in stored], [4, 6])
+
     def test_report_port_status_counter_persistence_failure_is_swallowed(self):
         class FailingCountersRepository(InMemoryAriaAclRepository):
             def upsert_port_counters(self, port_id, host, rows):

@@ -70,6 +70,7 @@ def diff_port_counters(previous, current):
         if not reset_detected:
             for bucket in current.get("buckets") or []:
                 prev_row = matched_previous_row("bucket", {
+                    "ip_family": bucket.get("ip_family"),
                     "src_id": bucket.get("src_id"),
                     "dst_id": bucket.get("dst_id"),
                     "proto": bucket.get("proto"),
@@ -86,6 +87,7 @@ def diff_port_counters(previous, current):
         if not reset_detected:
             for reason in current.get("reasons") or []:
                 prev_row = matched_previous_row("reason", {
+                    "ip_family": reason.get("ip_family"),
                     "reason": reason.get("reason"),
                     "direction": reason.get("direction"),
                     "proto": reason.get("proto"),
@@ -137,6 +139,7 @@ def diff_port_counters(previous, current):
 
     for bucket in (current.get("buckets") or [])[:MAX_BUCKET_ROWS]:
         key_dict = {
+            "ip_family": bucket.get("ip_family"),
             "src_id": bucket.get("src_id"),
             "dst_id": bucket.get("dst_id"),
             "proto": bucket.get("proto"),
@@ -145,6 +148,7 @@ def diff_port_counters(previous, current):
         rows.append(diff_row("bucket", key_dict, bucket, True))
     for reason in current.get("reasons") or []:
         key_dict = {
+            "ip_family": reason.get("ip_family"),
             "reason": reason.get("reason"),
             "direction": reason.get("direction"),
             "proto": reason.get("proto"),

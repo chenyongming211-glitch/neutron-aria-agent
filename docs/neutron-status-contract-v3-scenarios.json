@@ -4,7 +4,7 @@
         "version": 3,
         "hash": "v0.9-neutron-status-3",
         "error_codes_hash": "v0.9-neutron-errors-3",
-        "capability_hash": "v0.9-neutron-capabilities-5",
+        "capability_hash": "v0.9-neutron-capabilities-6",
         "new_required_action": "retry_snapshot"
     },
     "scenarios": [
@@ -206,7 +206,7 @@
                 "port_statuses": [],
                 "active_instances": [],
                 "counters": {
-                    "counters_schema_version": 1,
+                    "counters_schema_version": 2,
                     "sampled_at_ms": 1789000000000,
                     "ports": [
                         {
@@ -222,6 +222,7 @@
                             "truncated": false,
                             "buckets": [
                                 {
+                                    "ip_family": 4,
                                     "src_id": 1,
                                     "dst_id": 2,
                                     "proto": 6,
@@ -234,6 +235,7 @@
                             ],
                             "reasons": [
                                 {
+                                    "ip_family": 4,
                                     "reason": 1,
                                     "direction": 0,
                                     "proto": 6,
@@ -241,6 +243,7 @@
                                     "bytes": 300
                                 },
                                 {
+                                    "ip_family": 0,
                                     "reason": 9,
                                     "direction": 0,
                                     "proto": 0,

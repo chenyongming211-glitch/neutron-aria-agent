@@ -10,6 +10,14 @@ depends_on = None
 STATUS_TABLE = "aria_acl_port_statuses"
 COUNTER_TABLE = "aria_acl_port_counters"
 COUNTER_INDEX = "uq_aria_acl_port_counters_natural"
+COUNTER_INDEX_COLUMNS_V1 = [
+    "port_id", "host", "kind", "src_id", "dst_id", "proto", "direction",
+    "reason",
+]
+COUNTER_INDEX_COLUMNS_V2 = [
+    "port_id", "host", "kind", "ip_family", "src_id", "dst_id", "proto",
+    "direction", "reason",
+]
 
 
 def _load_alembic_modules():
@@ -61,22 +69,92 @@ def _create_counter_table(op_handle, sa):
     )
 
 
-def _create_counter_index(op_handle):
+def _create_counter_index(op_handle, columns=None):
     op_handle.create_index(
         COUNTER_INDEX,
         COUNTER_TABLE,
-        [
-            "port_id",
-            "host",
-            "kind",
-            "src_id",
-            "dst_id",
-            "proto",
-            "direction",
-            "reason",
-        ],
+        columns or COUNTER_INDEX_COLUMNS_V1,
         unique=True,
     )
+
+
+def upgrade_counter_family(op_handle=None, sa_module=None):
+    if op_handle is None or sa_module is None:
+        loaded_op, loaded_sa = _load_alembic_modules()
+        op_handle = op_handle or loaded_op
+        sa_module = sa_module or loaded_sa
+    if op_handle is None or sa_module is None:
+        return False
+    op_handle.add_column(
+        COUNTER_TABLE,
+        sa_module.Column("ip_family", sa_module.Integer(), nullable=True),
+    )
+    op_handle.drop_index(COUNTER_INDEX, table_name=COUNTER_TABLE)
+    _create_counter_index(op_handle, COUNTER_INDEX_COLUMNS_V2)
+    return True
+
+
+def upgrade_counter_family_existing_schema(
+        bind, op_handle=None, sa_module=None, inspector=None):
+    """Idempotently add family-qualified counter identity to an existing DB."""
+    if sa_module is None:
+        try:
+            import sqlalchemy as sa_module
+        except Exception:
+            raise RuntimeError("sqlalchemy is required for aria_acl migration")
+    connection_type = getattr(getattr(sa_module, "engine", None), "Connection", ())
+    if op_handle is None and not isinstance(bind, connection_type):
+        with bind.begin() as connection:
+            return upgrade_counter_family_existing_schema(
+                connection,
+                sa_module=sa_module,
+                inspector=sa_module.inspect(connection),
+            )
+    if inspector is None:
+        inspector = sa_module.inspect(bind)
+    if op_handle is None:
+        try:
+            from alembic.migration import MigrationContext
+            from alembic.operations import Operations
+        except Exception:
+            raise RuntimeError("alembic is required for aria_acl migration")
+        op_handle = Operations(MigrationContext.configure(bind))
+
+    columns = set(
+        column["name"] for column in inspector.get_columns(COUNTER_TABLE)
+    )
+    changed = False
+    if "ip_family" not in columns:
+        op_handle.add_column(
+            COUNTER_TABLE,
+            sa_module.Column("ip_family", sa_module.Integer(), nullable=True),
+        )
+        changed = True
+
+    indexes = dict(
+        (index["name"], index)
+        for index in inspector.get_indexes(COUNTER_TABLE)
+    )
+    current = indexes.get(COUNTER_INDEX)
+    if current is None or current.get("column_names") != COUNTER_INDEX_COLUMNS_V2:
+        if current is not None:
+            op_handle.drop_index(COUNTER_INDEX, table_name=COUNTER_TABLE)
+        _create_counter_index(op_handle, COUNTER_INDEX_COLUMNS_V2)
+        changed = True
+    return changed
+
+
+def downgrade_counter_family(op_handle=None, sa_module=None):
+    if op_handle is None or sa_module is None:
+        loaded_op, loaded_sa = _load_alembic_modules()
+        op_handle = op_handle or loaded_op
+        sa_module = sa_module or loaded_sa
+    if op_handle is None or sa_module is None:
+        return False
+    op_handle.drop_index(COUNTER_INDEX, table_name=COUNTER_TABLE)
+    _create_counter_index(op_handle, COUNTER_INDEX_COLUMNS_V1)
+    op_handle.drop_column(COUNTER_TABLE, "ip_family")
+    return True
 
 
 def upgrade(op_handle=None, sa_module=None):

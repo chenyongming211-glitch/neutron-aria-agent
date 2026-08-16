@@ -97,8 +97,10 @@
     ]
   },
   "peer_auth_policy": "filesystem_permissions_then_peercred",
-  "capability_hash": "v0.9-neutron-capabilities-5",
+  "capability_hash": "v0.9-neutron-capabilities-6",
   "counters_v1": true,
+  "acl_ipv6_v1": true,
+  "counters_v2": true,
   "routes": [
     {
       "method": "GET",

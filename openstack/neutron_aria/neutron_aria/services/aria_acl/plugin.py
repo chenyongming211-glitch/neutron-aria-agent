@@ -466,6 +466,7 @@ class AriaAclPlugin(object):
                 key = row.get("key") or {}
                 rows.append({
                     "kind": row.get("kind"),
+                    "ip_family": key.get("ip_family"),
                     "src_id": key.get("src_id"),
                     "dst_id": key.get("dst_id"),
                     "proto": key.get("proto"),

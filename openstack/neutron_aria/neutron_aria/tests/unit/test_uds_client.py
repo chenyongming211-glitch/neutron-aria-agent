@@ -1935,7 +1935,7 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         parsed = _decode_status_v3(scenario["status"])
         self.assertEqual(parsed["status_schema_version"], 3)
         self.assertIn("counters", parsed)
-        self.assertEqual(parsed["counters"]["counters_schema_version"], 1)
+        self.assertEqual(parsed["counters"]["counters_schema_version"], 2)
         self.assertEqual(
             parsed["counters"]["ports"][0]["port_id"], "port-counters-1"
         )
@@ -1943,8 +1943,13 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
     def test_counters_v1_remains_accepted_with_unknown_family(self):
         from neutron_aria.agent.uds_client import _decode_counters_v1
         scenario = status_v3_scenario("counters-present-single-port")
+        counters = copy.deepcopy(scenario["status"]["counters"])
+        counters["counters_schema_version"] = 1
+        for port in counters["ports"]:
+            for row in port["buckets"] + port["reasons"]:
+                row.pop("ip_family", None)
 
-        decoded = _decode_counters_v1(scenario["status"]["counters"])
+        decoded = _decode_counters_v1(counters)
 
         self.assertIsNone(decoded["ports"][0]["buckets"][0]["ip_family"])
         self.assertIsNone(decoded["ports"][0]["reasons"][0]["ip_family"])
@@ -1989,7 +1994,7 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         scenario = status_v3_scenario("counters-present-single-port")
         invalid_sections = [
             [],
-            {"counters_schema_version": 2, "sampled_at_ms": 2000, "ports": []},
+            {"counters_schema_version": 3, "sampled_at_ms": 2000, "ports": []},
             {"counters_schema_version": 1, "sampled_at_ms": -1, "ports": []},
             {"counters_schema_version": 1, "sampled_at_ms": 2000, "ports": "bad"},
             {
@@ -2027,9 +2032,11 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         capabilities.update({
             "status_schema_version_max": 3,
             "status_contract_hash": "v0.9-neutron-status-3",
-            "capability_hash": "v0.9-neutron-capabilities-5",
+            "capability_hash": "v0.9-neutron-capabilities-6",
             "error_codes_hash": "v0.9-neutron-errors-3",
             "counters_v1": True,
+            "acl_ipv6_v1": True,
+            "counters_v2": True,
         })
         FakeConnection.responses.extend([
             FakeResponse(200, "OK", capabilities),
@@ -2053,9 +2060,11 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
         capabilities.update({
             "status_schema_version_max": 3,
             "status_contract_hash": "v0.9-neutron-status-3",
-            "capability_hash": "v0.9-neutron-capabilities-5",
+            "capability_hash": "v0.9-neutron-capabilities-6",
             "error_codes_hash": "v0.9-neutron-errors-3",
             "counters_v1": True,
+            "acl_ipv6_v1": True,
+            "counters_v2": True,
         })
         FakeConnection.responses.extend([
             FakeResponse(200, "OK", capabilities),

@@ -188,6 +188,7 @@ def _counter_row_sort_key(row):
 
     return (
         row.get("kind") or "",
+        number("ip_family"),
         number("src_id"),
         number("dst_id"),
         number("proto"),
@@ -1127,6 +1128,7 @@ class NeutronDbAriaAclRepository(object):
             query = query.where(table.c.host == host)
         query = query.order_by(
             table.c.kind,
+            table.c.ip_family,
             table.c.src_id,
             table.c.dst_id,
             table.c.proto,
@@ -1392,6 +1394,7 @@ class NeutronDbAriaAclRepository(object):
                 sa.Column("port_id", sa.String(36), nullable=False),
                 sa.Column("host", sa.String(255), nullable=False),
                 sa.Column("kind", sa.String(16), nullable=False),
+                sa.Column("ip_family", sa.Integer()),
                 sa.Column("src_id", sa.Integer()),
                 sa.Column("dst_id", sa.Integer()),
                 sa.Column("proto", sa.Integer()),

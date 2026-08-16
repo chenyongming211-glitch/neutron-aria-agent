@@ -987,6 +987,31 @@ class CountersReportTestCase(unittest.TestCase):
         self.assertEqual(port_row["packets"], 200)
         self.assertIsNone(port_row["pps"])
 
+    def test_port_counters_blob_preserves_v2_family_identity(self):
+        from neutron_aria.agent.status_reporter import _PREVIOUS_COUNTERS
+        from neutron_aria.agent.status_reporter import port_counters_blob
+        _PREVIOUS_COUNTERS.pop("p1", None)
+        runtime = self._runtime(with_counters=True)
+        runtime.last_counters["counters_schema_version"] = 2
+        port = runtime.last_counters["ports"][0]
+        port["buckets"] = [{
+            "ip_family": 6, "src_id": 1, "dst_id": 2, "proto": 6,
+            "direction": 0, "packets": 10, "bytes": 100,
+            "dropped_packets": 1, "dropped_bytes": 10,
+        }]
+        port["reasons"] = [{
+            "ip_family": 0, "reason": 18, "direction": 0, "proto": 0,
+            "packets": 1, "bytes": 10,
+        }]
+
+        blob = port_counters_blob(runtime, "p1")
+        rows = blob["counters_rows"][0]["rows"]
+
+        bucket = [row for row in rows if row["kind"] == "bucket"][0]
+        reason = [row for row in rows if row["kind"] == "reason"][0]
+        self.assertEqual(bucket["key"]["ip_family"], 6)
+        self.assertEqual(reason["key"]["ip_family"], 0)
+
     def test_port_counters_blob_is_none_without_counters(self):
         from neutron_aria.agent.status_reporter import port_counters_blob
         blob = port_counters_blob(
