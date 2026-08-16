@@ -519,6 +519,13 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertIn("aria_acl_bindings", extended)
         self.assertIn("aria_acl_port_statuses", extended)
         self.assertIn("members", extended["aria_acl_address_sets"])
+        self.assertIn("ethertype", extended["aria_acl_address_sets"])
+        self.assertFalse(
+            extended["aria_acl_address_sets"]["ethertype"]["allow_post"]
+        )
+        self.assertFalse(
+            extended["aria_acl_address_sets"]["ethertype"]["allow_put"]
+        )
         self.assertIn("target_type", extended["aria_acl_bindings"])
         self.assertIn("status", extended["aria_acl_port_statuses"])
         self.assertIn("effective_action", extended["aria_acl_port_statuses"])
@@ -1357,6 +1364,25 @@ class AriaAclPluginTestCase(unittest.TestCase):
         plugin.delete_aria_acl_address_set(None, "set-1")
         plugin.delete_aria_acl_policy(None, "policy-1")
         self.assertEqual([], plugin.get_aria_acl_policies(None))
+
+    def test_address_set_responses_expose_computed_ethertype(self):
+        plugin = AriaAclPlugin()
+        created = plugin.create_aria_acl_address_set(None, {
+            "id": "set-v6",
+            "project_id": "project-1",
+            "members": [{"address": "2001:db8::7/64"}],
+        })
+
+        self.assertEqual("IPv6", created["ethertype"])
+        self.assertEqual(
+            "IPv6",
+            plugin.get_aria_acl_address_set(None, "set-v6")["ethertype"],
+        )
+        self.assertEqual(
+            ["IPv6"],
+            [item["ethertype"] for item in
+             plugin.get_aria_acl_address_sets(None)],
+        )
 
     def test_acl_policy_rule_and_binding_writes_emit_rpc_notifications(self):
         notifier = FakeNotifier()

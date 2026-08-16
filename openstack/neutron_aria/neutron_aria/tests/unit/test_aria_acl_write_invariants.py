@@ -241,6 +241,16 @@ class RepositoryWriteInvariantBehavior(object):
         self.assertEqual("IPv4", rule["ethertype"])
         self.assertEqual(rule, self.repository.get_rule("rule-1"))
 
+    def test_ipv6_rule_is_canonicalized_and_persisted(self):
+        self.create_policy()
+        rule = self.repository.create_rule(self.rule_values(
+            ethertype="ipv6",
+            src_cidr="2001:db8::7/64",
+        ))
+        self.assertEqual("IPv6", rule["ethertype"])
+        self.assertEqual("2001:db8::/64", rule["src_cidr"])
+        self.assertEqual(rule, self.repository.get_rule("rule-1"))
+
     def test_address_set_write_canonicalizes_deduplicates_and_sorts(self):
         address_set = self.create_address_set(members=[
             "10.0.1.9/24",
@@ -328,6 +338,13 @@ class RepositoryWriteInvariantBehavior(object):
     def test_referenced_address_set_cannot_be_emptied(self):
         self.create_referenced_set()
         self.assert_address_set_update_rejected("set-1", {"members": []})
+
+    def test_address_set_update_cannot_cross_enabled_rule_family(self):
+        self.create_referenced_set()
+        self.assert_address_set_update_rejected(
+            "set-1",
+            {"members": ["2001:db8::1/128"]},
+        )
 
     def test_referenced_address_set_rejects_invalid_members(self):
         self.create_referenced_set()

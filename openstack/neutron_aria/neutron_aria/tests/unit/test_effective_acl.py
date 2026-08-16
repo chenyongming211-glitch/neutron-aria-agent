@@ -162,21 +162,42 @@ class EffectiveAclTestCase(unittest.TestCase):
         self.assertEqual([], result["rules"])
         self.assertNotIn("invalid_acl_ipv4_cidr", result["reason"])
 
-    def test_enabled_ipv6_rule_remains_degraded_until_compiler_exists(self):
+    def test_enabled_ipv6_rule_compiles_when_gate_is_enabled(self):
         result = effective_acl([
             acl_rule(
-                "ipv6-unimplemented", 10,
+                "ipv6-enabled", 10,
                 ethertype="IPv6",
                 protocol="icmp",
                 src_cidr="2001:db8::7/64",
             ),
         ], ipv6_acl_enabled=True)
 
-        self.assertFalse(result["enabled"])
-        self.assertEqual(ACL_DEGRADED, result["status"])
-        self.assertEqual("bypass", result["effective_action"])
-        self.assertEqual("ipv6_acl_not_implemented", result["reason"])
-        self.assertEqual([], result["rules"])
+        self.assertTrue(result["enabled"])
+        self.assertEqual(ACL_READY, result["status"])
+        self.assertEqual("enforce", result["effective_action"])
+        self.assertEqual("ready", result["reason"])
+        self.assertEqual("IPv6", result["rules"][0]["ethertype"])
+        self.assertEqual(["2001:db8::/64"], result["rules"][0]["src_cidrs"])
+
+    def test_dual_stack_effective_snapshot_keeps_two_explicit_rules(self):
+        result = effective_acl([
+            acl_rule("ipv4", 10, src_cidr="192.0.2.7/24"),
+            acl_rule(
+                "ipv6", 20,
+                ethertype="IPv6",
+                protocol="icmpv6",
+                src_cidr="2001:db8::7/64",
+            ),
+        ], ipv6_acl_enabled=True)
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual(ACL_READY, result["status"])
+        self.assertEqual(
+            [("ipv4", "IPv4"), ("ipv6", "IPv6")],
+            [(rule["id"], rule["ethertype"]) for rule in result["rules"]],
+        )
+        self.assertEqual(["192.0.2.0/24"], result["rules"][0]["src_cidrs"])
+        self.assertEqual(["2001:db8::/64"], result["rules"][1]["src_cidrs"])
 
     def test_mixed_ip_family_policy_degrades_when_ipv6_acl_disabled(self):
         result = effective_acl([
