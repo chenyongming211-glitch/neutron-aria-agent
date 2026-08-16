@@ -418,7 +418,8 @@ mod tests {
     #[test]
     fn acl_runtime_schema_legacy_tc_inventory_refuses_cleanup_without_link_pin() {
         let state_path = temp_state_path("legacy-tc-state");
-        let pin_path = temp_state_path("global-v2");
+        let pin_root = temp_state_path("legacy-tc-pins");
+        let pin_path = pin_root.join("global-v2");
         std::fs::create_dir_all(&state_path).unwrap();
         std::fs::create_dir_all(&pin_path).unwrap();
         std::fs::write(
@@ -450,13 +451,14 @@ mod tests {
         assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(old));
 
         std::fs::remove_dir_all(state_path).unwrap();
-        std::fs::remove_dir_all(pin_path).unwrap();
+        std::fs::remove_dir_all(pin_root).unwrap();
     }
 
     #[test]
     fn acl_runtime_schema_malformed_legacy_inventory_blocks_cleanup() {
         let state_path = temp_state_path("malformed-legacy-tc-state");
-        let pin_path = temp_state_path("global-v2");
+        let pin_root = temp_state_path("malformed-legacy-tc-pins");
+        let pin_path = pin_root.join("global-v2");
         std::fs::create_dir_all(&state_path).unwrap();
         std::fs::create_dir_all(&pin_path).unwrap();
         std::fs::write(
@@ -470,7 +472,7 @@ mod tests {
         assert!(error.contains("parse persisted live ifaces"));
         assert!(pin_path.exists(), "unknown legacy activity must fail safely");
         std::fs::remove_dir_all(state_path).unwrap();
-        std::fs::remove_dir_all(pin_path).unwrap();
+        std::fs::remove_dir_all(pin_root).unwrap();
     }
 
     #[test]
