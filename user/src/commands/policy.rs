@@ -222,7 +222,13 @@ pub(crate) async fn handle_action(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_batch_add_policies;
+    use super::{parse_batch_add_policies, policy_table_headers};
+
+    #[test]
+    fn acl_family_cli_list_and_with_stats_render_ethertype() {
+        assert!(policy_table_headers(false).contains(&"Ethertype"));
+        assert!(policy_table_headers(true).contains(&"Ethertype"));
+    }
 
     #[test]
     fn parse_batch_accepts_documented_wrapper() {

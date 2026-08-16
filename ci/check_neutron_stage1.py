@@ -68,6 +68,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "managed_failure_path_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_acl_activation_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_acl_any_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_acl_family_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_acl_publication_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_group_transaction_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_review_"],
@@ -103,6 +104,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "managed_startup_recovery_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_start_clears_"],
     ["test", "--locked", "-p", "ariactl", "api_client_path_segment_"],
+    ["test", "--locked", "-p", "ariactl", "acl_family_cli_"],
     ["test", "--locked", "-p", "aria-agent", "startup_config_"],
     ["test", "-p", "aria-agent", "startup_mode"],
 ]

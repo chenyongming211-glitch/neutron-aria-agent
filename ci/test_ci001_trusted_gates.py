@@ -3,6 +3,7 @@
 
 import contextlib
 import io
+import os
 import subprocess
 import unittest
 from unittest import mock
@@ -64,6 +65,45 @@ class TrustedGateContractTests(unittest.TestCase):
             any("fragment-aware CT hit/miss branch" in error for error in errors),
             errors,
         )
+
+    def test_review_contracts_retain_all_datapath_mutations_and_reject_field_forgery(self):
+        with open(check_tc_acl_datapath.__file__, encoding="utf-8") as handle:
+            checker = handle.read()
+        self.assertNotIn(
+            'if "fragment::resolve_v4" in source:\n        specs = (', checker,
+            "fragment-aware source must run legacy and new mutations together",
+        )
+        for label in (
+            "egress v4 hit QoS drop without return",
+            "ingress v4 miss ACL drop without return",
+            "ingress v4 miss QoS drop without return",
+            "egress v4 miss CT create without runtime guard",
+            "fragment-aware CT hit guard",
+            "fragment context install",
+            "fragment-aware miss branch",
+        ):
+            self.assertIn(label, checker)
+
+        managed_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            check_neutron_stage1.TC_ACL_DATAPATH_SMOKE_PATH,
+        )
+        standalone_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            check_neutron_stage1.STANDALONE_TC_ACL_SMOKE_PATH,
+        )
+        with open(managed_path, encoding="utf-8") as handle:
+            managed = handle.read()
+        with open(standalone_path, encoding="utf-8") as handle:
+            standalone = handle.read()
+        for smoke in (managed, standalone):
+            self.assertIn('FIELD_EVIDENCE_STATUS="deferred/pending"', smoke)
+            self.assertNotIn('FIELD_EVIDENCE_STATUS="${FIELD_EVIDENCE_STATUS:-', smoke)
+            self.assertIn("observed_verdict != \"not run\"", smoke)
+            self.assertIn("prerequisite", smoke)
+        self.assertIn('payload["policies"]', standalone)
+        self.assertIn('"ethertype":"IPv6"', standalone)
+        self.assertIn('DELETE', standalone)
 
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()

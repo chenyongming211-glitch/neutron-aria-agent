@@ -443,3 +443,31 @@ pub async fn batch_add_policies(
         }),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::standalone_policy_family_protocols;
+    use aria_core::common::{IP_FAMILY_V4, IP_FAMILY_V6};
+
+    #[test]
+    fn standalone_acl_family_aware_protocols_expand_any_and_reject_conflicts() {
+        assert_eq!(
+            standalone_policy_family_protocols(Some("any"), "icmp").unwrap(),
+            vec![(IP_FAMILY_V4, 1), (IP_FAMILY_V6, 58)]
+        );
+        assert_eq!(
+            standalone_policy_family_protocols(Some("IPv4"), "icmp").unwrap(),
+            vec![(IP_FAMILY_V4, 1)]
+        );
+        assert_eq!(
+            standalone_policy_family_protocols(Some("IPv6"), "ipv6-icmp").unwrap(),
+            vec![(IP_FAMILY_V6, 58)]
+        );
+        assert_eq!(
+            standalone_policy_family_protocols(Some("any"), "tcp").unwrap(),
+            vec![(IP_FAMILY_V4, 6), (IP_FAMILY_V6, 6)]
+        );
+        assert!(standalone_policy_family_protocols(Some("IPv6"), "icmp").is_err());
+        assert!(standalone_policy_family_protocols(Some("IPv4"), "icmpv6").is_err());
+    }
+}
