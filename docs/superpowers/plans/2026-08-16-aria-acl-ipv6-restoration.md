@@ -560,13 +560,28 @@ fn acl_ipv6_drop_family_zero_is_valid_only_for_drop_accounting() {
 
 #[test]
 fn acl_ipv6_counter_bucket_identity_contains_family() {
-    let identities = std::collections::BTreeSet::from([
-        (4u8, 1u32, 2u32, 6u8, 0u8),
-        (6u8, 1u32, 2u32, 6u8, 0u8),
-    ]);
-    assert_eq!(identities.len(), 2);
+    let rows = rule_rows_with_identical_selectors_for_families(4, 6);
+    let summary = aggregate_port_counters(&rows, &[], 7);
+    assert_eq!(summary.buckets.len(), 2);
+    assert_eq!(
+        summary.buckets.iter().map(|row| row.ip_family).collect::<Vec<_>>(),
+        vec![4, 6],
+    );
+}
+
+#[test]
+fn acl_ipv6_drop_reason_identity_contains_family() {
+    let rows = drop_rows_with_identical_reason_for_families(4, 6);
+    let summary = aggregate_port_counters(&[], &rows, 7);
+    assert_eq!(summary.reasons.len(), 2);
+    assert_eq!(
+        summary.reasons.iter().map(|row| row.ip_family).collect::<Vec<_>>(),
+        vec![4, 6],
+    );
 }
 ```
+
+The first three ABI/key regressions may already pass after Tasks 2 and 3. The RED proof for Task 4 must come from the real counter/drop aggregation tests: they must fail because `PortCounterBucket`, `PortCounterReason`, and `DropStatsEntry` do not yet carry family and reason aggregation still aliases v4/v6. Do not count a synthetic tuple-only set as Task 4 RED evidence.
 
 Add `aria-core acl_ipv6_` to `RUST_TESTS`.
 
