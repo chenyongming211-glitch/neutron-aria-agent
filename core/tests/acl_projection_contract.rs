@@ -74,11 +74,40 @@ fn wal_inventory_ipv6_rule_round_trips_family() {
 }
 
 #[test]
+fn local_projection_add_remove_identity_is_family_qualified() {
+    let mut state = FirewallState::default();
+    state
+        .apply_add_rule(10, 20, 6, 0, None, 0, IP_FAMILY_V4)
+        .expect("IPv4 rule is valid");
+    state
+        .apply_add_rule(10, 20, 6, 1, None, 0, IP_FAMILY_V6)
+        .expect("IPv6 rule with the same legacy identity is distinct");
+
+    assert_eq!(
+        state.rules.iter().map(rule_identity).collect::<Vec<_>>(),
+        vec![(10, 20, 6, 0, 4), (10, 20, 6, 0, 6)]
+    );
+    state
+        .apply_remove_rule(10, 20, 6, 0, IP_FAMILY_V4)
+        .expect("remove targets only the requested family");
+    assert_eq!(rule_identity(&state.rules[0]), (10, 20, 6, 0, 6));
+    assert_eq!(state.rules[0].action, 1);
+    assert!(state
+        .apply_add_rule(10, 20, 6, 0, None, 0, IP_FAMILY_UNSPECIFIED)
+        .is_err());
+}
+
+#[test]
 fn local_projection_legacy_ipv4_rule_infers_family() {
     let mut state = FirewallState::default();
     insert_group(&mut state, "ipv4-source", 10, &["10.0.0.0/24"]);
-    let mut legacy = acl_rule(10, 0);
-    legacy.ip_family = IP_FAMILY_UNSPECIFIED;
+    let mut stored = serde_json::to_value(acl_rule(10, 0)).expect("rule serializes");
+    stored
+        .as_object_mut()
+        .expect("rule is an object")
+        .remove("ip_family");
+    let legacy: RuleInfo = serde_json::from_value(stored).expect("legacy rule deserializes");
+    assert_eq!(legacy.ip_family, IP_FAMILY_UNSPECIFIED);
 
     let migrated = migrate_legacy_rule_families(&legacy, &state.groups)
         .expect("one-family legacy selector must infer its family");
@@ -97,6 +126,15 @@ fn local_projection_legacy_any_rule_expands_both_families() {
     let identities = migrated.iter().map(rule_identity).collect::<Vec<_>>();
 
     assert_eq!(identities, vec![(0, 0, 6, 0, 4), (0, 0, 6, 0, 6)]);
+    let remigrated = migrated
+        .iter()
+        .flat_map(|rule| {
+            migrate_legacy_rule_families(rule, &FirewallState::default().groups)
+                .expect("concrete family migration is idempotent")
+        })
+        .map(|rule| rule_identity(&rule))
+        .collect::<Vec<_>>();
+    assert_eq!(remigrated, identities);
 }
 
 #[test]

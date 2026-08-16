@@ -1,5 +1,9 @@
 use super::*;
 
+fn acl_ip_family_is_valid(ip_family: u8) -> bool {
+    ip_family == IP_FAMILY_V4 || ip_family == IP_FAMILY_V6
+}
+
 fn encode_port_action(action: u8) -> Result<u8, String> {
     match action {
         0 => Ok(2),
@@ -80,6 +84,7 @@ fn policy_key_for_bank(
     proto: u8,
     direction: u8,
     bank: u8,
+    ip_family: u8,
 ) -> PolicyKey {
     PolicyKey {
         tap_id,
@@ -88,7 +93,7 @@ fn policy_key_for_bank(
         proto,
         direction,
         bank: normalize_acl_bank(bank),
-        ip_family: IP_FAMILY_V4,
+        ip_family,
     }
 }
 
@@ -101,6 +106,7 @@ pub fn add_policy(
     bitmap_idx: Option<u32>,
     is_new_port_set: bool,
     direction: u8,
+    ip_family: u8,
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
@@ -114,6 +120,7 @@ pub fn add_policy(
         is_new_port_set,
         direction,
         0,
+        ip_family,
         runtime,
         _ebpf_path,
     )
@@ -129,10 +136,14 @@ pub fn add_policy_in_bank(
     is_new_port_set: bool,
     direction: u8,
     bank: u8,
+    ip_family: u8,
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
+    if !acl_ip_family_is_valid(ip_family) {
+        return Err(format!("invalid ACL IP family {}", ip_family));
+    }
     validate_policy_ports(proto, ports)?;
 
     let is_all_ports = match ports {
@@ -187,7 +198,15 @@ pub fn add_policy_in_bank(
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
     let bank = normalize_acl_bank(bank);
-    let key = policy_key_for_bank(runtime.tap_id, src_id, dst_id, proto, direction, bank);
+    let key = policy_key_for_bank(
+        runtime.tap_id,
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        bank,
+        ip_family,
+    );
     let value = PolicyValue {
         action: stored_policy_action(action, has_port_filter != 0),
         has_port_filter,
@@ -253,10 +272,20 @@ pub fn delete_policy(
     dst_id: u32,
     proto: u8,
     direction: u8,
+    ip_family: u8,
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
-    delete_policy_in_bank(src_id, dst_id, proto, direction, 0, runtime, _ebpf_path)
+    delete_policy_in_bank(
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        0,
+        ip_family,
+        runtime,
+        _ebpf_path,
+    )
 }
 
 pub fn delete_policy_in_bank(
@@ -265,14 +294,26 @@ pub fn delete_policy_in_bank(
     proto: u8,
     direction: u8,
     bank: u8,
+    ip_family: u8,
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
+    if !acl_ip_family_is_valid(ip_family) {
+        return Err(format!("invalid ACL IP family {}", ip_family));
+    }
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
     let bank = normalize_acl_bank(bank);
-    let key = policy_key_for_bank(runtime.tap_id, src_id, dst_id, proto, direction, bank);
+    let key = policy_key_for_bank(
+        runtime.tap_id,
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        bank,
+        ip_family,
+    );
     match classify_map_delete(policy_table.remove(&key), "remove policy")? {
         true => info!(src_id, dst_id, proto, direction, bank, "deleted policy"),
         false => info!(src_id, dst_id, proto, direction, bank, "policy not present during delete"),
@@ -342,7 +383,7 @@ mod tests {
 
     #[test]
     fn policy_key_for_bank_keeps_default_api_on_primary_bank() {
-        let key = policy_key_for_bank(9, 10, 11, 6, 1, 1);
+        let key = policy_key_for_bank(9, 10, 11, 6, 1, 1, IP_FAMILY_V4);
         assert_eq!(key.tap_id, 9);
         assert_eq!(key.src_id, 10);
         assert_eq!(key.dst_id, 11);
@@ -351,7 +392,7 @@ mod tests {
         assert_eq!(key.bank, 1);
         assert_eq!(key.ip_family, IP_FAMILY_V4);
 
-        let normalized = policy_key_for_bank(9, 10, 11, 6, 1, 42);
+        let normalized = policy_key_for_bank(9, 10, 11, 6, 1, 42, IP_FAMILY_V4);
         assert_eq!(normalized.bank, 0);
     }
 }

@@ -6625,6 +6625,7 @@ async fn reconcile_neutron_acl(
             proto: policy.proto,
             action: policy.action,
             direction: policy.direction,
+            ip_family: aria_core::common::IP_FAMILY_V4,
             ports: policy.ports.clone(),
         })
         .collect();

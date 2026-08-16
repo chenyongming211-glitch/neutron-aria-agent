@@ -17,7 +17,7 @@ use crate::ssl_manager::SslManager;
 use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use crate::FragmentTrackingSettings;
-use aria_core::common::TapMapRuntime;
+use aria_core::common::{TapMapRuntime, IP_FAMILY_V4, IP_FAMILY_V6};
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
     replay_managed_state_to_pinned_maps,
@@ -1123,6 +1123,7 @@ pub struct OwnedAclPolicySpec {
     pub proto: u8,
     pub action: u8,
     pub direction: u8,
+    pub ip_family: u8,
     pub ports: Option<String>,
 }
 
@@ -1416,6 +1417,7 @@ struct OwnedAclPolicyKey {
     dst_group: String,
     proto: u8,
     direction: u8,
+    ip_family: u8,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2143,6 +2145,7 @@ fn build_managed_acl_demotion_target(
             rule.dst_group_id,
             rule.proto,
             rule.direction,
+            rule.ip_family,
         )?;
         quarantine_owned_acl_released_port_set(
             &mut final_state,
@@ -3848,6 +3851,7 @@ impl ControlPlane {
             dst_group: Self::owned_acl_group_name_by_id(state, rule.dst_group_id),
             proto: rule.proto,
             direction: rule.direction,
+            ip_family: rule.ip_family,
         }
     }
 
@@ -3864,6 +3868,7 @@ impl ControlPlane {
             dst_group: policy.dst_group.clone(),
             proto: policy.proto,
             direction: policy.direction,
+            ip_family: policy.ip_family,
         }
     }
 
@@ -3910,6 +3915,7 @@ impl ControlPlane {
                 is_new_port_set,
                 rule.direction,
                 bank,
+                rule.ip_family,
                 runtime,
                 ebpf_path,
             )
@@ -3993,6 +3999,12 @@ impl ControlPlane {
         policies: &[OwnedAclPolicySpec],
     ) -> Result<(), ControlPlaneError> {
         for policy in policies {
+            if policy.ip_family != IP_FAMILY_V4 && policy.ip_family != IP_FAMILY_V6 {
+                return Err(ControlPlaneError::ValidationError(format!(
+                    "invalid ACL IP family {}",
+                    policy.ip_family
+                )));
+            }
             if policy.src_group != "any" && !policy.src_group.starts_with(owner_prefix) {
                 return Err(ControlPlaneError::ValidationError(format!(
                     "owned ACL policy src_group '{}' is outside owner prefix '{}'",
@@ -6581,6 +6593,7 @@ impl ControlPlane {
                     policy.action,
                     policy.ports.as_deref(),
                     policy.direction,
+                    policy.ip_family,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
             quarantine_owned_acl_released_port_set(
@@ -6597,6 +6610,7 @@ impl ControlPlane {
                         && rule.dst_group_id == dst_id
                         && rule.proto == policy.proto
                         && rule.direction == policy.direction
+                        && rule.ip_family == policy.ip_family
                 })
                 .cloned()
                 .ok_or_else(|| {
@@ -6618,6 +6632,7 @@ impl ControlPlane {
                     rule.dst_group_id,
                     rule.proto,
                     rule.direction,
+                    rule.ip_family,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
             quarantine_owned_acl_released_port_set(
@@ -9249,12 +9264,20 @@ mod tests {
             .mirror_rules
             .push(managed_cross_domain_mirror_reference(retained_name, 31));
         let released_bitmap = old_state
-            .apply_add_rule(30, 31, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .apply_add_rule(
+                30,
+                31,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .expect("owned ACL port policy must materialize")
             .bitmap_idx
             .expect("port policy must allocate a bitmap");
         old_state
-            .apply_add_rule(40, 0, libc::IPPROTO_UDP as u8, 0, None, 1)
+            .apply_add_rule(40, 0, libc::IPPROTO_UDP as u8, 0, None, 1, IP_FAMILY_V4)
             .expect("exclusive ACL-domain fixture must include a non-prefix rule");
 
         let target = build_managed_acl_demotion_target(&old_state, owner_prefix)
@@ -10063,7 +10086,15 @@ mod tests {
         baseline.next_bitmap_idx = 8;
         let mut staged = baseline.clone();
         let add = staged
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("80"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         let rule = staged.rules.last().unwrap().clone();
         let runtime_adds = vec![OwnedAclPolicyRuntimeAdd {
@@ -10085,7 +10116,15 @@ mod tests {
         assert!(cleanup.failures.is_empty());
         let mut retry = baseline;
         let retry_add = retry
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         assert_eq!(retry_add.bitmap_idx, Some(7));
         assert!(retry_add.is_new_port_set);
@@ -10152,10 +10191,26 @@ mod tests {
         let json = serde_json::to_string(&guarded).unwrap();
         let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
         let first_retry = restarted
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("8443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         let second_retry = restarted
-            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .apply_add_rule(
+                3,
+                4,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("9443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
 
         assert_eq!(cleanup.failures[0].bitmap_idx, 7);
@@ -10241,10 +10296,26 @@ mod tests {
         let json = serde_json::to_string(&recovered).unwrap();
         let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
         let first_retry = restarted
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("8443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         let second_retry = restarted
-            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .apply_add_rule(
+                3,
+                4,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("9443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
 
         assert!(restarted.is_bitmap_index_quarantined(7));
@@ -10273,7 +10344,15 @@ mod tests {
     fn standalone_review_same_diff_release_is_quarantined_before_later_allocation() {
         let mut old_state = FirewallState::default();
         let old_add = old_state
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("80"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         let released_idx = old_add.bitmap_idx.unwrap();
         assert_eq!(released_idx, 0);
@@ -10285,7 +10364,15 @@ mod tests {
         // This is the earlier BTreeMap-sorted policy update. It allocates a
         // fresh bitmap and releases the old policy's index.
         let early_update = final_state
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         quarantine_owned_acl_released_port_set(
             &mut final_state,
@@ -10305,7 +10392,15 @@ mod tests {
 
         // This later sorted policy must not consume the just-released index.
         let later_add = final_state
-            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .apply_add_rule(
+                3,
+                4,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("8443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         quarantine_owned_acl_released_port_set(
             &mut final_state,
@@ -10350,7 +10445,15 @@ mod tests {
         };
         apply_confirmed_port_set_cleanups(&mut durable_final_state, &cleanup).unwrap();
         let after_cleanup = durable_final_state
-            .apply_add_rule(5, 6, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .apply_add_rule(
+                5,
+                6,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("9443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         assert_eq!(after_cleanup.bitmap_idx, Some(released_idx));
     }
@@ -10359,10 +10462,26 @@ mod tests {
     fn standalone_review_same_diff_normalized_port_dedup_keeps_release_quarantined() {
         let mut final_state = FirewallState::default();
         final_state
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("80"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         let early_update = final_state
-            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .apply_add_rule(
+                1,
+                2,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
         let mut released_port_sets = BTreeMap::new();
         quarantine_owned_acl_released_port_set(
@@ -10373,7 +10492,15 @@ mod tests {
         .unwrap();
 
         let same_ports_later = final_state
-            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .apply_add_rule(
+                3,
+                4,
+                libc::IPPROTO_TCP as u8,
+                1,
+                Some("443"),
+                0,
+                IP_FAMILY_V4,
+            )
             .unwrap();
 
         assert_eq!(same_ports_later.bitmap_idx, early_update.bitmap_idx);
@@ -10434,6 +10561,7 @@ mod tests {
                     false,
                     0,
                     1,
+                    IP_FAMILY_V4,
                     runtime,
                     "/tmp/unused-ebpf",
                 )
@@ -10448,6 +10576,7 @@ mod tests {
                     libc::IPPROTO_TCP as u8,
                     0,
                     1,
+                    IP_FAMILY_V4,
                     runtime,
                     "/tmp/unused-ebpf",
                 )
@@ -10621,6 +10750,7 @@ mod tests {
             ports: None,
             bitmap_idx: None,
             direction: 0,
+            ip_family: IP_FAMILY_V4,
         });
         cp.instances.write().await.insert(
             instance.to_string(),
@@ -10979,6 +11109,7 @@ mod tests {
             ports: None,
             bitmap_idx: None,
             direction: 0,
+            ip_family: IP_FAMILY_V4,
         });
 
         aria_core::ebpf_ops::compile_managed_group_projection(&state)
@@ -12411,6 +12542,7 @@ mod tests {
             ports: None,
             bitmap_idx: None,
             direction: 0,
+            ip_family: IP_FAMILY_V4,
         }
     }
 
@@ -14185,6 +14317,7 @@ mod tests {
             ports: None,
             bitmap_idx: None,
             direction: 1,
+            ip_family: IP_FAMILY_V4,
         };
 
         assert!(!ControlPlane::owned_acl_rule_in_replace_scope(

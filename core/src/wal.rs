@@ -9,8 +9,10 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
+use crate::common::{IP_FAMILY_V4, IP_FAMILY_V6};
 use crate::state::{
-    persist_state_file_atomically, FirewallState, WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
+    migrate_legacy_rule_families, persist_state_file_atomically, FirewallState, RuleInfo,
+    WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
 };
 
 /// Time-based compact interval (5 minutes)
@@ -18,6 +20,10 @@ const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
 const MAX_BATCH_SIZE: usize = 100;
 const WAL_CHANNEL_CAPACITY: usize = 1024;
 static LAST_WAL_REPLAY_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+fn acl_ip_family_is_valid(ip_family: u8) -> bool {
+    ip_family == IP_FAMILY_V4 || ip_family == IP_FAMILY_V6
+}
 
 pub fn last_wal_replay_failures() -> u64 {
     LAST_WAL_REPLAY_FAILURES.load(Ordering::Relaxed)
@@ -39,12 +45,16 @@ pub enum WalEntry {
         action: u8,
         ports: Option<String>,
         direction: u8,
+        #[serde(default)]
+        ip_family: u8,
     },
     RemoveRule {
         src_id: u32,
         dst_id: u32,
         proto: u8,
         direction: u8,
+        #[serde(default)]
+        ip_family: u8,
     },
     AddQos {
         group_name: String,
@@ -315,6 +325,14 @@ impl WalWriter {
     }
 
     fn append_buffered(&mut self, entry: &WalEntry) -> Result<(), String> {
+        match entry {
+            WalEntry::AddRule { ip_family, .. } | WalEntry::RemoveRule { ip_family, .. }
+                if !acl_ip_family_is_valid(*ip_family) =>
+            {
+                return Err(format!("invalid ACL IP family {}", ip_family));
+            }
+            _ => {}
+        }
         self.ensure_checkpoint_header()?;
         let line = serde_json::to_string(entry)
             .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
@@ -629,13 +647,40 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
             action,
             ports,
             direction,
+            ip_family,
         } => {
             let ports_ref = ports.as_deref();
-            if let Err(e) =
-                state.apply_add_rule(src_id, dst_id, proto, action, ports_ref, direction)
-            {
-                warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay AddRule failed");
-                return false;
+            let persisted = RuleInfo {
+                name: None,
+                src_group_id: src_id,
+                dst_group_id: dst_id,
+                proto,
+                action,
+                ports: ports.clone(),
+                bitmap_idx: None,
+                direction,
+                ip_family,
+            };
+            let normalized = match migrate_legacy_rule_families(&persisted, &state.groups) {
+                Ok(rules) => rules,
+                Err(e) => {
+                    warn!(error = %e, src_id, dst_id, proto, direction, ip_family, "WAL replay AddRule family migration failed");
+                    return false;
+                }
+            };
+            for rule in normalized {
+                if let Err(e) = state.apply_add_rule(
+                    src_id,
+                    dst_id,
+                    proto,
+                    action,
+                    ports_ref,
+                    direction,
+                    rule.ip_family,
+                ) {
+                    warn!(error = %e, src_id, dst_id, proto, direction, ip_family = rule.ip_family, "WAL replay AddRule failed");
+                    return false;
+                }
             }
         }
         WalEntry::RemoveRule {
@@ -643,10 +688,33 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
             dst_id,
             proto,
             direction,
+            ip_family,
         } => {
-            if let Err(e) = state.apply_remove_rule(src_id, dst_id, proto, direction) {
-                warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay RemoveRule failed");
-                return false;
+            let persisted = RuleInfo {
+                name: None,
+                src_group_id: src_id,
+                dst_group_id: dst_id,
+                proto,
+                action: 0,
+                ports: None,
+                bitmap_idx: None,
+                direction,
+                ip_family,
+            };
+            let normalized = match migrate_legacy_rule_families(&persisted, &state.groups) {
+                Ok(rules) => rules,
+                Err(e) => {
+                    warn!(error = %e, src_id, dst_id, proto, direction, ip_family, "WAL replay RemoveRule family migration failed");
+                    return false;
+                }
+            };
+            for rule in normalized {
+                if let Err(e) =
+                    state.apply_remove_rule(src_id, dst_id, proto, direction, rule.ip_family)
+                {
+                    warn!(error = %e, src_id, dst_id, proto, direction, ip_family = rule.ip_family, "WAL replay RemoveRule failed");
+                    return false;
+                }
             }
         }
         WalEntry::AddQos {
@@ -940,6 +1008,7 @@ mod tests {
                 action: 0,
                 ports: Some("80".to_string()),
                 direction: 0,
+                ip_family: IP_FAMILY_V4,
             },
             WalEntry::AddRule {
                 src_id: 1,
@@ -948,6 +1017,7 @@ mod tests {
                 action: 0,
                 ports: Some("443".to_string()),
                 direction: 0,
+                ip_family: IP_FAMILY_V4,
             },
             WalEntry::AddRule {
                 src_id: 1,
@@ -956,6 +1026,7 @@ mod tests {
                 action: 0,
                 ports: Some("8443".to_string()),
                 direction: 0,
+                ip_family: IP_FAMILY_V4,
             },
         ];
         let mut checkpoint = FirewallState::default();
@@ -1080,6 +1151,7 @@ mod tests {
                 action: 0,
                 ports: Some("80".to_string()),
                 direction: 0,
+                ip_family: IP_FAMILY_V4,
             })
             .unwrap();
             assert_eq!(wal.entry_count(), 2);
@@ -1215,6 +1287,7 @@ mod tests {
                 action: 0,
                 ports: Some("80,443".to_string()),
                 direction: 0,
+                ip_family: IP_FAMILY_V4,
             },
         );
         assert_eq!(state.rules.len(), 1);
@@ -1227,6 +1300,7 @@ mod tests {
                 dst_id: 0,
                 proto: 6,
                 direction: 0,
+                ip_family: IP_FAMILY_V4,
             },
         );
         assert_eq!(state.rules.len(), 0);
@@ -1421,6 +1495,7 @@ mod tests {
             action: 0,
             ports: Some("9443".to_string()),
             direction: 0,
+            ip_family: IP_FAMILY_V4,
         };
         let mut expected = checkpoint.clone();
         assert!(apply_wal_entry(&mut expected, tail.clone()));

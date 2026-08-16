@@ -7,8 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
+use crate::common::{IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6};
+
 static STATE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const STATE_TEMP_CREATE_ATTEMPTS: usize = 64;
+
+fn acl_ip_family_is_valid(ip_family: u8) -> bool {
+    ip_family == IP_FAMILY_V4 || ip_family == IP_FAMILY_V6
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupInfo {
@@ -28,6 +34,130 @@ pub struct RuleInfo {
     pub bitmap_idx: Option<u32>,
     #[serde(default)]
     pub direction: u8, // 0=ingress, 1=egress
+    #[serde(default)]
+    pub ip_family: u8,
+}
+
+fn legacy_group_families(
+    group_id: u32,
+    groups: &HashMap<String, GroupInfo>,
+) -> Result<std::collections::BTreeSet<u8>, String> {
+    if group_id == 0 {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let matching = groups
+        .values()
+        .filter(|group| group.id == group_id)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Err(format!("legacy_acl_rule_missing_group:{}", group_id));
+    }
+
+    let mut families = std::collections::BTreeSet::new();
+    for group in matching {
+        for cidr in &group.cidrs {
+            let address = cidr
+                .trim()
+                .split_once('/')
+                .map(|(address, _)| address)
+                .unwrap_or(cidr)
+                .parse::<std::net::IpAddr>()
+                .map_err(|error| {
+                    format!(
+                        "legacy_acl_rule_invalid_cidr:{}:{}:{}",
+                        group_id, cidr, error
+                    )
+                })?;
+            families.insert(match address {
+                std::net::IpAddr::V4(_) => IP_FAMILY_V4,
+                std::net::IpAddr::V6(_) => IP_FAMILY_V6,
+            });
+        }
+    }
+    if families.is_empty() {
+        return Err(format!("legacy_acl_rule_empty_group:{}", group_id));
+    }
+    Ok(families)
+}
+
+pub fn migrate_legacy_rule_families(
+    rule: &RuleInfo,
+    groups: &HashMap<String, GroupInfo>,
+) -> Result<Vec<RuleInfo>, String> {
+    if acl_ip_family_is_valid(rule.ip_family) {
+        return Ok(vec![rule.clone()]);
+    }
+    if rule.ip_family != IP_FAMILY_UNSPECIFIED {
+        return Err(format!("invalid ACL IP family {}", rule.ip_family));
+    }
+
+    let mut families = legacy_group_families(rule.src_group_id, groups)?;
+    families.extend(legacy_group_families(rule.dst_group_id, groups)?);
+    if families.len() > 1 {
+        return Err("legacy_acl_rule_mixed_family".to_string());
+    }
+    if families.is_empty() {
+        families.extend([IP_FAMILY_V4, IP_FAMILY_V6]);
+    }
+
+    Ok(families
+        .into_iter()
+        .map(|ip_family| {
+            let mut migrated = rule.clone();
+            migrated.ip_family = ip_family;
+            migrated
+        })
+        .collect())
+}
+
+pub(crate) fn migrate_state_rule_families(state: &mut FirewallState) -> Result<bool, String> {
+    let mut migrated = Vec::with_capacity(state.rules.len());
+    let mut bitmap_ref_increments = BTreeMap::<u32, u32>::new();
+    let mut changed = false;
+    for rule in &state.rules {
+        let normalized = migrate_legacy_rule_families(rule, &state.groups)?;
+        changed |= normalized.len() != 1 || normalized[0].ip_family != rule.ip_family;
+        if normalized.len() > 1 {
+            if let Some(bitmap_idx) = rule.bitmap_idx {
+                let increment = u32::try_from(normalized.len() - 1)
+                    .map_err(|_| "legacy ACL family expansion is too large".to_string())?;
+                let entry = bitmap_ref_increments.entry(bitmap_idx).or_default();
+                *entry = entry
+                    .checked_add(increment)
+                    .ok_or_else(|| "ACL port-set reference count overflow".to_string())?;
+            }
+        }
+        migrated.extend(normalized);
+    }
+    if changed {
+        let mut port_set_ref_updates = Vec::new();
+        for (bitmap_idx, increment) in bitmap_ref_increments {
+            let (key, port_set) = state
+                .port_sets
+                .iter()
+                .find(|(_, port_set)| port_set.bitmap_idx == bitmap_idx)
+                .ok_or_else(|| {
+                    format!(
+                        "legacy ACL rule references missing bitmap index {}",
+                        bitmap_idx
+                    )
+                })?;
+            let ref_count = port_set
+                .ref_count
+                .checked_add(increment)
+                .ok_or_else(|| "ACL port-set reference count overflow".to_string())?;
+            port_set_ref_updates.push((key.clone(), ref_count));
+        }
+        for (key, ref_count) in port_set_ref_updates {
+            state
+                .port_sets
+                .get_mut(&key)
+                .expect("validated port set")
+                .ref_count = ref_count;
+        }
+        state.rules = migrated;
+    }
+    Ok(changed)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,7 +569,11 @@ impl FirewallState {
         action: u8,
         ports: Option<&str>,
         direction: u8,
+        ip_family: u8,
     ) -> Result<AddRuleResult, String> {
+        if !acl_ip_family_is_valid(ip_family) {
+            return Err(format!("invalid ACL IP family {}", ip_family));
+        }
         let mut result = AddRuleResult {
             bitmap_idx: None,
             is_new_port_set: false,
@@ -493,12 +627,13 @@ impl FirewallState {
             (None, false)
         };
 
-        // 检测重复规则：相同 (src_group_id, dst_group_id, proto, direction) → 更新
+        // 检测重复规则：相同 (src_group_id, dst_group_id, proto, direction, ip_family) → 更新
         if let Some(existing) = self.rules.iter_mut().find(|r| {
             r.src_group_id == src_group_id
                 && r.dst_group_id == dst_group_id
                 && r.proto == proto
                 && r.direction == direction
+                && r.ip_family == ip_family
         }) {
             // 旧规则有 bitmap → 减引用计数
             if let Some(old_idx) = existing.bitmap_idx {
@@ -543,6 +678,7 @@ impl FirewallState {
                 ports: stored_ports,
                 bitmap_idx,
                 direction,
+                ip_family,
             });
         }
 
@@ -558,7 +694,11 @@ impl FirewallState {
         dst_group_id: u32,
         proto: u8,
         direction: u8,
+        ip_family: u8,
     ) -> Result<RemoveRuleResult, String> {
+        if !acl_ip_family_is_valid(ip_family) {
+            return Err(format!("invalid ACL IP family {}", ip_family));
+        }
         let mut result = RemoveRuleResult {
             bitmap_idx: None,
             port_set_released: None,
@@ -569,6 +709,7 @@ impl FirewallState {
                 && r.dst_group_id == dst_group_id
                 && r.proto == proto
                 && r.direction == direction
+                && r.ip_family == ip_family
         }) {
             let rule = self.rules.remove(pos);
             if let Some(idx) = rule.bitmap_idx {
@@ -587,8 +728,8 @@ impl FirewallState {
             }
         } else {
             return Err(format!(
-                "Policy not found: src_id={}, dst_id={}, proto={}, direction={}",
-                src_group_id, dst_group_id, proto, direction
+                "Policy not found: src_id={}, dst_id={}, proto={}, direction={}, ip_family={}",
+                src_group_id, dst_group_id, proto, direction, ip_family
             ));
         }
 
@@ -933,6 +1074,7 @@ impl StateManager {
         action: u8,
         ports: Option<&str>,
         direction: u8,
+        ip_family: u8,
     ) -> Result<AddRuleResult, String> {
         let mut result = AddRuleResult {
             bitmap_idx: None,
@@ -947,6 +1089,7 @@ impl StateManager {
                 action,
                 ports,
                 direction,
+                ip_family,
             )?;
             Ok(())
         })?;
@@ -959,13 +1102,15 @@ impl StateManager {
         dst_group_id: u32,
         proto: u8,
         direction: u8,
+        ip_family: u8,
     ) -> Result<RemoveRuleResult, String> {
         let mut result = RemoveRuleResult {
             bitmap_idx: None,
             port_set_released: None,
         };
         self.with_state(|state| {
-            result = state.apply_remove_rule(src_group_id, dst_group_id, proto, direction)?;
+            result =
+                state.apply_remove_rule(src_group_id, dst_group_id, proto, direction, ip_family)?;
             Ok(())
         })?;
         Ok(result)
@@ -1191,7 +1336,7 @@ mod tests {
         let src_id = previous.add_group("src", "10.1.0.0/24").unwrap();
         let dst_id = previous.add_group("dst", "10.2.0.0/24").unwrap();
         previous
-            .apply_add_rule(src_id, dst_id, 6, 1, None, 0)
+            .apply_add_rule(src_id, dst_id, 6, 1, None, 0, IP_FAMILY_V4)
             .unwrap();
         fs::write(&state_file, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
         fs::write(Path::new(&state_path).join("state.wal"), b"").unwrap();
@@ -1301,7 +1446,7 @@ mod tests {
         let mut state = FirewallState::default();
 
         let result = state
-            .apply_add_rule(1, 2, 6, 0, Some(" ALL "), 0)
+            .apply_add_rule(1, 2, 6, 0, Some(" ALL "), 0, IP_FAMILY_V4)
             .expect("apply_add_rule should accept case-insensitive all");
 
         assert!(result.bitmap_idx.is_none(), "'all' 不应分配位图");
@@ -1317,10 +1462,10 @@ mod tests {
 
         // 新建两条规则，端口集字符串相同，应共享同一个 bitmap_idx，ref_count=2
         let r1 = mgr
-            .add_rule(1, 2, 6, 0, Some("80,100-200"), 0)
+            .add_rule(1, 2, 6, 0, Some("80,100-200"), 0, IP_FAMILY_V4)
             .expect("add_rule 1");
         let r2 = mgr
-            .add_rule(3, 4, 6, 0, Some("80,100-200"), 0)
+            .add_rule(3, 4, 6, 0, Some("80,100-200"), 0, IP_FAMILY_V4)
             .expect("add_rule 2");
 
         let idx1 = r1.bitmap_idx.expect("bitmap_idx for r1");
@@ -1328,7 +1473,9 @@ mod tests {
         assert_eq!(idx1, idx2, "相同端口集应复用同一 bitmap_idx");
 
         // 删除第一条规则，不应释放 port set（引用从 2→1）
-        let rm1 = mgr.remove_rule(1, 2, 6, 0).expect("remove_rule 1");
+        let rm1 = mgr
+            .remove_rule(1, 2, 6, 0, IP_FAMILY_V4)
+            .expect("remove_rule 1");
         assert_eq!(rm1.bitmap_idx, Some(idx1));
         assert!(
             rm1.port_set_released.is_none(),
@@ -1336,7 +1483,9 @@ mod tests {
         );
 
         // 删除第二条规则，引用归零，应回收 bitmap_idx 并报告释放的端口集
-        let rm2 = mgr.remove_rule(3, 4, 6, 0).expect("remove_rule 2");
+        let rm2 = mgr
+            .remove_rule(3, 4, 6, 0, IP_FAMILY_V4)
+            .expect("remove_rule 2");
         assert_eq!(rm2.bitmap_idx, Some(idx1));
         assert!(
             rm2.port_set_released.is_some(),
@@ -1345,7 +1494,7 @@ mod tests {
 
         // 再添加一个不同端口集的规则，应复用刚刚回收的 bitmap_idx（free list）
         let r3 = mgr
-            .add_rule(5, 6, 6, 0, Some("443"), 0)
+            .add_rule(5, 6, 6, 0, Some("443"), 0, IP_FAMILY_V4)
             .expect("add_rule 3");
         let idx3 = r3.bitmap_idx.expect("bitmap_idx for r3");
         assert_eq!(
@@ -1370,7 +1519,7 @@ mod tests {
         let mut restarted: FirewallState =
             serde_json::from_str(&json).expect("deserialize quarantined allocator");
         let retry = restarted
-            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0, IP_FAMILY_V4)
             .expect("retry allocation");
 
         assert_eq!(retry.bitmap_idx, Some(8));
@@ -1464,7 +1613,7 @@ mod tests {
         let mut restarted: FirewallState =
             serde_json::from_str(&json).expect("deserialize fresh quarantine");
         let retry = restarted
-            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0, IP_FAMILY_V4)
             .expect("allocate after fresh quarantine");
 
         assert_eq!(retry.bitmap_idx, Some(1));
@@ -1488,10 +1637,10 @@ mod tests {
         assert!(!state.is_bitmap_index_quarantined(8));
 
         let first = state
-            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0, IP_FAMILY_V4)
             .unwrap();
         let second = state
-            .apply_add_rule(3, 4, 6, 1, Some("8443"), 0)
+            .apply_add_rule(3, 4, 6, 1, Some("8443"), 0, IP_FAMILY_V4)
             .unwrap();
         assert_eq!(first.bitmap_idx, Some(8));
         assert_eq!(second.bitmap_idx, Some(9));

@@ -181,6 +181,7 @@ fn apply_mutation(
                     *action,
                     ports.as_deref(),
                     direction,
+                    IP_FAMILY_V4,
                 )?;
                 if let Some((bitmap_idx, ports_normalized)) = result.old_port_set_released {
                     state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
@@ -205,6 +206,7 @@ fn apply_mutation(
                             && rule.dst_group_id == dst_id
                             && rule.proto == *proto
                             && rule.direction == *candidate
+                            && rule.ip_family == IP_FAMILY_V4
                     })
                 })
                 .collect();
@@ -215,7 +217,13 @@ fn apply_mutation(
                 ));
             }
             for direction in matching {
-                let result = state.apply_remove_rule(src_id, dst_id, *proto, direction)?;
+                let result = state.apply_remove_rule(
+                    src_id,
+                    dst_id,
+                    *proto,
+                    direction,
+                    IP_FAMILY_V4,
+                )?;
                 if let (Some(bitmap_idx), Some(ports_normalized)) =
                     (result.bitmap_idx, result.port_set_released)
                 {
@@ -484,6 +492,7 @@ fn stage_standalone_shadow_bank(
             is_new_port_set,
             rule.direction,
             plan.shadow_bank,
+            rule.ip_family,
             runtime,
             ebpf_path,
         )?;
@@ -1052,8 +1061,10 @@ mod tests {
         let mut old = state_with_groups();
         let src = old.groups["client"].id;
         let dst = old.groups["server"].id;
-        old.apply_add_rule(src, dst, 6, 0, None, 0).unwrap();
-        old.apply_add_rule(src, dst, 6, 0, None, 1).unwrap();
+        old.apply_add_rule(src, dst, 6, 0, None, 0, IP_FAMILY_V4)
+            .unwrap();
+        old.apply_add_rule(src, dst, 6, 0, None, 1, IP_FAMILY_V4)
+            .unwrap();
 
         let plan = build_standalone_acl_publication_plan(
             &old,
@@ -1086,8 +1097,10 @@ mod tests {
         let mut old = state_with_groups();
         let src = old.groups["client"].id;
         let dst = old.groups["server"].id;
-        old.apply_add_rule(src, dst, 6, 0, None, 0).unwrap();
-        old.apply_add_rule(src, dst, 6, 0, None, 1).unwrap();
+        old.apply_add_rule(src, dst, 6, 0, None, 0, IP_FAMILY_V4)
+            .unwrap();
+        old.apply_add_rule(src, dst, 6, 0, None, 1, IP_FAMILY_V4)
+            .unwrap();
 
         let plan = build_standalone_acl_publication_plan(
             &old,
@@ -1117,7 +1130,8 @@ mod tests {
         let mut old = state_with_groups();
         let src = old.groups["client"].id;
         let dst = old.groups["server"].id;
-        old.apply_add_rule(src, dst, 6, 1, None, 0).unwrap();
+        old.apply_add_rule(src, dst, 6, 1, None, 0, IP_FAMILY_V4)
+            .unwrap();
 
         let plan = build_standalone_acl_publication_plan(
             &old,
@@ -1155,7 +1169,8 @@ mod tests {
         let mut old = state_with_groups();
         let src = old.groups["client"].id;
         let dst = old.groups["server"].id;
-        old.apply_add_rule(src, dst, 6, 1, None, 0).unwrap();
+        old.apply_add_rule(src, dst, 6, 1, None, 0, IP_FAMILY_V4)
+            .unwrap();
         let allocator = old.next_group_id;
 
         let plan = build_standalone_acl_publication_plan(

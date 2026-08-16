@@ -63,6 +63,22 @@ impl Default for StandaloneReplayRoute {
     }
 }
 
+fn migrate_replay_state(
+    state_path: &str,
+    state: &crate::state::FirewallState,
+) -> Result<crate::state::FirewallState, String> {
+    let mut migrated = state.clone();
+    if crate::state::migrate_state_rule_families(&mut migrated)? {
+        let state_json = serde_json::to_string(&migrated)
+            .map_err(|error| format!("serialize migrated ACL state: {}", error))?;
+        crate::wal::WalWriter::open(state_path)?
+            .compact(&state_json)
+            .map_err(|error| format!("checkpoint migrated ACL state: {}", error))?;
+        info!(state_path = %state_path, rules = migrated.rules.len(), "checkpointed concrete ACL rule families before replay");
+    }
+    Ok(migrated)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PinnedReplayRoute {
     Managed(ManagedReplayRoute),
@@ -352,10 +368,11 @@ pub fn replay_state_from_snapshot(
     state_path: &str,
     state: &crate::state::FirewallState,
 ) -> Result<(), String> {
+    let state = migrate_replay_state(state_path, state)?;
     replay_state_from_snapshot_with_mode(
         bpf,
         state_path,
-        state,
+        &state,
         GroupProjectionMode::StandaloneCompatibility,
     )
 }
@@ -496,7 +513,7 @@ fn replay_state_from_snapshot_with_mode(
                         proto: rule.proto,
                         direction: rule.direction,
                         bank: 0,
-                        ip_family: IP_FAMILY_V4,
+                        ip_family: rule.ip_family,
                     };
                     let value = PolicyValue {
                         action: stored_policy_action(rule.action, has_port_filter != 0),
@@ -721,10 +738,11 @@ pub fn replay_standalone_state_to_pinned_maps_from_snapshot(
     state_path: &str,
     state: &FirewallState,
 ) -> Result<(), String> {
+    let state = migrate_replay_state(state_path, state)?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
-        state,
+        &state,
         PinnedReplayRoute::Standalone(StandaloneReplayRoute::new()),
     )
 }
@@ -739,6 +757,7 @@ pub fn replay_managed_state_to_pinned_maps(
         // Compatibility replay keeps the durable WAL snapshot as its projection
         // authority, matching the legacy standalone-compatible registration path.
         let durable_state = crate::wal::load_with_wal(state_path);
+        let durable_state = migrate_replay_state(state_path, &durable_state)?;
         return replay_state_to_pinned_maps_from_snapshot_with_mode(
             pin_path,
             state_path,
@@ -746,10 +765,11 @@ pub fn replay_managed_state_to_pinned_maps(
             PinnedReplayRoute::Managed(route),
         );
     }
+    let state = migrate_replay_state(state_path, state)?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
-        state,
+        &state,
         PinnedReplayRoute::Managed(route),
     )
 }
@@ -897,6 +917,7 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
             rule.bitmap_idx,
             write_port_set,
             rule.direction,
+            rule.ip_family,
             runtime,
             "",
         ) {
