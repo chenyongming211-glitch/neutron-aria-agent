@@ -15,6 +15,41 @@ from ci import check_stage3_readiness
 
 
 class TrustedGateContractTests(unittest.TestCase):
+    def test_ipv6_behavior_filters_and_python_contracts_are_fixed(self):
+        filters = {
+            check_neutron_stage1.rust_test_filter(command)
+            for command in check_neutron_stage1.RUST_TESTS
+        }
+        self.assertTrue(
+            set(check_neutron_stage1.IPV6_REQUIRED_RUST_FILTERS).issubset(filters)
+        )
+        self.assertFalse(
+            set(check_neutron_stage1.IPV6_REQUIRED_RUST_FILTERS) - filters
+        )
+        self.assertTrue(
+            set(check_neutron_stage1.IPV6_REQUIRED_PYTHON_BEHAVIORS).issubset(
+                set(check_neutron_stage1.REQUIRED_PYTHON_BEHAVIORS)
+            )
+        )
+
+    def test_dual_stack_smoke_contract_names_evidence_and_deferred_boundary(self):
+        self.assertEqual(
+            set(check_neutron_stage1.DUAL_STACK_SMOKE_CASES),
+            {
+                "ipv4-only", "ipv6-only", "dual-stack", "wildcard-isolation",
+                "fragment", "stateful-reply", "upgrade", "rollback",
+            },
+        )
+        self.assertEqual(
+            set(check_neutron_stage1.SMOKE_EVIDENCE_FIELDS),
+            {
+                "command", "expected_verdict", "observed_verdict", "interface",
+                "ifindex", "kernel", "agent_version", "datapath_version",
+                "status_snapshot", "counter_snapshot", "status",
+            },
+        )
+        self.assertEqual(check_neutron_stage1.FIELD_EVIDENCE_STATUS, "deferred/pending")
+
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()
         required = set(check_neutron_stage1.REQUIRED_PYTHON_BEHAVIORS)
