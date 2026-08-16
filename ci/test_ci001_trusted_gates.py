@@ -2,6 +2,7 @@
 """Behavior contracts for REVIEW-CI-001 trusted automated gates."""
 
 import contextlib
+import configparser
 import io
 import os
 import subprocess
@@ -124,6 +125,45 @@ class TrustedGateContractTests(unittest.TestCase):
         self.assertNotIn("record_field_case", expansion)
         self.assertIn("record_deferred_field_cases", expansion)
         self.assertIn("ethertype-any-expansion.json", expansion)
+
+    def test_standalone_fragment_fixture_and_recovery_are_family_qualified(self):
+        standalone_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            check_neutron_stage1.STANDALONE_TC_ACL_SMOKE_PATH,
+        )
+        with open(standalone_path, encoding="utf-8") as handle:
+            source = handle.read()
+        fixture = source[
+            source.index("install_fixture_policy() {") : source.index("\ncapture_links() {")
+        ]
+        for source_group, destination_group, direction in (
+            ("fragment-peer-v4", "fragment-host-v4", "ingress"),
+            ("fragment-host-v4", "fragment-peer-v4", "egress"),
+            ("fragment-peer-v6", "fragment-host-v6", "ingress"),
+            ("fragment-host-v6", "fragment-peer-v6", "egress"),
+        ):
+            ethertype = "IPv6" if source_group.endswith("v6") else "IPv4"
+            self.assertIn(
+                '"src_group":"%s","dst_group":"%s","proto":"udp","action":"allow","direction":"%s","ports":"53","ethertype":"%s"'
+                % (source_group, destination_group, direction, ethertype),
+                fixture,
+            )
+        recovery = source[
+            source.index("assert_recovery_verified() {") : source.index("\nwrite_summary() {")
+        ]
+        self.assertIn('row["ethertype"]', recovery)
+        self.assertIn('"IPv6"', recovery)
+
+    def test_packaged_counter_default_is_parsed_from_agent_section(self):
+        config_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            "deploy", "kolla", "config", "neutron-aria-agent.ini",
+        )
+        parser = configparser.ConfigParser()
+        parser.read(config_path)
+        self.assertFalse(parser.getboolean("agent", "counters_report_enabled"))
+        from neutron_aria.agent.config import load_config
+        self.assertFalse(load_config(config_path).counters_report_enabled)
 
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()
