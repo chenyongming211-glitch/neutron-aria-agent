@@ -340,6 +340,18 @@ closure remains separate work.
 - A historical standalone wildcard/any rule expands to two concrete rules.
 - Mixed or ambiguous historical input fails migration safely; it is never
   replayed as a family-zero kernel policy.
+- Family normalization is checkpointed only after a complete WAL scan with no
+  selected-tail failures. If malformed or unsupported WAL data blocks that
+  checkpoint, startup returns the typed
+  `legacy_acl_family_checkpoint_blocked_by_wal_failure` error before runtime
+  replay or later state writers can reserialize family zero; concrete-family
+  snapshots retain the existing best-effort malformed-WAL behavior.
+- Atomic publication of the normalized cursor-bearing `state.json` is the
+  migration commit point. Failures before publication are fatal and preserve
+  the prior authoritative durable state. WAL truncation, fsync, or checkpoint
+  header failures after publication are recoverable committed outcomes: startup
+  uses the normalized state and the next load converges through cursor/marker
+  replay without attempting byte rollback of the two durable files.
 
 ### 9.2 Neutron transaction WAL
 

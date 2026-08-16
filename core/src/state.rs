@@ -863,20 +863,40 @@ fn sync_state_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn persist_state_file_atomically_with_hook<F>(
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AtomicStatePersistError {
+    BeforePublication(String),
+    AfterPublication(String),
+}
+
+impl AtomicStatePersistError {
+    pub(crate) fn into_reason(self) -> String {
+        match self {
+            Self::BeforePublication(reason) | Self::AfterPublication(reason) => reason,
+        }
+    }
+}
+
+fn persist_state_file_atomically_with_hook_classified<F>(
     state_file: &Path,
     contents: &[u8],
     mut hook: F,
-) -> Result<(), String>
+) -> Result<(), AtomicStatePersistError>
 where
     F: FnMut(AtomicStateWritePhase) -> Result<(), String>,
 {
     let parent = state_file
         .parent()
-        .ok_or_else(|| format!("State file has no parent: {}", state_file.display()))?;
-    let (temp_path, mut temp_file) = create_atomic_state_temp(state_file)?;
+        .ok_or_else(|| {
+            AtomicStatePersistError::BeforePublication(format!(
+                "State file has no parent: {}",
+                state_file.display()
+            ))
+        })?;
+    let (temp_path, mut temp_file) = create_atomic_state_temp(state_file)
+        .map_err(AtomicStatePersistError::BeforePublication)?;
     let mut renamed = false;
-    let result = (|| {
+    let result: Result<(), String> = (|| {
         temp_file.write_all(contents).map_err(|error| {
             format!(
                 "Failed to write state temporary file {}: {}",
@@ -916,7 +936,32 @@ where
     if result.is_err() && !renamed {
         let _ = fs::remove_file(&temp_path);
     }
-    result
+    result.map_err(|reason| {
+        if renamed {
+            AtomicStatePersistError::AfterPublication(reason)
+        } else {
+            AtomicStatePersistError::BeforePublication(reason)
+        }
+    })
+}
+
+fn persist_state_file_atomically_with_hook<F>(
+    state_file: &Path,
+    contents: &[u8],
+    hook: F,
+) -> Result<(), String>
+where
+    F: FnMut(AtomicStateWritePhase) -> Result<(), String>,
+{
+    persist_state_file_atomically_with_hook_classified(state_file, contents, hook)
+        .map_err(AtomicStatePersistError::into_reason)
+}
+
+pub(crate) fn persist_state_file_atomically_classified(
+    state_file: &Path,
+    contents: &[u8],
+) -> Result<(), AtomicStatePersistError> {
+    persist_state_file_atomically_with_hook_classified(state_file, contents, |_| Ok(()))
 }
 
 pub(crate) fn persist_state_file_atomically(
@@ -1380,7 +1425,7 @@ mod tests {
             next.add_group("published", "192.0.2.0/24").unwrap();
             let next_bytes = serde_json::to_vec_pretty(&next).unwrap();
 
-            let result = persist_state_file_atomically_with_hook(
+            let result = persist_state_file_atomically_with_hook_classified(
                 &state_file,
                 &next_bytes,
                 |phase| {
@@ -1393,9 +1438,11 @@ mod tests {
             );
 
             if fail_after_rename {
-                assert!(result
-                    .expect_err("post-rename boundary must report uncertain durability")
-                    .contains("forced crash after rename"));
+                assert!(matches!(
+                    result.expect_err("post-rename publication must be classified"),
+                    AtomicStatePersistError::AfterPublication(reason)
+                        if reason.contains("forced crash after rename")
+                ));
             } else {
                 result.expect("atomic publication should succeed");
             }

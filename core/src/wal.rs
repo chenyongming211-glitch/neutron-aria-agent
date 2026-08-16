@@ -11,8 +11,9 @@ use tracing::{info, warn};
 
 use crate::common::{IP_FAMILY_V4, IP_FAMILY_V6};
 use crate::state::{
-    migrate_legacy_rule_families, migrate_state_rule_families, persist_state_file_atomically,
-    FirewallState, RuleInfo, WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
+    migrate_legacy_rule_families, migrate_state_rule_families,
+    persist_state_file_atomically_classified, AtomicStatePersistError, FirewallState, RuleInfo,
+    WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
 };
 
 /// Time-based compact interval (5 minutes)
@@ -33,6 +34,10 @@ pub fn last_wal_replay_failures() -> u64 {
 pub enum WalLoadError {
     LegacyAclFamilyMigration { reason: String },
     LegacyAclFamilyCheckpoint { reason: String },
+    LegacyAclFamilyCheckpointBlockedByWalFailure {
+        failure_count: u64,
+        reason: String,
+    },
 }
 
 impl WalLoadError {
@@ -40,10 +45,21 @@ impl WalLoadError {
         Self::LegacyAclFamilyMigration { reason }
     }
 
+    fn family_checkpoint_blocked(failure_count: u64) -> Self {
+        Self::LegacyAclFamilyCheckpointBlockedByWalFailure {
+            failure_count,
+            reason: format!(
+                "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count={}",
+                failure_count
+            ),
+        }
+    }
+
     pub fn reason(&self) -> &str {
         match self {
             Self::LegacyAclFamilyMigration { reason }
-            | Self::LegacyAclFamilyCheckpoint { reason } => reason,
+            | Self::LegacyAclFamilyCheckpoint { reason }
+            | Self::LegacyAclFamilyCheckpointBlockedByWalFailure { reason, .. } => reason,
         }
     }
 }
@@ -55,6 +71,9 @@ impl std::fmt::Display for WalLoadError {
             Self::LegacyAclFamilyCheckpoint { reason } => {
                 write!(formatter, "legacy ACL family checkpoint failed: {}", reason)
             }
+            Self::LegacyAclFamilyCheckpointBlockedByWalFailure { reason, .. } => {
+                formatter.write_str(reason)
+            }
         }
     }
 }
@@ -65,6 +84,18 @@ impl std::error::Error for WalLoadError {}
 struct WalApplyOutcome {
     applied: bool,
     family_migrated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FamilyMigrationCheckpointPhase {
+    BeforeCheckpointMarker,
+    AfterSnapshotPublication,
+}
+
+#[derive(Debug)]
+struct WalCompactCommit {
+    checkpoint_id: u64,
+    cleanup_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,7 +446,14 @@ impl WalWriter {
     /// Publish a full checkpointed snapshot, then replace the covered WAL prefix.
     /// Accepts pre-serialized JSON to avoid borrow conflicts when wal and state
     /// are fields of the same struct.
-    pub fn compact(&mut self, state_json: &str) -> Result<(), String> {
+    fn compact_with_commit_outcome<F>(
+        &mut self,
+        state_json: &str,
+        mut hook: F,
+    ) -> Result<WalCompactCommit, String>
+    where
+        F: FnMut(FamilyMigrationCheckpointPhase) -> Result<(), String>,
+    {
         let covered_mutations = self.entry_count;
         let checkpoint_id = self.next_checkpoint_id.ok_or_else(|| {
             "WAL checkpoint ID space exhausted; refusing to truncate WAL".to_string()
@@ -429,6 +467,7 @@ impl WalWriter {
         let checkpointed_state = serde_json::to_vec_pretty(&state)
             .map_err(|error| format!("Failed to serialize compact snapshot: {}", error))?;
 
+        hook(FamilyMigrationCheckpointPhase::BeforeCheckpointMarker)?;
         self.append_checkpoint_buffered(checkpoint_id)?;
         self.sync()?;
         self.next_checkpoint_id = checkpoint_id.checked_add(1);
@@ -438,23 +477,48 @@ impl WalWriter {
             .parent()
             .ok_or_else(|| "WAL path has no parent directory".to_string())?;
         let state_file = state_dir.join("state.json");
-        persist_state_file_atomically(&state_file, &checkpointed_state)
-            .map_err(|error| format!("Failed to write snapshot: {}", error))?;
+        match persist_state_file_atomically_classified(&state_file, &checkpointed_state) {
+            Ok(()) => {}
+            Err(AtomicStatePersistError::BeforePublication(error)) => {
+                return Err(format!("Failed to write snapshot: {}", error));
+            }
+            Err(AtomicStatePersistError::AfterPublication(error)) => {
+                self.current_checkpoint_id = Some(checkpoint_id);
+                return Ok(WalCompactCommit {
+                    checkpoint_id,
+                    cleanup_error: Some(format!("Failed to write snapshot: {}", error)),
+                });
+            }
+        }
 
         self.current_checkpoint_id = Some(checkpoint_id);
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.wal_path)
-            .map_err(|e| format!("Failed to truncate WAL: {}", e))?;
-        self.file = BufWriter::new(file);
-        self.header_required = true;
-        self.file
-            .get_ref()
-            .sync_all()
-            .map_err(|e| format!("Failed to sync truncated WAL: {}", e))?;
-        self.ensure_checkpoint_header()?;
+        if let Err(error) = hook(FamilyMigrationCheckpointPhase::AfterSnapshotPublication) {
+            return Ok(WalCompactCommit {
+                checkpoint_id,
+                cleanup_error: Some(error),
+            });
+        }
+        let cleanup_result = (|| {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&self.wal_path)
+                .map_err(|e| format!("Failed to truncate WAL: {}", e))?;
+            self.file = BufWriter::new(file);
+            self.header_required = true;
+            self.file
+                .get_ref()
+                .sync_all()
+                .map_err(|e| format!("Failed to sync truncated WAL: {}", e))?;
+            self.ensure_checkpoint_header()
+        })();
+        if let Err(error) = cleanup_result {
+            return Ok(WalCompactCommit {
+                checkpoint_id,
+                cleanup_error: Some(error),
+            });
+        }
         self.entry_count = 0;
         self.last_compact_time = Instant::now();
         info!(
@@ -465,7 +529,54 @@ impl WalWriter {
             "compacted standalone state with WAL checkpoint"
         );
 
-        Ok(())
+        Ok(WalCompactCommit {
+            checkpoint_id,
+            cleanup_error: None,
+        })
+    }
+
+    fn compact_strict_with_hook<F>(&mut self, state_json: &str, hook: F) -> Result<(), String>
+    where
+        F: FnMut(FamilyMigrationCheckpointPhase) -> Result<(), String>,
+    {
+        let outcome = self.compact_with_commit_outcome(state_json, hook)?;
+        match outcome.cleanup_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Publish a full checkpointed snapshot, then replace the covered WAL prefix.
+    /// General callers retain the strict contract that any cleanup failure is an error.
+    pub fn compact(&mut self, state_json: &str) -> Result<(), String> {
+        self.compact_strict_with_hook(state_json, |_| Ok(()))
+    }
+
+    pub(crate) fn compact_family_migration(
+        &mut self,
+        state_json: &str,
+    ) -> Result<u64, String> {
+        self.compact_family_migration_with_hook(state_json, |_| Ok(()))
+    }
+
+    fn compact_family_migration_with_hook<F>(
+        &mut self,
+        state_json: &str,
+        hook: F,
+    ) -> Result<u64, String>
+    where
+        F: FnMut(FamilyMigrationCheckpointPhase) -> Result<(), String>,
+    {
+        let outcome = self.compact_with_commit_outcome(state_json, hook)?;
+        if let Some(error) = outcome.cleanup_error {
+            warn!(
+                checkpoint_id = outcome.checkpoint_id,
+                checkpoint_version = WAL_REPLAY_CURSOR_VERSION,
+                error = %error,
+                "ACL family checkpoint committed; deferred WAL cleanup will recover on restart"
+            );
+        }
+        Ok(outcome.checkpoint_id)
     }
 }
 
@@ -910,10 +1021,14 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
     }
 }
 
-fn checkpoint_family_migrated_state(
+fn checkpoint_family_migrated_state_with_hook<F>(
     state_path: &str,
     state: &mut FirewallState,
-) -> Result<(), WalLoadError> {
+    hook: F,
+) -> Result<(), WalLoadError>
+where
+    F: FnMut(FamilyMigrationCheckpointPhase) -> Result<(), String>,
+{
     let state_json = serde_json::to_string(state).map_err(|error| {
         WalLoadError::LegacyAclFamilyCheckpoint {
             reason: format!("serialize migrated ACL state: {}", error),
@@ -921,13 +1036,9 @@ fn checkpoint_family_migrated_state(
     })?;
     let mut wal = WalWriter::open(state_path)
         .map_err(|reason| WalLoadError::LegacyAclFamilyCheckpoint { reason })?;
-    wal.compact(&state_json)
+    let checkpoint_id = wal
+        .compact_family_migration_with_hook(&state_json, hook)
         .map_err(|reason| WalLoadError::LegacyAclFamilyCheckpoint { reason })?;
-    let checkpoint_id = wal.current_checkpoint_id.ok_or_else(|| {
-        WalLoadError::LegacyAclFamilyCheckpoint {
-            reason: "compaction completed without a checkpoint ID".to_string(),
-        }
-    })?;
     state.wal_replay_cursor = WalReplayCursor {
         version: WAL_REPLAY_CURSOR_VERSION,
         checkpoint_id,
@@ -937,6 +1048,16 @@ fn checkpoint_family_migrated_state(
 
 /// Load state from snapshot + replay WAL entries.
 pub fn load_with_wal(state_path: &str) -> Result<FirewallState, WalLoadError> {
+    load_with_wal_with_compact_hook(state_path, |_| Ok(()))
+}
+
+fn load_with_wal_with_compact_hook<F>(
+    state_path: &str,
+    mut compact_hook: F,
+) -> Result<FirewallState, WalLoadError>
+where
+    F: FnMut(FamilyMigrationCheckpointPhase) -> Result<(), String>,
+{
     // 1. Load base snapshot
     let state_file = format!("{}/state.json", state_path);
     let mut state = if let Ok(contents) = fs::read_to_string(&state_file) {
@@ -1038,14 +1159,28 @@ pub fn load_with_wal(state_path: &str) -> Result<FirewallState, WalLoadError> {
         if failed > 0 {
             warn!(path = %wal_path, failed, "WAL replay completed with failures");
         }
-        if family_migrated && failed == 0 {
-            checkpoint_family_migrated_state(state_path, &mut state)?;
+        if family_migrated {
+            if failed > 0 {
+                return Err(WalLoadError::family_checkpoint_blocked(failed));
+            }
+            checkpoint_family_migrated_state_with_hook(
+                state_path,
+                &mut state,
+                &mut compact_hook,
+            )?;
             info!(path = %state_path, rules = state.rules.len(), "checkpointed snapshot and WAL after ACL family migration");
         }
     } else {
         LAST_WAL_REPLAY_FAILURES.store(u64::from(cursor_failed), Ordering::Relaxed);
-        if snapshot_family_migrated && !cursor_failed {
-            checkpoint_family_migrated_state(state_path, &mut state)?;
+        if snapshot_family_migrated {
+            if cursor_failed {
+                return Err(WalLoadError::family_checkpoint_blocked(1));
+            }
+            checkpoint_family_migrated_state_with_hook(
+                state_path,
+                &mut state,
+                &mut compact_hook,
+            )?;
             info!(path = %state_path, rules = state.rules.len(), "checkpointed snapshot after ACL family migration");
         }
     }
@@ -1447,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_family_checkpoint_pre_publication_failure_is_fatal_and_preserves_files() {
+    fn wal_checkpoint_legacy_family_pre_publication_failure_is_fatal_and_preserves_files() {
         let _guard = WAL_CHECKPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1478,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_family_checkpoint_post_publication_failure_returns_committed_state() {
+    fn wal_checkpoint_legacy_family_post_publication_failure_returns_committed_state() {
         let _guard = WAL_CHECKPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1522,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_family_snapshot_with_malformed_wal_is_typed_fatal_and_preserves_files() {
+    fn wal_checkpoint_legacy_family_with_malformed_wal_is_typed_fatal_and_preserves_files() {
         let _guard = WAL_CHECKPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1544,14 +1679,17 @@ mod tests {
                 reason,
             } if reason == "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count=1"
         ));
-        assert_eq!(error.reason(), "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count=1");
+        assert_eq!(
+            error.reason(),
+            "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count=1"
+        );
         assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
         assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
         let _ = fs::remove_dir_all(&state_path);
     }
 
     #[test]
-    fn concrete_family_snapshot_with_malformed_wal_remains_best_effort_usable() {
+    fn wal_checkpoint_concrete_family_with_malformed_wal_remains_best_effort_usable() {
         let _guard = WAL_CHECKPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1621,6 +1759,36 @@ mod tests {
         assert!(loaded.groups.contains_key("db"));
         assert!(loaded.groups.contains_key("cache"));
 
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn wal_checkpoint_general_compact_post_publication_failure_remains_strict_error() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let state = FirewallState::default();
+        let mut wal = WalWriter::open(&state_path).unwrap();
+
+        let error = wal
+            .compact_strict_with_hook(
+                &serde_json::to_string_pretty(&state).unwrap(),
+                |phase| match phase {
+                    FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => Ok(()),
+                    FamilyMigrationCheckpointPhase::AfterSnapshotPublication => {
+                        Err("injected strict post-publication failure".to_string())
+                    }
+                },
+            )
+            .expect_err("general compact callers must retain strict error behavior");
+
+        assert_eq!(error, "injected strict post-publication failure");
+        let published: FirewallState = serde_json::from_slice(
+            &fs::read(format!("{}/state.json", state_path)).unwrap(),
+        )
+        .unwrap();
+        assert!(published.wal_replay_cursor.checkpoint_id > 0);
         let _ = fs::remove_dir_all(&state_path);
     }
 

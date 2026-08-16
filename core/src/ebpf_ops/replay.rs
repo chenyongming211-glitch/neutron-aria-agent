@@ -71,9 +71,13 @@ pub fn migrate_state_for_replay(
     if crate::state::migrate_state_rule_families(&mut migrated)? {
         let state_json = serde_json::to_string(&migrated)
             .map_err(|error| format!("serialize migrated ACL state: {}", error))?;
-        crate::wal::WalWriter::open(state_path)?
-            .compact(&state_json)
+        let checkpoint_id = crate::wal::WalWriter::open(state_path)?
+            .compact_family_migration(&state_json)
             .map_err(|error| format!("checkpoint migrated ACL state: {}", error))?;
+        migrated.wal_replay_cursor = crate::state::WalReplayCursor {
+            version: crate::state::WAL_REPLAY_CURSOR_VERSION,
+            checkpoint_id,
+        };
         info!(state_path = %state_path, rules = migrated.rules.len(), "checkpointed concrete ACL rule families before replay");
     }
     Ok(migrated)
@@ -1090,7 +1094,7 @@ mod family_migration_startup_tests {
     }
 
     #[test]
-    fn malformed_wal_blocks_legacy_family_state_before_replay_callback() {
+    fn wal_checkpoint_malformed_wal_blocks_legacy_family_before_replay_callback() {
         let path = std::env::temp_dir().join(format!(
             "aria-family-wal-fatal-replay-{}",
             SystemTime::now()
