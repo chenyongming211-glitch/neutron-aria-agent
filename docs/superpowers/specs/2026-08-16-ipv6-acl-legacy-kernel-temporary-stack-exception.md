@@ -83,8 +83,8 @@ The current generation is accepted only when all of the following hold:
 Items 5 through 8 remain `deferred/pending` until executed in the user's test
 environment. Hosted CI must not report them as field PASS.
 
-Exact-head commit `0eafc85c14e7cdad2ad1f3e7a2ba4752a3c2f7af` passed Build
-[`31940674926`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31940674926):
+Exact-head commit `0eafc85c14e7cdad2ad1f3e7a2ba4752a3c2f7af` passed hosted
+Build run `31940674926`:
 
 - `rust-build` job `95149272171` passed warning-denied eBPF, userspace and
   agent builds, the 480-byte linked stack gate, static verification and release
