@@ -1,40 +1,28 @@
-use crate::common::CtContractKey;
+use crate::common::{CtContractKey, PipelineCtx};
 use crate::maps::{CT_CONTRACT_STATS, CT_CONTRACT_VALUE_BUF};
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct CtContractArgs {
-    pub tap_id: u32,
-    pub pkt_len: u32,
-    pub now: u64,
-    pub hook: u8,
-    pub family: u8,
-    pub reason: u8,
-    pub _pad: u8,
-}
-
 #[inline(always)]
-pub unsafe fn record_event(args: &CtContractArgs) {
+pub unsafe fn record_event(p: &PipelineCtx, hook: u8, family: u8, reason: u8) {
     let key = CtContractKey {
-        tap_id: args.tap_id,
-        hook: args.hook,
-        family: args.family,
-        reason: args.reason,
+        tap_id: p.tap_id,
+        hook,
+        family,
+        reason,
         pad: 0,
     };
 
     if let Some(v) = CT_CONTRACT_STATS.get_ptr_mut(&key) {
         (*v).packets += 1;
-        (*v).bytes += args.pkt_len as u64;
-        (*v).last_seen = args.now;
+        (*v).bytes += p.pkt_len as u64;
+        (*v).last_seen = p.now;
     } else {
         let val = match CT_CONTRACT_VALUE_BUF.get_ptr_mut(0) {
             Some(v) => v,
             None => return,
         };
         (*val).packets = 1;
-        (*val).bytes = args.pkt_len as u64;
-        (*val).last_seen = args.now;
+        (*val).bytes = p.pkt_len as u64;
+        (*val).last_seen = p.now;
         let _ = CT_CONTRACT_STATS.insert(&key, &*val, 0);
     }
 }

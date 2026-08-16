@@ -897,15 +897,7 @@ unsafe fn record_tc_ct_contract(p: &PipelineCtx, hook: u8, family: u8, reason: u
     if !should_record_tc_ct_contract(p, reason) {
         return;
     }
-    ct_contract::record_event(&ct_contract::CtContractArgs {
-        tap_id: p.tap_id,
-        pkt_len: p.pkt_len,
-        now: p.now,
-        hook,
-        family,
-        reason,
-        _pad: 0,
-    });
+    ct_contract::record_event(p, hook, family, reason);
 }
 
 #[inline(always)]
