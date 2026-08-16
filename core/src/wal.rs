@@ -1055,6 +1055,73 @@ mod tests {
             .collect()
     }
 
+    fn legacy_any_rule_snapshot(state_path: &str) {
+        let mut state = FirewallState::default();
+        state.max_port_policies = 8;
+        state
+            .apply_add_rule(0, 0, 6, 0, Some("80"), 0, IP_FAMILY_V4)
+            .unwrap();
+        state.rules[0].ip_family = 0;
+        fs::write(
+            format!("{}/state.json", state_path),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn assert_any_rule_projection(
+        state: &FirewallState,
+        expected_action: u8,
+        expected_ports: &str,
+    ) {
+        let mut identities = state
+            .rules
+            .iter()
+            .map(|rule| {
+                (
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    rule.ip_family,
+                    rule.action,
+                    rule.ports.as_deref(),
+                    rule.bitmap_idx,
+                )
+            })
+            .collect::<Vec<_>>();
+        identities.sort();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(
+            (
+                identities[0].0,
+                identities[0].1,
+                identities[0].2,
+                identities[0].3,
+            ),
+            (0, 0, 6, 0)
+        );
+        assert_eq!(
+            (
+                identities[1].0,
+                identities[1].1,
+                identities[1].2,
+                identities[1].3,
+            ),
+            (0, 0, 6, 0)
+        );
+        assert_eq!([identities[0].4, identities[1].4], [4, 6]);
+        assert!(identities
+            .iter()
+            .all(|rule| rule.5 == expected_action && rule.6 == Some(expected_ports)));
+        let bitmap_idx = identities[0].7.expect("updated rule must own a bitmap");
+        assert_eq!(identities[1].7, Some(bitmap_idx));
+        assert_eq!(state.port_sets.len(), 1);
+        let port_set = state.port_sets.values().next().unwrap();
+        assert_eq!(port_set.bitmap_idx, bitmap_idx);
+        assert_eq!(port_set.ref_count, 2);
+    }
+
     fn wal_checkpoint_assert_allocator_parity(
         expected: &FirewallState,
         actual: &FirewallState,
@@ -1165,6 +1232,115 @@ mod tests {
         assert_eq!(loaded.rules[0].src_group_id, 1);
 
         // Cleanup
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn legacy_snapshot_then_wal_any_add_updates_both_families_and_is_idempotent() {
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        wal_checkpoint_write_lines(
+            &state_path,
+            &[serde_json::json!({
+                "AddRule": {
+                    "src_id": 0,
+                    "dst_id": 0,
+                    "proto": 6,
+                    "action": 1,
+                    "ports": "443",
+                    "direction": 0
+                }
+            })
+            .to_string()],
+        );
+
+        let first = load_with_wal(&state_path).expect("family migration must succeed");
+        assert_any_rule_projection(&first, 1, "443");
+        let checkpointed_snapshot = fs::read(format!("{}/state.json", state_path)).unwrap();
+        let checkpointed_wal = fs::read(format!("{}/state.wal", state_path)).unwrap();
+
+        let restarted = load_with_wal(&state_path).expect("restart must remain usable");
+        assert_any_rule_projection(&restarted, 1, "443");
+        assert_eq!(
+            fs::read(format!("{}/state.json", state_path)).unwrap(),
+            checkpointed_snapshot,
+            "idempotent restart must not rewrite the migrated snapshot"
+        );
+        assert_eq!(
+            fs::read(format!("{}/state.wal", state_path)).unwrap(),
+            checkpointed_wal,
+            "idempotent restart must not rewrite the checkpointed WAL"
+        );
+
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn legacy_snapshot_then_wal_any_remove_removes_both_family_owners() {
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        wal_checkpoint_write_lines(
+            &state_path,
+            &[serde_json::json!({
+                "RemoveRule": {
+                    "src_id": 0,
+                    "dst_id": 0,
+                    "proto": 6,
+                    "direction": 0
+                }
+            })
+            .to_string()],
+        );
+
+        let loaded = load_with_wal(&state_path).expect("family migration must succeed");
+        assert!(loaded.rules.is_empty());
+        assert!(loaded.port_sets.is_empty());
+        assert_eq!(loaded.free_bitmap_indices, vec![0]);
+
+        let restarted = load_with_wal(&state_path).expect("restart must remain usable");
+        assert!(restarted.rules.is_empty());
+        assert!(restarted.port_sets.is_empty());
+        assert_eq!(restarted.free_bitmap_indices, vec![0]);
+
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn mixed_legacy_snapshot_is_typed_fatal_and_preserves_durable_files() {
+        let state_path = temp_state_path();
+        let mut state = FirewallState::default();
+        let src_id = state.add_group("src", "10.0.0.0/24").unwrap();
+        let dst_id = state.add_group("dst", "2001:db8::/64").unwrap();
+        state.rules.push(RuleInfo {
+            name: None,
+            src_group_id: src_id,
+            dst_group_id: dst_id,
+            proto: 6,
+            action: 1,
+            ports: None,
+            bitmap_idx: None,
+            direction: 0,
+            ip_family: 0,
+        });
+        let snapshot_path = format!("{}/state.json", state_path);
+        let wal_path = format!("{}/state.wal", state_path);
+        fs::write(&snapshot_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+        fs::write(
+            &wal_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&WalEntry::SetMaxPortPolicies { max: 99 }).unwrap()
+            ),
+        )
+        .unwrap();
+        let snapshot_before = fs::read(&snapshot_path).unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+
+        let error = load_with_wal(&state_path).expect_err("mixed families must abort loading");
+        assert_eq!(error.reason(), "legacy_acl_rule_mixed_family");
+        assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+
         let _ = fs::remove_dir_all(&state_path);
     }
 

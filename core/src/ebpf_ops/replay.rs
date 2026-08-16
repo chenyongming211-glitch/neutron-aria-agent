@@ -1021,3 +1021,54 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod family_migration_startup_tests {
+    use super::*;
+    use crate::state::{FirewallState, RuleInfo};
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mixed_legacy_family_load_stops_before_replay_callback() {
+        let path = std::env::temp_dir().join(format!(
+            "aria-family-fatal-replay-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        let mut state = FirewallState::default();
+        let src_id = state.add_group("src", "192.0.2.0/24").unwrap();
+        let dst_id = state.add_group("dst", "2001:db8::/64").unwrap();
+        state.rules.push(RuleInfo {
+            name: None,
+            src_group_id: src_id,
+            dst_group_id: dst_id,
+            proto: 6,
+            action: 1,
+            ports: None,
+            bitmap_idx: None,
+            direction: 0,
+            ip_family: 0,
+        });
+        fs::write(
+            path.join("state.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let replay_called = AtomicBool::new(false);
+
+        let error = load_state_then_replay(path.to_str().unwrap(), |_| {
+            replay_called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .expect_err("family migration must abort before replay");
+
+        assert_eq!(error, "legacy_acl_rule_mixed_family");
+        assert!(!replay_called.load(Ordering::Relaxed));
+        let _ = fs::remove_dir_all(path);
+    }
+}
