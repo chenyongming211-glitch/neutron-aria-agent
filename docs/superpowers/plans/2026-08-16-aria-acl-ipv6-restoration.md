@@ -1,5 +1,11 @@
 # Aria ACL IPv6 Restoration Implementation Plan
 
+> **Execution status (2026-08-16):** Tasks 1-3 are retained. Task 4 and all
+> later datapath-dependent steps in this plan are stopped and must not be
+> executed against the monolithic TC pipeline. They will be replaced by a new
+> implementation plan after user review of
+> `docs/superpowers/specs/2026-08-16-tail-call-datapath-architecture-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Restore complete, family-isolated IPv6 ACL support for Neutron-managed and standalone ports without changing the existing ACL product boundaries or enabling the feature in production before field proof.

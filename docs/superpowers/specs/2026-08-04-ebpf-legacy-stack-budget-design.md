@@ -2,9 +2,11 @@
 
 Date: 2026-08-04
 
-Status: implemented architecture baseline; current-candidate CI and field
-revalidation are tracked by P2-P5 in
-`docs/openstack-neutron-aria-details/18-v09-release-candidate-gates.md`
+Status: implemented historical baseline; its recorded tail-call escalation
+condition was reached during IPv6 ACL datapath work. The long-term architecture
+is superseded by `2026-08-16-tail-call-datapath-architecture-design.md`. This
+document remains authoritative for the 448-byte measurement model, maintained
+kernel contract, and historical evidence.
 
 Analyzed target: `origin/v0.9-neutron-agent@850832b`
 

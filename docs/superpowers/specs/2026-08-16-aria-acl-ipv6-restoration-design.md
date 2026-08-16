@@ -1,11 +1,15 @@
 # Aria ACL IPv6 Restoration Design
 
-**Status:** approved v2 design; implementation and field evidence not started
+**Status:** Tasks 1-3 implemented; Task 4 monolithic datapath attempt stopped.
+Datapath completion now follows
+`2026-08-16-tail-call-datapath-architecture-design.md`; field evidence remains
+pending.
 
 **Scope:** restore complete IPv6 support to the existing Neutron-managed and
-standalone Aria ACL product while preserving the current banked TC/eBPF
-architecture, failure boundaries, Python 2.7 compatibility, and default-off
-production enablement discipline.
+standalone Aria ACL product while preserving failure boundaries, Python 2.7
+compatibility, and default-off production enablement discipline. The TC
+datapath is migrated to the approved single tail-call architecture rather than
+extended through the exhausted monolithic call graph.
 
 ## 1. Objective
 
@@ -178,17 +182,19 @@ pub struct DropKey {
 ```
 
 `PipelineCtx._pad2[0]` becomes `ip_family`; the two-byte `_pad` after
-`drop_reason` stays reserved.
-`MatchedPolicy` and every Rust-side constructor or comparison carry the same
-family. Compile-time layout assertions and `repr(C)` contract checks continue
-to enforce the existing sizes and offsets.
+`drop_reason` stays reserved. The map-backed pipeline context retains family
+for stage validation and observability. Family- and direction-specific eBPF
+programs use structural constants when constructing hot policy, conntrack,
+drop, and counter keys; they do not propagate a dynamic family through
+`MatchedPolicy` or unrelated nested helpers. Compile-time layout assertions
+and `repr(C)` contract checks continue to enforce existing sizes and offsets.
 
 ### 5.2 Policy lookup
 
-- The IPv4 parse path sets `PipelineCtx.ip_family=4`; the IPv6 path sets it to
-  `6` before selector or policy evaluation.
-- Every exact and wildcard policy candidate includes that value in
-  `PolicyKey`.
+- The entry parse path records family in `PipelineCtx` and dispatches to the
+  corresponding family- and direction-specific tail-call program.
+- Every exact and wildcard policy candidate includes the typed program's
+  structural family constant in `PolicyKey`.
 - Userspace refuses to insert a policy key whose family is not `4` or `6`.
 - The eBPF evaluator treats an impossible family as no valid ACL decision; it
   does not fall back to a family-zero lookup.
@@ -197,7 +203,8 @@ to enforce the existing sizes and offsets.
 
 ### 5.3 Conntrack
 
-- A policy-created conntrack entry records the matched family and bank.
+- `ct_create_v4` records family `4`; `ct_create_v6` records family `6`. A
+  policy-created conntrack entry records that structural family and its bank.
 - A cached entry is current only when its family equals the parsed packet
   family and its bank satisfies the existing bank-validation rule.
 - `matched_family=0`, an unknown value, or a family mismatch makes the cache
@@ -217,10 +224,11 @@ to enforce the existing sizes and offsets.
 
 ### 5.5 Stack and program constraints
 
-The change reuses structure padding and per-CPU scratch space. It must retain
-the existing 448-byte linked TC stack gate, warning-denied hosted builds, and
-supported 4.18-kernel verifier behavior. No new parser or large stack-local
-object is introduced.
+IPv6 enforcement is completed inside the approved tail-call pipeline. Every
+attached and tail-called program is independently limited to 448 verifier-
+charged bytes; programs above 416 bytes require architecture review. Hosted
+warning-denied builds and exact 4.18-kernel behavior remain mandatory. The
+stack gate covers every stage rather than only `tc_ingress` and `tc_egress`.
 
 ## 6. Family-Qualified Selector Groups
 
@@ -401,7 +409,10 @@ Reusing padding preserves byte sizes but not map semantics. Existing pinned
 maps cannot be adopted by the new program.
 
 Runtime metadata advances to schema `3` and records
-`acl_policy_key_schema=2`. Upgrade per host is:
+`acl_policy_key_schema=2`. The tail-call runtime separately records
+`tail_call_pipeline_schema=1`. Its executable `program_bank=A|B` is independent
+from ACL rule publication's `acl_policy_bank=0|1`; neither may be called only
+"bank" when both are in scope. Upgrade per host is:
 
 1. Stop admitting ACL transactions.
 2. Turn the ACL gate off and verify quiescence.
@@ -410,10 +421,11 @@ Runtime metadata advances to schema `3` and records
    the order defined in section 9.3.
 5. Verify that no old Aria ACL program remains attached.
 6. Delete only the resolved dormant Aria runtime pin directory.
-7. Load the new programs and create fresh maps.
-8. Request a full authoritative snapshot and stage both banks.
-9. Verify both banks and the family-qualified selector registry.
-10. Attach links, enable the gate, and resume transactions.
+7. Load the complete tail-call program generation and create fresh maps.
+8. Populate and verify every required program-array slot before attachment.
+9. Request a full authoritative snapshot and stage both ACL policy banks.
+10. Verify both ACL policy banks and the family-qualified selector registry.
+11. Attach the entry links, enable the gate, and resume transactions.
 
 If old live links remain, automatic rebuild stops with
 `acl_runtime_schema_mismatch_live`; the installer must not delete pins that
@@ -560,7 +572,8 @@ No local Cargo build, check, or test is run. GitHub Actions must provide:
 
 - Rust and eBPF tests with warnings denied;
 - ABI layout and `repr(C)` checks;
-- linked TC 448-byte stack-budget verification;
+- linked-artifact 448-byte stack verification for every attached and
+  tail-called TC program;
 - Python 2.7-compatible unit/contract tests;
 - migration and CLI tests; and
 - the existing repository quality gates.
@@ -578,7 +591,8 @@ The field matrix covers:
 - allow/deny, wildcard, CIDR, address-set, TCP, UDP, ICMP, and ICMPv6;
 - Neighbor Discovery behavior under explicit allow and deny-any policies;
 - IPv6 first/non-first fragments and stateful replies;
-- bank update, agent restart, host reboot, detach/reattach, and rollback;
+- ACL policy-bank update, tail-call program-bank update, agent restart, host
+  reboot, detach/reattach, and rollback;
 - mixed-version expand-contract deployment; and
 - counters v2 identity when the separate counters gate is enabled for testing.
 
@@ -594,7 +608,7 @@ Implementation is divided into independently reviewable batches:
 | --- | --- |
 | B0 | Freeze product/ABI/group/capability contracts, dependencies, gates, migration order, and exact RED tests. |
 | B1 | Add family to ABI, normalized persistence, local WAL, Neutron WAL/pending-intent migration, and runtime schema checks. |
-| B2 | Update eBPF/core policy, conntrack, drop, replay, preimage, layout, and stack-budget behavior. |
+| B2 | Replace the stopped monolithic datapath task with the approved tail-call foundation, then update eBPF/core policy, conntrack, drop, replay, preimage, layout, and per-stage stack behavior. |
 | B3 | Implement the Rust dual-stack compiler, family-qualified group namespace, and per-family selector numbering. |
 | B4 | Enable strict Python API/DB/CLI dual-stack validation with the pinned `netaddr` range. |
 | B5 | Complete capability expand-contract support, contract checkers, counters v2, DB migration, and operator documentation. |
@@ -629,7 +643,8 @@ IPv6 ACL restoration is complete when all of the following are true:
 - no family-zero policy can be inserted or replayed;
 - legacy committed and pending state migrates idempotently before runtime
   materialization;
-- runtime schema 3 upgrade and symmetric rollback refuse unsafe live-map reuse;
+- runtime schema 3 plus tail-call pipeline schema 1 upgrades and symmetric
+  rollback refuse unsafe live-map or mixed-program-generation reuse;
 - the Python/Rust mixed-version rollout is contract-tested;
 - all applicable hosted CI gates pass at the exact implementation head;
 - the real OpenStack/4.18 field matrix passes with evidence; and
