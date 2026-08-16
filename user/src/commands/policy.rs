@@ -45,11 +45,13 @@ pub(crate) async fn handle_action(
             action,
             ports,
             direction,
+            ethertype,
         } => {
             match client
                 .add_policy(
                     instance,
                     &aria_api::AddPolicyRequest {
+                        ethertype,
                         src_group: src_group.clone(),
                         dst_group: dst_group.clone(),
                         proto,
@@ -73,11 +75,13 @@ pub(crate) async fn handle_action(
             dst_group,
             proto,
             direction,
+            ethertype,
         } => {
             match client
                 .delete_policy(
                     instance,
                     &aria_api::DeletePolicyRequest {
+                        ethertype,
                         src_group,
                         dst_group,
                         proto,

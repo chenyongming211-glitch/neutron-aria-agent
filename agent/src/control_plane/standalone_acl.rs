@@ -11,17 +11,41 @@ pub(crate) enum StandaloneAclMutation {
         action: u8,
         direction: u8,
         ports: Option<String>,
+        ip_families: Vec<u8>,
     },
     DeletePolicy {
         src_group: String,
         dst_group: String,
         proto: u8,
         direction: u8,
+        ip_families: Vec<u8>,
     },
     AddReferencedGroupCidr {
         group_name: String,
         cidr: String,
     },
+}
+
+pub(crate) fn standalone_policy_families(ethertype: Option<&str>) -> Result<Vec<u8>, String> {
+    match ethertype.unwrap_or("IPv4") {
+        "IPv4" => Ok(vec![IP_FAMILY_V4]),
+        "IPv6" => Ok(vec![IP_FAMILY_V6]),
+        "any" => Ok(vec![IP_FAMILY_V4, IP_FAMILY_V6]),
+        value => Err(format!("unsupported standalone policy ethertype {}", value)),
+    }
+}
+
+fn validate_policy_families(ip_families: &[u8]) -> Result<(), String> {
+    if ip_families.is_empty() {
+        return Err("standalone policy requires at least one IP family".to_string());
+    }
+    if ip_families
+        .iter()
+        .any(|ip_family| *ip_family != IP_FAMILY_V4 && *ip_family != IP_FAMILY_V6)
+    {
+        return Err("standalone policy contains an invalid IP family".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -169,22 +193,26 @@ fn apply_mutation(
             action,
             direction,
             ports,
+            ip_families,
         } => {
+            validate_policy_families(ip_families)?;
             aria_core::ebpf_ops::validate_policy_ports(*proto, ports.as_deref())?;
             let src_id = resolve_group_id(state, src_group)?;
             let dst_id = resolve_group_id(state, dst_group)?;
             for direction in requested_directions(*direction).map_err(|error| error.to_string())? {
-                let result = state.apply_add_rule(
+                for ip_family in ip_families {
+                    let result = state.apply_add_rule(
                     src_id,
                     dst_id,
                     *proto,
                     *action,
                     ports.as_deref(),
                     direction,
-                    IP_FAMILY_V4,
-                )?;
-                if let Some((bitmap_idx, ports_normalized)) = result.old_port_set_released {
-                    state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
+                        *ip_family,
+                    )?;
+                    if let Some((bitmap_idx, ports_normalized)) = result.old_port_set_released {
+                        state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
+                    }
                 }
             }
             Ok(Vec::new())
@@ -194,40 +222,49 @@ fn apply_mutation(
             dst_group,
             proto,
             direction,
+            ip_families,
         } => {
+            validate_policy_families(ip_families)?;
             let src_id = resolve_group_id(state, src_group)?;
             let dst_id = resolve_group_id(state, dst_group)?;
             let directions = requested_directions(*direction).map_err(|error| error.to_string())?;
-            let matching: Vec<u8> = directions
-                .into_iter()
-                .filter(|candidate| {
-                    state.rules.iter().any(|rule| {
+            for candidate in &directions {
+                for ip_family in ip_families {
+                    if state.rules.iter().any(|rule| {
                         rule.src_group_id == src_id
                             && rule.dst_group_id == dst_id
                             && rule.proto == *proto
                             && rule.direction == *candidate
-                            && rule.ip_family == IP_FAMILY_V4
-                    })
-                })
-                .collect();
-            if matching.is_empty() {
+                            && rule.ip_family == *ip_family
+                    }) {
+                        continue;
+                    }
+                    return Err(format!(
+                        "Policy not found: src={}, dst={}, proto={}, direction={}, ip_family={}",
+                        src_group, dst_group, proto, candidate, ip_family
+                    ));
+                }
+            }
+            if directions.is_empty() {
                 return Err(format!(
                     "Policy not found: src={}, dst={}, proto={}, direction={}",
                     src_group, dst_group, proto, direction
                 ));
             }
-            for direction in matching {
-                let result = state.apply_remove_rule(
+            for direction in directions {
+                for ip_family in ip_families {
+                    let result = state.apply_remove_rule(
                     src_id,
                     dst_id,
                     *proto,
                     direction,
-                    IP_FAMILY_V4,
-                )?;
-                if let (Some(bitmap_idx), Some(ports_normalized)) =
-                    (result.bitmap_idx, result.port_set_released)
-                {
-                    state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
+                        *ip_family,
+                    )?;
+                    if let (Some(bitmap_idx), Some(ports_normalized)) =
+                        (result.bitmap_idx, result.port_set_released)
+                    {
+                        state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
+                    }
                 }
             }
             Ok(Vec::new())
@@ -989,6 +1026,7 @@ mod tests {
                 action: 1,
                 direction: 0,
                 ports: None,
+                ip_families: vec![IP_FAMILY_V4],
             }],
         )
         .unwrap();
@@ -1053,6 +1091,58 @@ mod tests {
     }
 
     #[test]
+    fn standalone_policy_ethertype_contract_defaults_and_rejects_unknown_values() {
+        assert_eq!(standalone_policy_families(None).unwrap(), vec![IP_FAMILY_V4]);
+        assert_eq!(
+            standalone_policy_families(Some("IPv4")).unwrap(),
+            vec![IP_FAMILY_V4]
+        );
+        assert_eq!(
+            standalone_policy_families(Some("IPv6")).unwrap(),
+            vec![IP_FAMILY_V6]
+        );
+        assert_eq!(
+            standalone_policy_families(Some("any")).unwrap(),
+            vec![IP_FAMILY_V4, IP_FAMILY_V6]
+        );
+        assert!(standalone_policy_families(Some("arp")).is_err());
+    }
+
+    #[test]
+    fn standalone_acl_any_delete_rejects_without_half_commit() {
+        let old = state_with_groups();
+        let v4_only = StandaloneAclMutation::UpsertPolicy {
+            src_group: "client".into(),
+            dst_group: "server".into(),
+            proto: 6,
+            action: 0,
+            direction: 0,
+            ports: None,
+            ip_families: vec![IP_FAMILY_V4],
+        };
+        let added = build_standalone_acl_publication_plan(&old, ACL_BANK_PRIMARY, &[v4_only])
+            .unwrap();
+        let any_delete = StandaloneAclMutation::DeletePolicy {
+            src_group: "client".into(),
+            dst_group: "server".into(),
+            proto: 6,
+            direction: 0,
+            ip_families: vec![IP_FAMILY_V4, IP_FAMILY_V6],
+        };
+        let rejected = build_standalone_acl_publication_plan(
+            &added.final_state,
+            ACL_BANK_PRIMARY,
+            &[any_delete],
+        )
+        .unwrap();
+
+        assert_eq!(rejected.accepted, 0);
+        assert_eq!(rejected.final_state.rules.len(), 1);
+        assert_eq!(rejected.final_state.rules[0].ip_family, IP_FAMILY_V4);
+        assert!(rejected.errors[0].contains("ip_family=6"));
+    }
+
+    #[test]
     fn standalone_acl_publication_persists_before_epoch_and_bank_switch() {
         let steps = publication_steps(true);
         let persist = steps
@@ -1104,6 +1194,7 @@ mod tests {
                 action: 1,
                 direction: 2,
                 ports: None,
+                ip_families: vec![IP_FAMILY_V4],
             }],
         )
         .unwrap();
@@ -1138,6 +1229,7 @@ mod tests {
                 dst_group: "server".into(),
                 proto: 6,
                 direction: 2,
+                ip_families: vec![IP_FAMILY_V4],
             }],
         )
         .unwrap();
@@ -1239,6 +1331,7 @@ mod tests {
                     action: 1,
                     direction: 2,
                     ports: None,
+                    ip_families: vec![IP_FAMILY_V4],
                 },
                 StandaloneAclMutation::UpsertPolicy {
                     src_group: "missing".into(),
@@ -1247,6 +1340,7 @@ mod tests {
                     action: 1,
                     direction: 0,
                     ports: None,
+                    ip_families: vec![IP_FAMILY_V4],
                 },
             ],
         )

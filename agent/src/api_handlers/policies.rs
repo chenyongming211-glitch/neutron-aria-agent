@@ -9,7 +9,8 @@ use axum::{
 
 use super::common::{err_response, AppState};
 use crate::control_plane::{
-    ControlPlaneError, LocalWriteDomain, StandaloneAclBatchItem, StandaloneAclMutation,
+    standalone_policy_families, ControlPlaneError, LocalWriteDomain, StandaloneAclBatchItem,
+    StandaloneAclMutation,
 };
 use aria_api::*;
 
@@ -60,6 +61,11 @@ pub async fn list_policies(
             let policies = rules
                 .into_iter()
                 .map(|r| PolicyEntry {
+                    ethertype: if r.ip_family == 6 {
+                        "IPv6".to_string()
+                    } else {
+                        "IPv4".to_string()
+                    },
                     src_group: find_name(r.src_group_id),
                     src_group_id: r.src_group_id,
                     dst_group: find_name(r.dst_group_id),
@@ -119,6 +125,10 @@ pub async fn add_policy(
         Ok(d) => d,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
+    let ip_families = match standalone_policy_families(req.ethertype.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return Err(err_response(ControlPlaneError::ValidationError(error))),
+    };
 
     let cleanup_pending = match cp
         .add_policy(
@@ -129,6 +139,7 @@ pub async fn add_policy(
             action,
             direction,
             req.ports.as_deref(),
+            &ip_families,
         )
         .await
     {
@@ -197,9 +208,13 @@ pub async fn delete_policy(
         Ok(d) => d,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
+    let ip_families = match standalone_policy_families(req.ethertype.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return Err(err_response(ControlPlaneError::ValidationError(error))),
+    };
 
     let cleanup_pending = match cp
-        .delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction)
+        .delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction, &ip_families)
         .await
     {
         Ok(cleanup_pending) => cleanup_pending_response(cleanup_pending),
@@ -263,13 +278,19 @@ pub async fn list_policies_with_stats(
                 };
 
                 let mut stats_map: HashMap<
-                    (u32, u32, u8, u8),
+                    (u32, u32, u8, u8, u8),
                     aria_core::monitoring::RuleStatsEntry,
                 > = stats
                     .into_iter()
                     .map(|s| {
                         (
-                            (s.key.src_id, s.key.dst_id, s.key.proto, s.key.direction),
+                            (
+                                s.key.src_id,
+                                s.key.dst_id,
+                                s.key.proto,
+                                s.key.direction,
+                                s.key.ip_family,
+                            ),
                             s,
                         )
                     })
@@ -278,9 +299,20 @@ pub async fn list_policies_with_stats(
                 let policies = rules
                     .into_iter()
                     .map(|r| {
-                        let key = (r.src_group_id, r.dst_group_id, r.proto, r.direction);
+                        let key = (
+                            r.src_group_id,
+                            r.dst_group_id,
+                            r.proto,
+                            r.direction,
+                            r.ip_family,
+                        );
                         let stat = stats_map.remove(&key);
                         PolicyWithStatsEntry {
+                            ethertype: if r.ip_family == 6 {
+                                "IPv6".to_string()
+                            } else {
+                                "IPv4".to_string()
+                            },
                             src_group: find_name(r.src_group_id),
                             src_group_id: r.src_group_id,
                             dst_group: find_name(r.dst_group_id),
@@ -367,6 +399,13 @@ pub async fn batch_add_policies(
                 continue;
             }
         };
+        let ip_families = match standalone_policy_families(policy.ethertype.as_deref()) {
+            Ok(value) => value,
+            Err(error) => {
+                items.push(StandaloneAclBatchItem::Rejected { request_index, error });
+                continue;
+            }
+        };
         items.push(StandaloneAclBatchItem::Parsed {
             request_index,
             mutation: StandaloneAclMutation::UpsertPolicy {
@@ -376,6 +415,7 @@ pub async fn batch_add_policies(
                 action,
                 direction,
                 ports: policy.ports,
+                ip_families,
             },
         });
     }

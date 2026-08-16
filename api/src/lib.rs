@@ -1074,6 +1074,7 @@ pub struct GroupsWithStatsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
+    "ethertype": "IPv4",
     "src_group": "web",
     "src_group_id": 1,
     "dst_group": "db",
@@ -1085,6 +1086,8 @@ pub struct GroupsWithStatsResponse {
     "bitmap_idx": 7
 }))]
 pub struct PolicyEntry {
+    #[schema(example = "IPv4")]
+    pub ethertype: String,
     /// Source group name or `any`.
     #[schema(example = "web")]
     pub src_group: String,
@@ -1118,6 +1121,7 @@ pub struct PolicyEntry {
 #[schema(example = json!({
     "policies": [
         {
+            "ethertype": "IPv4",
             "src_group": "web",
             "src_group_id": 1,
             "dst_group": "db",
@@ -1137,6 +1141,7 @@ pub struct PoliciesResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
+    "ethertype": "IPv4",
     "src_group": "web",
     "dst_group": "db",
     "proto": "tcp",
@@ -1145,6 +1150,8 @@ pub struct PoliciesResponse {
     "ports": "5432"
 }))]
 pub struct AddPolicyRequest {
+    #[serde(default)]
+    pub ethertype: Option<String>,
     /// Source group name or `any`.
     #[schema(example = "web")]
     pub src_group: String,
@@ -1176,12 +1183,15 @@ fn default_mode_string() -> String {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
+    "ethertype": "IPv4",
     "src_group": "web",
     "dst_group": "db",
     "proto": "tcp",
     "direction": "ingress"
 }))]
 pub struct DeletePolicyRequest {
+    #[serde(default)]
+    pub ethertype: Option<String>,
     /// Source group name or `any`.
     #[schema(example = "web")]
     pub src_group: String,
@@ -1201,6 +1211,7 @@ pub struct DeletePolicyRequest {
 #[schema(example = json!({
     "policies": [
         {
+            "ethertype": "IPv4",
             "src_group": "web",
             "dst_group": "db",
             "proto": "tcp",
@@ -1209,6 +1220,7 @@ pub struct DeletePolicyRequest {
             "ports": "5432"
         },
         {
+            "ethertype": "IPv4",
             "src_group": "web",
             "dst_group": "any",
             "proto": "udp",
@@ -1248,6 +1260,7 @@ pub struct BatchPoliciesResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
+    "ethertype": "IPv4",
     "src_group": "web",
     "src_group_id": 1,
     "dst_group": "db",
@@ -1263,6 +1276,8 @@ pub struct BatchPoliciesResponse {
     "dropped_bytes": 0
 }))]
 pub struct PolicyWithStatsEntry {
+    #[schema(example = "IPv4")]
+    pub ethertype: String,
     /// Source group name or `any`.
     #[schema(example = "web")]
     pub src_group: String,

@@ -152,6 +152,8 @@ pub(crate) enum PolicyCommands {
         ports: Option<String>,
         #[arg(long, default_value = "ingress", help = "Direction: ingress or egress")]
         direction: String,
+        #[arg(long, help = "IP family: IPv4 (default), IPv6, or any")]
+        ethertype: Option<String>,
     },
     Delete {
         #[arg(short, long)]
@@ -162,6 +164,8 @@ pub(crate) enum PolicyCommands {
         proto: String,
         #[arg(long, default_value = "ingress", help = "Direction: ingress or egress")]
         direction: String,
+        #[arg(long, help = "IP family: IPv4 (default), IPv6, or any")]
+        ethertype: Option<String>,
     },
     /// Batch add policies from JSON file or stdin
     Batch {

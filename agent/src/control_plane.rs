@@ -37,7 +37,9 @@ mod standalone_group;
 mod tcprt;
 mod trace;
 
-pub(crate) use standalone_acl::{StandaloneAclBatchItem, StandaloneAclMutation};
+pub(crate) use standalone_acl::{
+    standalone_policy_families, StandaloneAclBatchItem, StandaloneAclMutation,
+};
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
@@ -7265,6 +7267,7 @@ impl ControlPlane {
         action: u8,
         direction: u8,
         ports: Option<&str>,
+        ip_families: &[u8],
     ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
@@ -7293,6 +7296,7 @@ impl ControlPlane {
                     action,
                     direction,
                     ports: ports.map(str::to_string),
+                    ip_families: ip_families.to_vec(),
                 }],
             )
             .await?;
@@ -7330,6 +7334,7 @@ impl ControlPlane {
         dst_group: &str,
         proto: u8,
         direction: u8,
+        ip_families: &[u8],
     ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
@@ -7341,7 +7346,7 @@ impl ControlPlane {
             Some(state.managed_acl_publication_mode),
             authority.as_ref(),
         )?;
-        self.delete_policy_locked(instance, &mut state, src_group, dst_group, proto, direction)
+        self.delete_policy_locked(instance, &mut state, src_group, dst_group, proto, direction, ip_families)
             .await
     }
 
@@ -7353,6 +7358,7 @@ impl ControlPlane {
         dst_group: &str,
         proto: u8,
         direction: u8,
+        ip_families: &[u8],
     ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
         Self::check_runtime_maps_ready(&state.pin_path)?;
         self.resolve_group_id(&state.state, src_group)?;
@@ -7367,6 +7373,7 @@ impl ControlPlane {
                     dst_group: dst_group.to_string(),
                     proto,
                     direction,
+                    ip_families: ip_families.to_vec(),
                 }],
             )
             .await?;
@@ -10864,6 +10871,7 @@ mod tests {
                 0,
                 0,
                 None,
+                &[IP_FAMILY_V4],
             )
             .await
             .expect_err("ManagedAcl must block add_policy before authority commits");
@@ -10888,6 +10896,7 @@ mod tests {
                 "policy-dst",
                 libc::IPPROTO_TCP as u8,
                 0,
+                &[IP_FAMILY_V4],
             )
             .await
             .expect_err("ManagedAcl must block delete_policy before authority commits");
@@ -11067,6 +11076,7 @@ mod tests {
                 0,
                 0,
                 None,
+                &[IP_FAMILY_V4],
             )
             .await
             .expect_err("missing maps must remain the first standalone add failure");
@@ -11079,6 +11089,7 @@ mod tests {
                 "policy-dst",
                 libc::IPPROTO_TCP as u8,
                 0,
+                &[IP_FAMILY_V4],
             )
             .await
             .expect_err("missing maps must remain the first standalone delete failure");
