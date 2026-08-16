@@ -122,16 +122,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
         };
         let parse_failure = parse_tc_packet(&ctx, info_ptr, family);
         if parse_failure != 0 {
-            let mut proto = 0;
-            if parse_failure == DROP_FRAGMENT_INVALID_L4 {
-                if let Some((invalid_family, invalid_proto)) =
-                    parser::invalid_l4_failure(&*info_ptr)
-                {
-                    fragment::record_invalid_l4(invalid_family);
-                    proto = invalid_proto;
-                }
-            }
-            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure, proto, family);
+            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure, family);
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -333,16 +324,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
         };
         let parse_failure = parse_tc_packet(&ctx, info_ptr, family);
         if parse_failure != 0 {
-            let mut proto = 0;
-            if parse_failure == DROP_FRAGMENT_INVALID_L4 {
-                if let Some((invalid_family, invalid_proto)) =
-                    parser::invalid_l4_failure(&*info_ptr)
-                {
-                    fragment::record_invalid_l4(invalid_family);
-                    proto = invalid_proto;
-                }
-            }
-            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure, proto, family);
+            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure, family);
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -616,10 +598,18 @@ unsafe fn record_tc_parse_drop(
     direction: u8,
     pkt_len: u32,
     reason: u8,
-    proto: u8,
     ip_family: u8,
 ) {
     let skb = ctx.as_ptr() as *const __sk_buff;
+    let mut proto = 0;
+    if reason == DROP_FRAGMENT_INVALID_L4 {
+        if let Some(info) = maps::PKT_SCRATCH.get_ptr_mut(0) {
+            if let Some((invalid_family, invalid_proto)) = parser::invalid_l4_failure(&*info) {
+                fragment::record_invalid_l4(invalid_family);
+                proto = invalid_proto;
+            }
+        }
+    }
     let key = DropKey {
         tap_id: resolve_tap_id_for_ifindex((*skb).ifindex),
         reason,

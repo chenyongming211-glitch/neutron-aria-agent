@@ -36,24 +36,20 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
     let mut i = 0u8;
     while i < 8 {
         let mask = ORDER[i as usize];
-        let s = if (mask & 1) != 0 { 0 } else { p.src_id };
-        let d = if (mask & 2) != 0 { 0 } else { p.dst_id };
-        let proto = if (mask & 4) != 0 { 0 } else { p.proto };
-
         let key = PolicyKey {
             tap_id: p.tap_id,
-            src_id: s,
-            dst_id: d,
-            proto,
+            src_id: if (mask & 1) != 0 { 0 } else { p.src_id },
+            dst_id: if (mask & 2) != 0 { 0 } else { p.dst_id },
+            proto: if (mask & 4) != 0 { 0 } else { p.proto },
             direction: p.direction,
             bank: p.matched_bank,
             ip_family: p.ip_family,
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
-            p.matched_src_id = s;
-            p.matched_dst_id = d;
-            p.matched_proto = proto;
+            p.matched_src_id = key.src_id;
+            p.matched_dst_id = key.dst_id;
+            p.matched_proto = key.proto;
             p.matched_direction = p.direction;
             p.flags |= FLAG_POLICY_HIT;
             p.drop_reason = drop_reason;
