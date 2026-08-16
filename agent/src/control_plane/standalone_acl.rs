@@ -1027,6 +1027,32 @@ mod tests {
     }
 
     #[test]
+    fn standalone_acl_any_expands_and_deletes_both_families_atomically() {
+        let old = state_with_groups();
+        let add = StandaloneAclMutation::UpsertPolicy {
+            src_group: "client".into(),
+            dst_group: "server".into(),
+            proto: 6,
+            action: 0,
+            direction: 0,
+            ports: None,
+            ip_families: vec![IP_FAMILY_V4, IP_FAMILY_V6],
+        };
+        let added = build_standalone_acl_publication_plan(&old, ACL_BANK_PRIMARY, &[add]).unwrap();
+        assert_eq!(added.accepted, 1);
+        assert_eq!(
+            added.final_state.rules.iter().map(|rule| rule.ip_family).collect::<Vec<_>>(),
+            vec![IP_FAMILY_V4, IP_FAMILY_V6],
+        );
+        let delete = StandaloneAclMutation::DeletePolicy {
+            src_group: "client".into(), dst_group: "server".into(), proto: 6,
+            direction: 0, ip_families: vec![IP_FAMILY_V4, IP_FAMILY_V6],
+        };
+        let removed = build_standalone_acl_publication_plan(&added.final_state, ACL_BANK_PRIMARY, &[delete]).unwrap();
+        assert!(removed.final_state.rules.is_empty());
+    }
+
+    #[test]
     fn standalone_acl_publication_persists_before_epoch_and_bank_switch() {
         let steps = publication_steps(true);
         let persist = steps

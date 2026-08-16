@@ -67,6 +67,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_gate_serialization_"],
     ["test", "--locked", "-p", "aria-agent", "managed_failure_path_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_acl_activation_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_acl_any_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_acl_publication_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_group_transaction_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_review_"],
