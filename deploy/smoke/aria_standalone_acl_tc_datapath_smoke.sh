@@ -180,17 +180,11 @@ assert not left,left
 PY
     curl -fsS "${HTTP}/api/v1/instances" >"${WORK_DIR}/ethertype-any-instances.json"
     capture_acl_counters ethertype-any
+    # API expansion is a control-plane contract artifact, not field traffic
+    # evidence.  The eight field cases remain deferred until a real flow run.
     FIELD_STATUS_SNAPSHOT="${WORK_DIR}/ethertype-any-instances.json"
     FIELD_COUNTER_SNAPSHOT="${WORK_DIR}/ethertype-any-metrics.prom"
-    record_field_case "${CASE_DUAL_STACK}" "POST/GET/DELETE /api/v1/${INSTANCE}/policies ethertype=any" "one IPv4 and one IPv6 family-qualified rule" "two exact created rules observed then deleted" "pass"
-    record_field_case "${CASE_WILDCARD_ISOLATION}" "field topology prerequisite" "opposite family remains isolated" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_IPV4_ONLY}" "standalone IPv4 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_IPV6_ONLY}" "standalone IPv6 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_DUAL_STACK}" "standalone dual-stack fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_FRAGMENT}" "field topology prerequisite" "fragment verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_STATEFUL_REPLY}" "field topology prerequisite" "stateful reply verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_UPGRADE}" "field topology prerequisite" "upgrade verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
-    record_field_case "${CASE_ROLLBACK}" "field topology prerequisite" "rollback verdict" "not run" "${FIELD_EVIDENCE_STATUS}"
+    record_deferred_field_cases
 }
 
 die() {

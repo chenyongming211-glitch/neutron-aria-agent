@@ -459,10 +459,15 @@ mod tests {
             vec![(IP_FAMILY_V6, 58)]
         );
         assert_eq!(
+            standalone_policy_family_protocols(Some("IPv6"), "icmp").unwrap(),
+            vec![(IP_FAMILY_V6, 58)]
+        );
+        assert_eq!(
             standalone_policy_family_protocols(Some("any"), "tcp").unwrap(),
             vec![(IP_FAMILY_V4, 6), (IP_FAMILY_V6, 6)]
         );
-        assert!(standalone_policy_family_protocols(Some("IPv6"), "icmp").is_err());
+        assert!(standalone_policy_family_protocols(Some("IPv6"), "1").is_err());
         assert!(standalone_policy_family_protocols(Some("IPv4"), "icmpv6").is_err());
+        assert!(standalone_policy_family_protocols(Some("IPv4"), "58").is_err());
     }
 }
