@@ -592,7 +592,7 @@ pub fn scrub_standalone_runtime_state(pin_path: &str) -> Result<u64, String> {
 mod tests {
     use super::collect_iterated_items;
     use super::policy_key_matches_bank;
-    use crate::common::PolicyKey;
+    use crate::common::{PolicyKey, IP_FAMILY_V4};
 
     #[test]
     fn policy_key_matches_bank_requires_same_tap_and_bank() {

@@ -309,6 +309,7 @@ pub fn delete_port_set(
 #[cfg(test)]
 mod tests {
     use super::{parse_normalized_ports, parse_ports, policy_key_for_bank, stored_policy_action};
+    use crate::common::IP_FAMILY_V4;
 
     #[test]
     fn parse_ports_inherits_rule_action_for_implicit_entries() {

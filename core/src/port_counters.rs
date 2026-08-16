@@ -1,7 +1,7 @@
 use aya::maps::{MapData, MapError, PerCpuHashMap};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::common::{DropKey, DropValue, PolicyKey, RuleStatsValue, IP_FAMILY_V4};
+use crate::common::{DropKey, DropValue, PolicyKey, RuleStatsValue};
 use crate::drop_ops::{sum_per_cpu_drop, DropStatsEntry};
 use crate::monitoring::{sum_per_cpu_rule_stats, RuleStatsEntry};
 
@@ -255,7 +255,7 @@ pub fn read_port_counters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::PolicyKey;
+    use crate::common::{PolicyKey, IP_FAMILY_V4};
 
     fn rule(
         tap: u32,

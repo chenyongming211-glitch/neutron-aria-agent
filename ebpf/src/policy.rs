@@ -1,6 +1,6 @@
 use crate::common::{
     PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY,
-    DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
+    DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, IP_FAMILY_V4, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
 use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
@@ -43,7 +43,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
             proto,
             direction: p.direction,
             bank: p.matched_bank,
-            ip_family: p.ip_family,
+            ip_family: IP_FAMILY_V4,
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
