@@ -4,8 +4,8 @@
 
 **DONE_WITH_CONCERNS.** The Task 11 implementation and the recovered public
 standalone family contract are committed on `main`; exact-head hosted Build
-[`31956696938`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938)
-is green. OpenStack and EL 4.18 field validation was not available and remains
+`31956696938` is green. Retrieve its authenticated URL with
+`gh run view 31956696938 --json url --jq .url`. OpenStack and EL 4.18 field validation was not available and remains
 strictly `deferred/pending`; this report makes no field PASS claim.
 
 ## Commits
@@ -27,11 +27,9 @@ The RED commit was pushed and then dispatched with:
 gh workflow run build.yml --ref main
 ```
 
-Exact RED run
-[`31955989649`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31955989649),
-Rust behavior job
-[`95186629748`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31955989649/job/95186629748),
-failed as expected with two `E0559` errors: `StandaloneAclMutation::UpsertPolicy`
+Exact RED run `31955989649`, Rust behavior job `95186629748` (retrieve the
+run URL with `gh run view 31955989649 --json url --jq .url`), failed as expected
+with two `E0559` errors: `StandaloneAclMutation::UpsertPolicy`
 and `DeletePolicy` did not contain `ip_families`. The run's fast contracts,
 Rust build, DB contracts, and clean install jobs were green. This isolated the
 missing behavior before the GREEN implementation.
@@ -61,15 +59,15 @@ source for Rust/build/package work.
 
 ## Exact-head hosted CI
 
-`421aa02101727118e83448717b9d3d0bc9f17ebe` was verified by the exact-head
-workflow-dispatch run
-[`31956696938`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938):
+`421aa02101727118e83448717b9d3d0bc9f17ebe` was verified by exact-head
+workflow-dispatch run `31956696938` (retrieve its authenticated URL with
+`gh run view 31956696938 --json url --jq .url`):
 
-- [fast-contracts](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938/job/95188308650): success.
-- [neutron-agent-clean-install](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938/job/95188308654): success.
-- [neutron-db-contracts](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938/job/95188308672): success.
-- [rust-behavior](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938/job/95188333131): success.
-- [rust-build](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938/job/95188333164): success with `RUSTFLAGS=-D warnings`; its log shows the eBPF/userspace builds, stack-budget report, Kolla Stage 2 bundle, release archive, manifest, and checksums.
+- fast-contracts job `95188308650`: success.
+- neutron-agent-clean-install job `95188308654`: success.
+- neutron-db-contracts job `95188308672`: success.
+- rust-behavior job `95188333131`: success.
+- rust-build job `95188333164`: success with `RUSTFLAGS=-D warnings`; its log shows the eBPF/userspace builds, stack-budget report, Kolla Stage 2 bundle, release archive, manifest, and checksums.
 
 The separate `release` job was skipped because artifact publishing was disabled
 for this non-tag dispatch; packaging itself ran in `rust-build`. The same SHA's
