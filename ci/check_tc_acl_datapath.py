@@ -278,9 +278,21 @@ def check_live_path(source, errors, direction, family):
             "phase_ct_miss_tc_%s_%s(" % (direction, family),
             "fragment::install_allowed_v%s(" % ("4" if family == "v4" else "6"),
         )
-        if any(term not in body for term in required) or body.count("phase_ct_v%s(" % ("4" if family == "v4" else "6")) != 1:
+        ct_branch = re.search(
+            r"let\s+create_point\s*=\s*fragment_ct_create_point\(info\.fragment_kind\);"
+            r"\s*if\s+ct_hit\s*\{\s*phase_ct_fastpath_tc_%s_%s\("
+            r".*?\}\s*else\s*\{\s*phase_ct_miss_tc_%s_%s\(" % (
+                re.escape(direction), re.escape(family),
+                re.escape(direction), re.escape(family),
+            ),
+            body,
+            re.DOTALL,
+        )
+        if (any(term not in body for term in required)
+                or body.count("phase_ct_v%s(" % ("4" if family == "v4" else "6")) != 1
+                or ct_branch is None):
             errors.append(
-                "TC %s %s: require one family CT branch after fragment resolution and before context install"
+                "TC %s %s: require fragment-aware CT hit/miss branch after resolution and before context install"
                 % (direction, family)
             )
         return
@@ -667,14 +679,45 @@ def _remove_egress_v4_miss_ct_guard(body):
     return body[: guard[1]] + guard[0] + body[guard[3] + 1 :]
 
 
+def _replace_fragment_ct_hit_guard(body):
+    return body.replace(
+        "let create_point = fragment_ct_create_point(info.fragment_kind);\n    if ct_hit {",
+        "let create_point = fragment_ct_create_point(info.fragment_kind);\n    if true {",
+        1,
+    )
+
+
+def _remove_fragment_context_install(body):
+    return body.replace(
+        "let install = fragment::install_allowed_v4(info, p);",
+        "let install = FragmentInstallDecision::Pass;",
+        1,
+    )
+
+
+def _remove_fragment_miss_branch(body):
+    return body.replace(
+        "phase_ct_miss_tc_ingress_v4(ctx, info, p, miss_reason);",
+        "phase_ct_fastpath_tc_ingress_v4(ctx, info, p, ct_key);",
+        1,
+    )
+
+
 def run_mutation_self_tests(source, verbose=False):
     if "fragment::resolve_v4" in source:
-        # The legacy mutators below target the pre-fragment wrapper.  Keep the
-        # structural check honest rather than pretending those stale mutations
-        # exercise the current packet path.
-        if verbose:
-            print("SKIP: legacy wrapper mutations do not apply to fragment-aware artifact")
-        return []
+        specs = (
+            ("fragment-aware CT hit guard", "try_tc_ingress_v4", _replace_fragment_ct_hit_guard),
+            ("fragment context install", "try_tc_ingress_v4", _remove_fragment_context_install),
+            ("fragment-aware miss branch", "try_tc_ingress_v4", _remove_fragment_miss_branch),
+        )
+        failures = []
+        for label, function, mutate in specs:
+            mutant = _mutate_function(source, function, mutate)
+            if not any(error.startswith("TC ingress v4:") for error in check_source(mutant)):
+                failures.append("mutation %s was accepted" % label)
+            elif verbose:
+                print("PASS: rejected mutation %s" % label)
+        return failures
     specs = [
         (
             "XDP direct runtime ACL read",

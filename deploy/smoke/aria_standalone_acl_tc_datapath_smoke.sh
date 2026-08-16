@@ -11,7 +11,6 @@ case "${MODE}" in system|tap) ;; *) echo "ERROR: MODE must be system or tap" >&2
 # traffic success: absent prerequisites use status="deferred/pending".
 FIELD_EVIDENCE_STATUS="${FIELD_EVIDENCE_STATUS:-deferred/pending}"
 STANDALONE_ETHERTYPE_ANY_SMOKE="${STANDALONE_ETHERTYPE_ANY_SMOKE:-0}"
-ETHERTYPE_ANY_EXPANSION_COMMAND="${ETHERTYPE_ANY_EXPANSION_COMMAND:-}"
 CASE_IPV4_ONLY="ipv4-only"
 CASE_IPV6_ONLY="ipv6-only"
 CASE_DUAL_STACK="dual-stack"
@@ -99,18 +98,28 @@ cleanup_errors=()
 
 record_field_case() {
     local case_name="$1" command="$2" expected_verdict="$3" observed_verdict="$4" status="$5" ifindex="unknown"
+    local interface="${HOST_IF:-unknown}" status_snapshot="${FIELD_STATUS_SNAPSHOT:-pending capture}" counter_snapshot="${FIELD_COUNTER_SNAPSHOT:-pending capture}"
     [ -n "${HOST_IF}" ] && [ -r "/sys/class/net/${HOST_IF}/ifindex" ] && ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
     CASE_NAME="${case_name}" CASE_COMMAND="${command}" EXPECTED_VERDICT="${expected_verdict}" \
     OBSERVED_VERDICT="${observed_verdict}" CASE_STATUS="${status}" CASE_IFINDEX="${ifindex}" \
+    CASE_INTERFACE="${interface}" STATUS_SNAPSHOT="${status_snapshot}" COUNTER_SNAPSHOT="${counter_snapshot}" \
+    CASE_AGENT_VERSION="${AGENT_VERSION:-unknown}" CASE_DATAPATH_VERSION="${DATAPATH_VERSION:-unknown}" \
     python3 - <<'PY' >>"${WORK_DIR}/field-case-results.jsonl"
 import json,os,platform
+status=os.environ["CASE_STATUS"]
+if status == "pass":
+    for name in ("CASE_INTERFACE", "CASE_IFINDEX", "CASE_AGENT_VERSION", "CASE_DATAPATH_VERSION", "STATUS_SNAPSHOT", "COUNTER_SNAPSHOT"):
+        value=os.environ[name]
+        assert value not in ("", "unknown", "pending capture"),(name,value)
+    assert os.path.isfile(os.environ["STATUS_SNAPSHOT"])
+    assert os.path.isfile(os.environ["COUNTER_SNAPSHOT"])
 print(json.dumps({
     "case": os.environ["CASE_NAME"], "command": os.environ["CASE_COMMAND"],
     "expected_verdict": os.environ["EXPECTED_VERDICT"], "observed_verdict": os.environ["OBSERVED_VERDICT"],
-    "interface": os.environ.get("HOST_IF", "unknown"), "ifindex": os.environ["CASE_IFINDEX"],
-    "kernel": platform.release(), "agent_version": os.environ.get("AGENT_VERSION", "unknown"),
-    "datapath_version": os.environ.get("DATAPATH_VERSION", "unknown"),
-    "status_snapshot": "pending capture", "counter_snapshot": "pending capture",
+    "interface": os.environ["CASE_INTERFACE"], "ifindex": os.environ["CASE_IFINDEX"],
+    "kernel": platform.release(), "agent_version": os.environ["CASE_AGENT_VERSION"],
+    "datapath_version": os.environ["CASE_DATAPATH_VERSION"],
+    "status_snapshot": os.environ["STATUS_SNAPSHOT"], "counter_snapshot": os.environ["COUNTER_SNAPSHOT"],
     "status": os.environ["CASE_STATUS"],
 }, sort_keys=True))
 PY
@@ -132,14 +141,12 @@ run_ethertype_any_expansion_smoke() {
         1) ;;
         *) die "STANDALONE_ETHERTYPE_ANY_SMOKE must be 0 or 1" ;;
     esac
-    if [ -z "${ETHERTYPE_ANY_EXPANSION_COMMAND}" ]; then
-        record_deferred_field_cases
-        return 0
-    fi
-    # The supplied standalone CLI/API command must create ethertype=any and
-    # print its materialized rules.  Assert expansion, rather than accepting a
-    # wildcard family or a single implicit IPv4 rule.
-    sh -c "${ETHERTYPE_ANY_EXPANSION_COMMAND}" >"${WORK_DIR}/ethertype-any-expansion.json"
+    # Exercise the product's public standalone API directly.  A caller cannot
+    # substitute a command or a hand-written result for this expansion check.
+    curl --fail -sS -H 'Content-Type: application/json' \
+        -d '{"src_group":"any","dst_group":"any","proto":"icmp","action":"allow","direction":"ingress","ports":null,"ethertype":"any"}' \
+        "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/ethertype-any-create.json"
+    curl -fsS "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/ethertype-any-expansion.json"
     python3 - "${WORK_DIR}/ethertype-any-expansion.json" <<'PY' || die "ethertype=any did not expand to both families"
 import json,sys
 payload=json.load(open(sys.argv[1],encoding="utf-8"))
@@ -148,7 +155,11 @@ assert isinstance(rows,list),payload
 families={row.get("ethertype") for row in rows}
 assert families=={"IPv4","IPv6"},families
 PY
-    record_field_case "${CASE_WILDCARD_ISOLATION}" "${ETHERTYPE_ANY_EXPANSION_COMMAND}" "ethertype=any expands IPv4+IPv6" "two family-qualified rules observed" "pass"
+    curl -fsS "${HTTP}/api/v1/instances" >"${WORK_DIR}/ethertype-any-instances.json"
+    capture_acl_counters ethertype-any
+    FIELD_STATUS_SNAPSHOT="${WORK_DIR}/ethertype-any-instances.json"
+    FIELD_COUNTER_SNAPSHOT="${WORK_DIR}/ethertype-any-metrics.prom"
+    record_field_case "${CASE_WILDCARD_ISOLATION}" "POST /api/v1/${INSTANCE}/policies ethertype=any" "ethertype=any expands IPv4+IPv6" "two family-qualified rules observed" "pass"
     record_field_case "${CASE_IPV4_ONLY}" "standalone IPv4 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
     record_field_case "${CASE_IPV6_ONLY}" "standalone IPv6 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
     record_field_case "${CASE_DUAL_STACK}" "standalone dual-stack fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"

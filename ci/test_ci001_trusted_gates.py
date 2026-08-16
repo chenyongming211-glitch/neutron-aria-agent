@@ -9,6 +9,7 @@ from unittest import mock
 
 from ci import check_neutron_stage1
 from ci import check_neutron_stage2_acl
+from ci import check_tc_acl_datapath
 from ci import check_stage2_acceptance_evidence
 from ci import check_stage3_n3_evidence
 from ci import check_stage3_readiness
@@ -49,6 +50,20 @@ class TrustedGateContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(check_neutron_stage1.FIELD_EVIDENCE_STATUS, "deferred/pending")
+
+    def test_fragment_aware_wrapper_rejects_a_non_ct_hit_guard(self):
+        with open(check_tc_acl_datapath.EBPF_LIB, encoding="utf-8") as handle:
+            source = handle.read()
+        mutant = source.replace(
+            "let create_point = fragment_ct_create_point(info.fragment_kind);\n    if ct_hit {",
+            "let create_point = fragment_ct_create_point(info.fragment_kind);\n    if true {",
+            1,
+        )
+        errors = check_tc_acl_datapath.check_source(mutant)
+        self.assertTrue(
+            any("fragment-aware CT hit/miss branch" in error for error in errors),
+            errors,
+        )
 
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()

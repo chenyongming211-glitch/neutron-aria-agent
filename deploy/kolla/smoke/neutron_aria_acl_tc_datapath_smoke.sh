@@ -28,19 +28,28 @@ FIELD_CASES=("${CASE_IPV4_ONLY}" "${CASE_IPV6_ONLY}" "${CASE_DUAL_STACK}" "${CAS
 
 record_field_case() {
     local case_name="$1" command="$2" expected_verdict="$3" observed_verdict="$4" status="$5"
-    local ifindex="unknown"
+    local ifindex="unknown" interface="${EXPECTED_IFNAME}" status_snapshot="${FIELD_STATUS_SNAPSHOT:-pending capture}" counter_snapshot="${FIELD_COUNTER_SNAPSHOT:-pending capture}"
     [ -r "/sys/class/net/${EXPECTED_IFNAME}/ifindex" ] && ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")"
     CASE_NAME="${case_name}" CASE_COMMAND="${command}" EXPECTED_VERDICT="${expected_verdict}" \
     OBSERVED_VERDICT="${observed_verdict}" CASE_STATUS="${status}" CASE_IFINDEX="${ifindex}" \
+    CASE_INTERFACE="${interface}" STATUS_SNAPSHOT="${status_snapshot}" COUNTER_SNAPSHOT="${counter_snapshot}" \
+    CASE_AGENT_VERSION="${AGENT_VERSION:-unknown}" CASE_DATAPATH_VERSION="${DATAPATH_VERSION:-unknown}" \
     python3 - <<'PY' >>"${WORK_DIR}/field-case-results.jsonl"
 import json,os,platform
+status=os.environ["CASE_STATUS"]
+if status == "pass":
+    for name in ("CASE_INTERFACE", "CASE_IFINDEX", "CASE_AGENT_VERSION", "CASE_DATAPATH_VERSION", "STATUS_SNAPSHOT", "COUNTER_SNAPSHOT"):
+        value=os.environ[name]
+        assert value not in ("", "unknown", "pending capture"),(name,value)
+    assert os.path.isfile(os.environ["STATUS_SNAPSHOT"])
+    assert os.path.isfile(os.environ["COUNTER_SNAPSHOT"])
 print(json.dumps({
     "case": os.environ["CASE_NAME"], "command": os.environ["CASE_COMMAND"],
     "expected_verdict": os.environ["EXPECTED_VERDICT"], "observed_verdict": os.environ["OBSERVED_VERDICT"],
-    "interface": os.environ.get("EXPECTED_IFNAME", "unknown"), "ifindex": os.environ["CASE_IFINDEX"],
-    "kernel": platform.release(), "agent_version": os.environ.get("AGENT_VERSION", "unknown"),
-    "datapath_version": os.environ.get("DATAPATH_VERSION", "unknown"),
-    "status_snapshot": "pending capture", "counter_snapshot": "pending capture",
+    "interface": os.environ["CASE_INTERFACE"], "ifindex": os.environ["CASE_IFINDEX"],
+    "kernel": platform.release(), "agent_version": os.environ["CASE_AGENT_VERSION"],
+    "datapath_version": os.environ["CASE_DATAPATH_VERSION"],
+    "status_snapshot": os.environ["STATUS_SNAPSHOT"], "counter_snapshot": os.environ["COUNTER_SNAPSHOT"],
     "status": os.environ["CASE_STATUS"],
 }, sort_keys=True))
 PY
@@ -73,6 +82,8 @@ run_field_family_traffic() {
     ping "${family_flag}" -c 2 -W 1 -s "${PING_PAYLOAD_BYTES}" "${destination}" >"${WORK_DIR}/${label}-traffic.log" 2>&1 \
         || die "${case_name} VM traffic failed"
     capture "${label}-after"
+    FIELD_STATUS_SNAPSHOT="${WORK_DIR}/${label}-after-neutron-status.json"
+    FIELD_COUNTER_SNAPSHOT="${WORK_DIR}/${label}-after-metrics.prom"
     record_field_case "${case_name}" "ping ${family_flag} ${destination}" "allow in both TC directions" "allow observed" "pass"
 }
 
