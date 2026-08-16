@@ -258,4 +258,58 @@ mod tests {
 
         std::fs::remove_dir_all(state_path).unwrap();
     }
+
+    #[test]
+    fn acl_runtime_schema_dormant_pin_directory_is_rebuilt_once() {
+        let state_path = temp_state_path("dormant-rebuild-state");
+        let pin_path = temp_state_path("dormant-rebuild-pins");
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(pin_path.join("old-map"), b"legacy").unwrap();
+        publish_acl_runtime_metadata(
+            &state_path,
+            &AclRuntimeMetadata {
+                runtime_schema: 2,
+                acl_policy_key_schema: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepare_acl_runtime_schema(&state_path, &pin_path, 0).unwrap(),
+            AclRuntimeSchemaPreparation::RebuiltDormant
+        );
+        assert!(!pin_path.exists());
+        assert_eq!(
+            load_acl_runtime_metadata(&state_path).unwrap(),
+            Some(current_acl_runtime_metadata())
+        );
+        assert_eq!(
+            prepare_acl_runtime_schema(&state_path, &pin_path, 0).unwrap(),
+            AclRuntimeSchemaPreparation::Adopted
+        );
+
+        std::fs::remove_dir_all(state_path).unwrap();
+    }
+
+    #[test]
+    fn acl_runtime_schema_live_old_pins_are_preserved_on_refusal() {
+        let state_path = temp_state_path("live-refusal-state");
+        let pin_path = temp_state_path("live-refusal-pins");
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(pin_path.join("tap0_tc_ingress_link"), b"legacy").unwrap();
+        let old = AclRuntimeMetadata {
+            runtime_schema: 2,
+            acl_policy_key_schema: 1,
+        };
+        publish_acl_runtime_metadata(&state_path, &old).unwrap();
+
+        let error = prepare_acl_runtime_schema(&state_path, &pin_path, 1).unwrap_err();
+
+        assert_eq!(error, "acl_runtime_schema_mismatch_live");
+        assert!(pin_path.join("tap0_tc_ingress_link").exists());
+        assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(old));
+
+        std::fs::remove_dir_all(state_path).unwrap();
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
 }
