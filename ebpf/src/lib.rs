@@ -897,7 +897,15 @@ unsafe fn record_tc_ct_contract(p: &PipelineCtx, hook: u8, family: u8, reason: u
     if !should_record_tc_ct_contract(p, reason) {
         return;
     }
-    ct_contract::record_event(p, hook, family, reason);
+    ct_contract::record_event(&ct_contract::CtContractArgs {
+        tap_id: p.tap_id,
+        pkt_len: p.pkt_len,
+        now: p.now,
+        hook,
+        family,
+        reason,
+        _pad: 0,
+    });
 }
 
 #[inline(always)]
@@ -1034,7 +1042,7 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v4(info, p);
-        phase_policy_tc(ctx, info, p, IP_FAMILY_V4);
+        phase_policy_tc_v4(ctx, info, p);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1066,7 +1074,7 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v6(info, p);
-        phase_policy_tc(ctx, info, p, IP_FAMILY_V6);
+        phase_policy_tc_v6(ctx, info, p);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1180,7 +1188,7 @@ unsafe fn phase_ct_miss_tc_egress_v4(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v4(info, p);
-        phase_policy_tc(ctx, info, p, IP_FAMILY_V4);
+        phase_policy_tc_v4(ctx, info, p);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1212,7 +1220,7 @@ unsafe fn phase_ct_miss_tc_egress_v6(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v6(info, p);
-        phase_policy_tc(ctx, info, p, IP_FAMILY_V6);
+        phase_policy_tc_v6(ctx, info, p);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1229,31 +1237,27 @@ unsafe fn phase_ct_miss_tc_egress_v6(
 }
 
 /// Phase: Policy evaluation for TC.
-#[inline(always)]
-unsafe fn phase_policy_tc(
-    ctx: &TcContext,
-    info: &parser::PacketInfo,
-    p: &mut PipelineCtx,
-    ip_family: u8,
-) {
-    let result = policy::evaluate_policy(p, info.dst_port, ip_family);
+macro_rules! define_phase_policy_tc {
+    ($name:ident, $evaluate:ident) => {
+        #[inline(always)]
+        unsafe fn $name(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
+            let result = policy::$evaluate(p, info.dst_port);
 
-    if result == XDP_PASS {
-        p.action = TC_ACT_OK as u32;
-    } else {
-        p.action = TC_ACT_SHOT as u32;
-        if (p.flags & FLAG_TRACING) != 0 {
-            let trace_result = trace_result_from_drop_reason(p.drop_reason);
-            do_trace(
-                ctx,
-                info,
-                p,
-                TRACE_TC_DROP,
-                trace_result,
-            );
+            if result == XDP_PASS {
+                p.action = TC_ACT_OK as u32;
+            } else {
+                p.action = TC_ACT_SHOT as u32;
+                if (p.flags & FLAG_TRACING) != 0 {
+                    let trace_result = trace_result_from_drop_reason(p.drop_reason);
+                    do_trace(ctx, info, p, TRACE_TC_DROP, trace_result);
+                }
+            }
         }
-    }
+    };
 }
+
+define_phase_policy_tc!(phase_policy_tc_v4, evaluate_policy_v4);
+define_phase_policy_tc!(phase_policy_tc_v6, evaluate_policy_v6);
 
 /// Phase: QoS egress for TC. Sets p.action = TC_ACT_SHOT if dropped.
 #[inline(always)]

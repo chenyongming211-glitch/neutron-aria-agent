@@ -149,30 +149,34 @@ class LegacyPacketBoundsTest(unittest.TestCase):
     def test_tc_policy_uses_map_backed_pipeline_state(self):
         self.assertNotIn("pub struct PolicyArgs", self.policy_source)
         self.assertIn('map(name = "DROP_KEY_SCRATCH")', self.maps_source)
+        self.assertIn("macro_rules! evaluate_policy_for_family", self.policy_source)
+        self.assertIn("ip_family: $ip_family", self.policy_source)
         self.assertIn(
-            "pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8) -> u32",
+            "evaluate_policy_for_family!(p, dst_port, IP_FAMILY_V4)",
             self.policy_source,
         )
-        self.assertIn("p.matched_src_id = key.src_id;", self.policy_source)
-        self.assertIn("p.matched_dst_id = key.dst_id;", self.policy_source)
-        self.assertIn("p.matched_proto = key.proto;", self.policy_source)
-        self.assertIn("p.flags |= FLAG_POLICY_HIT;", self.policy_source)
+        self.assertIn(
+            "evaluate_policy_for_family!(p, dst_port, IP_FAMILY_V6)",
+            self.policy_source,
+        )
+        self.assertNotIn("ip_family: u8", self.policy_source)
+        self.assertIn("$p.matched_src_id = key.src_id;", self.policy_source)
+        self.assertIn("$p.matched_dst_id = key.dst_id;", self.policy_source)
+        self.assertIn("$p.matched_proto = key.proto;", self.policy_source)
+        self.assertIn("$p.flags |= FLAG_POLICY_HIT;", self.policy_source)
         self.assertNotIn(
             '"DROP_KEY_SCRATCH"',
             self.inventory_source,
             "DROP_KEY_SCRATCH is packet scratch, not persistent runtime state",
         )
         self.assertNotIn("let args = policy::PolicyArgs", self.lib_source)
-        self.assertIn(
-            "let result = policy::evaluate_policy(p, info.dst_port, ip_family);",
-            self.lib_source,
-        )
+        self.assertIn("macro_rules! define_phase_policy_tc", self.lib_source)
         self.assertEqual(
-            self.lib_source.count("phase_policy_tc(ctx, info, p, IP_FAMILY_V4);"),
+            self.lib_source.count("phase_policy_tc_v4(ctx, info, p);"),
             2,
         )
         self.assertEqual(
-            self.lib_source.count("phase_policy_tc(ctx, info, p, IP_FAMILY_V6);"),
+            self.lib_source.count("phase_policy_tc_v6(ctx, info, p);"),
             2,
         )
 

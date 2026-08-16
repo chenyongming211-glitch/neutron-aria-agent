@@ -1,6 +1,6 @@
 use crate::common::{
     PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY,
-    DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
+    DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, IP_FAMILY_V4, IP_FAMILY_V6, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
 use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
@@ -23,48 +23,61 @@ pub fn acl_enabled(tap_id: u32) -> bool {
 ///
 /// Priority order (bitmask: bit0=src_wildcard, bit1=dst_wildcard, bit2=proto_wildcard):
 ///   0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111
-#[inline(always)]
-pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8) -> u32 {
-    // Priority-ordered bitmask: which fields to wildcard (0=specific value, 1=wildcard to 0)
-    // bit 0: src_id, bit 1: dst_id, bit 2: proto
-    const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
+macro_rules! evaluate_policy_for_family {
+    ($p:ident, $dst_port:ident, $ip_family:expr) => {{
+        // Priority-ordered bitmask: which fields to wildcard (0=specific
+        // value, 1=wildcard to 0). Keeping family as a macro expression makes
+        // it an immediate in each typed evaluator instead of a deep-frame
+        // runtime scalar.
+        const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
-    let mut i = 0u8;
-    while i < 8 {
-        let mask = ORDER[i as usize];
-        let key = PolicyKey {
-            tap_id: p.tap_id,
-            src_id: if (mask & 1) != 0 { 0 } else { p.src_id },
-            dst_id: if (mask & 2) != 0 { 0 } else { p.dst_id },
-            proto: if (mask & 4) != 0 { 0 } else { p.proto },
-            direction: p.direction,
-            bank: p.matched_bank,
-            ip_family,
-        };
-        if let Some(policy) = POLICY_TABLE.get(&key) {
-            let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
-            p.matched_src_id = key.src_id;
-            p.matched_dst_id = key.dst_id;
-            p.matched_proto = key.proto;
-            p.matched_direction = p.direction;
-            p.flags |= FLAG_POLICY_HIT;
-            p.drop_reason = drop_reason;
-            stats::update_rule_stats(&key, p.pkt_len, result == XDP_DROP);
-            if result == XDP_DROP {
-                record_policy_drop(p, drop_reason);
+        let mut i = 0u8;
+        while i < 8 {
+            let mask = ORDER[i as usize];
+            let key = PolicyKey {
+                tap_id: $p.tap_id,
+                src_id: if (mask & 1) != 0 { 0 } else { $p.src_id },
+                dst_id: if (mask & 2) != 0 { 0 } else { $p.dst_id },
+                proto: if (mask & 4) != 0 { 0 } else { $p.proto },
+                direction: $p.direction,
+                bank: $p.matched_bank,
+                ip_family: $ip_family,
+            };
+            if let Some(policy) = POLICY_TABLE.get(&key) {
+                let (result, drop_reason) = apply_policy($p.tap_id, policy, $dst_port);
+                $p.matched_src_id = key.src_id;
+                $p.matched_dst_id = key.dst_id;
+                $p.matched_proto = key.proto;
+                $p.matched_direction = $p.direction;
+                $p.flags |= FLAG_POLICY_HIT;
+                $p.drop_reason = drop_reason;
+                stats::update_rule_stats(&key, $p.pkt_len, result == XDP_DROP);
+                if result == XDP_DROP {
+                    record_policy_drop($p, drop_reason);
+                }
+                return result;
             }
-            return result;
+            i += 1;
         }
-        i += 1;
-    }
 
-    p.matched_src_id = 0;
-    p.matched_dst_id = 0;
-    p.matched_proto = 0;
-    p.matched_direction = p.direction;
-    p.flags &= !FLAG_POLICY_HIT;
-    p.drop_reason = 0;
-    XDP_PASS
+        $p.matched_src_id = 0;
+        $p.matched_dst_id = 0;
+        $p.matched_proto = 0;
+        $p.matched_direction = $p.direction;
+        $p.flags &= !FLAG_POLICY_HIT;
+        $p.drop_reason = 0;
+        XDP_PASS
+    }};
+}
+
+#[inline(always)]
+pub unsafe fn evaluate_policy_v4(p: &mut PipelineCtx, dst_port: u16) -> u32 {
+    evaluate_policy_for_family!(p, dst_port, IP_FAMILY_V4)
+}
+
+#[inline(always)]
+pub unsafe fn evaluate_policy_v6(p: &mut PipelineCtx, dst_port: u16) -> u32 {
+    evaluate_policy_for_family!(p, dst_port, IP_FAMILY_V6)
 }
 
 #[inline(always)]
