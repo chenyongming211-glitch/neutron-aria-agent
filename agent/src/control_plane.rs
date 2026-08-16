@@ -20,7 +20,7 @@ use crate::FragmentTrackingSettings;
 use aria_core::common::{TapMapRuntime, IP_FAMILY_V4, IP_FAMILY_V6};
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
-    replay_managed_state_to_pinned_maps,
+    migrate_state_for_replay, replay_managed_state_to_pinned_maps,
     validate_managed_pinned_runtime_state, validate_pinned_runtime_state, FqQdiscState,
     GroupProjectionMode, ManagedReplayRoute, ProjectionDrift, RuntimeGateDisposition,
     RuntimeGroupMapEntries, TraceMapMode,
@@ -4950,6 +4950,7 @@ impl ControlPlane {
         };
 
         let mut state = aria_core::wal::load_with_wal(&state_path);
+        state = migrate_state_for_replay(&state_path, &state)?;
         let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
         if tap_id_assigned {
             let state_manager = aria_core::state::StateManager::new(&state_path);

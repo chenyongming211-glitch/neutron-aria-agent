@@ -63,7 +63,7 @@ impl Default for StandaloneReplayRoute {
     }
 }
 
-fn migrate_replay_state(
+pub fn migrate_state_for_replay(
     state_path: &str,
     state: &crate::state::FirewallState,
 ) -> Result<crate::state::FirewallState, String> {
@@ -368,7 +368,7 @@ pub fn replay_state_from_snapshot(
     state_path: &str,
     state: &crate::state::FirewallState,
 ) -> Result<(), String> {
-    let state = migrate_replay_state(state_path, state)?;
+    let state = migrate_state_for_replay(state_path, state)?;
     replay_state_from_snapshot_with_mode(
         bpf,
         state_path,
@@ -738,7 +738,7 @@ pub fn replay_standalone_state_to_pinned_maps_from_snapshot(
     state_path: &str,
     state: &FirewallState,
 ) -> Result<(), String> {
-    let state = migrate_replay_state(state_path, state)?;
+    let state = migrate_state_for_replay(state_path, state)?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
@@ -757,7 +757,7 @@ pub fn replay_managed_state_to_pinned_maps(
         // Compatibility replay keeps the durable WAL snapshot as its projection
         // authority, matching the legacy standalone-compatible registration path.
         let durable_state = crate::wal::load_with_wal(state_path);
-        let durable_state = migrate_replay_state(state_path, &durable_state)?;
+        let durable_state = migrate_state_for_replay(state_path, &durable_state)?;
         return replay_state_to_pinned_maps_from_snapshot_with_mode(
             pin_path,
             state_path,
@@ -765,7 +765,7 @@ pub fn replay_managed_state_to_pinned_maps(
             PinnedReplayRoute::Managed(route),
         );
     }
-    let state = migrate_replay_state(state_path, state)?;
+    let state = migrate_state_for_replay(state_path, state)?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,

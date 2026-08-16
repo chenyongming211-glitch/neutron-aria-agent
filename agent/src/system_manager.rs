@@ -14,8 +14,9 @@ use tracing::{info, warn};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
     cleanup_root_qdisc, critical_network_map_names, ensure_fq_qdisc,
-    replay_standalone_state_to_pinned_maps_from_snapshot, replay_state_from_snapshot,
-    scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
+    migrate_state_for_replay, replay_standalone_state_to_pinned_maps_from_snapshot,
+    replay_state_from_snapshot, scrub_standalone_runtime_state, FqQdiscState, TraceMapMode,
+    NETWORK_MAP_NAMES,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
@@ -630,6 +631,7 @@ pub async fn system_start(
     }
 
     let desired = aria_core::wal::load_with_wal(state_path);
+    let desired = migrate_state_for_replay(state_path, &desired)?;
     let desired_conntrack = desired.conntrack_enabled;
     let desired_acl = desired.acl_enabled;
     let fragment_tracking = control_plane.fragment_tracking_settings();
