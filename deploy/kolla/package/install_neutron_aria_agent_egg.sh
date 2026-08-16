@@ -161,6 +161,11 @@ PY
     docker exec -u 0 "${SERVICE_NAME}" chmod 0755 "${ENTRYPOINT_PATH}"
 }
 
+install_dependencies() {
+    docker exec -u 0 "${SERVICE_NAME}" python -m pip install \
+        --disable-pip-version-check "netaddr>=0.7.19,<1.0.0"
+}
+
 restore_entrypoint() {
     local backup="${STATE_DIR}/${EGG_NAME}.entrypoint.latest.bak"
     if [ ! -e "${backup}" ]; then
@@ -198,6 +203,7 @@ install_egg() {
     docker cp "${egg}" "${SERVICE_NAME}:$(container_egg_path)"
     docker exec -u 0 "${SERVICE_NAME}" chmod 0644 "$(container_egg_path)"
     refresh_easy_install_pth
+    install_dependencies
     install_entrypoint
     restart_agent_if_requested "${RESTART_AGENT_AFTER_INSTALL}"
     smoke

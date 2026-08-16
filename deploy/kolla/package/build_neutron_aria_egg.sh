@@ -56,7 +56,7 @@ metadata = {
     ),
     "EGG-INFO/top_level.txt": "neutron_aria\n",
     "EGG-INFO/dependency_links.txt": "\n",
-    "EGG-INFO/requires.txt": "\n",
+    "EGG-INFO/requires.txt": "netaddr>=0.7.19,<1.0.0\n",
     "EGG-INFO/entry_points.txt": (
         "[console_scripts]\n"
         "neutron-aria-agent = neutron_aria.agent.main:main\n"
