@@ -26,22 +26,27 @@ class DisabledAclSource(object):
 class FixtureAclSource(object):
     name = ACL_SOURCE_FIXTURE
 
-    def __init__(self, path):
+    def __init__(self, path, ipv6_acl_enabled=False):
         if not path:
             raise AclSourceError("acl fixture source requires fixture_path")
         self.path = path
+        self.ipv6_acl_enabled = bool(ipv6_acl_enabled)
 
     def load_index(self):
         with open(self.path, "r") as stream:
             payload = json.load(stream)
-        return EffectiveAclIndex.from_payload(_validated_payload(payload, self.name))
+        return EffectiveAclIndex.from_payload(
+            _validated_payload(payload, self.name),
+            ipv6_acl_enabled=self.ipv6_acl_enabled,
+        )
 
 
 class NeutronAclSource(object):
     name = ACL_SOURCE_NEUTRON
 
-    def __init__(self, neutron_client=None):
+    def __init__(self, neutron_client=None, ipv6_acl_enabled=False):
         self.neutron_client = neutron_client
+        self.ipv6_acl_enabled = bool(ipv6_acl_enabled)
 
     def load_index(self):
         if self.neutron_client is None:
@@ -55,7 +60,8 @@ class NeutronAclSource(object):
         except Exception as exc:
             raise AclSourceError("neutron acl source failed: %s" % exc)
         return EffectiveAclIndex.from_payload(
-            _validated_payload(payload, self.name)
+            _validated_payload(payload, self.name),
+            ipv6_acl_enabled=self.ipv6_acl_enabled,
         )
 
     def _load_payload(self):
@@ -121,10 +127,14 @@ def _validate_collection(collection, values, source_name):
 
 def build_acl_source(config, neutron_client=None):
     source = getattr(config, "acl_source", None) or ACL_SOURCE_DISABLED
+    ipv6_acl_enabled = getattr(config, "ipv6_acl_enabled", False)
     if source == ACL_SOURCE_DISABLED:
         return DisabledAclSource()
     if source == ACL_SOURCE_FIXTURE:
-        return FixtureAclSource(getattr(config, "acl_fixture_path", ""))
+        return FixtureAclSource(
+            getattr(config, "acl_fixture_path", ""),
+            ipv6_acl_enabled=ipv6_acl_enabled,
+        )
     if source == ACL_SOURCE_NEUTRON:
         if neutron_client is None:
             try:
@@ -136,7 +146,10 @@ def build_acl_source(config, neutron_client=None):
                 raise AclSourceError(
                     "neutron acl source requires aria_acl Neutron API/DB extension: %s" % exc
                 )
-        return NeutronAclSource(neutron_client)
+        return NeutronAclSource(
+            neutron_client,
+            ipv6_acl_enabled=ipv6_acl_enabled,
+        )
     raise AclSourceError("unsupported acl source: %s" % source)
 
 

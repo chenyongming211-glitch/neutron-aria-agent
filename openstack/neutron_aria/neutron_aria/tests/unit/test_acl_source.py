@@ -103,6 +103,45 @@ class AclSourceTestCase(unittest.TestCase):
                 os.close(fd)
             os.unlink(path)
 
+    def test_fixture_source_passes_ipv6_gate_to_effective_index(self):
+        fd, path = tempfile.mkstemp()
+        try:
+            payload = {
+                "policies": [{"id": "policy-1", "default_action": "allow"}],
+                "rules": [{
+                    "id": "ipv6-rule",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 100,
+                    "action": "drop",
+                    "ethertype": "IPv6",
+                    "protocol": "icmp",
+                    "src_cidr": "2001:db8::7/64",
+                }],
+                "bindings": [{
+                    "id": "binding-1",
+                    "policy_id": "policy-1",
+                    "target_type": "port",
+                    "target_id": "port-1",
+                }],
+            }
+            os.write(fd, json.dumps(payload).encode("utf-8"))
+            os.close(fd)
+            fd = None
+
+            result = build_acl_source(AgentConfig(
+                acl_fixture_path=path,
+                ipv6_acl_enabled=True,
+            )).load_index().effective_for_port({"id": "port-1"}, {"eligible": True})
+
+            self.assertFalse(result["enabled"])
+            self.assertEqual("ipv6_acl_not_implemented", result["reason"])
+            self.assertEqual([], result["rules"])
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.unlink(path)
+
     def test_build_acl_index_keeps_fixture_compatibility(self):
         fd, path = tempfile.mkstemp()
         try:

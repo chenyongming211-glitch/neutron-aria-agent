@@ -372,12 +372,13 @@ def _acl_overlap_reason(validation):
 
 class EffectiveAclIndex(object):
     @classmethod
-    def from_payload(cls, payload):
+    def from_payload(cls, payload, ipv6_acl_enabled=False):
         return cls(
             policies=payload.get("policies") or [],
             rules=payload.get("rules") or [],
             address_sets=payload.get("address_sets") or [],
             bindings=payload.get("bindings") or [],
+            ipv6_acl_enabled=ipv6_acl_enabled,
         )
 
     def __init__(
@@ -386,7 +387,9 @@ class EffectiveAclIndex(object):
         rules=None,
         address_sets=None,
         bindings=None,
+        ipv6_acl_enabled=False,
     ):
+        self.ipv6_acl_enabled = bool(ipv6_acl_enabled)
         self.policies = dict((policy.get("id"), policy) for policy in policies or [])
         self.address_sets = dict(
             (address_set.get("id"), address_set) for address_set in address_sets or []
@@ -538,6 +541,15 @@ class EffectiveAclIndex(object):
     def _compile_rules_uncached(self, policy):
         policy_id = policy.get("id")
         rules = [rule for rule in self.rules_by_policy.get(policy_id, []) if _enabled(rule)]
+        if any(_normalized_ethertype(rule.get("ethertype")) == "ipv6" for rule in rules):
+            return {
+                "status": ACL_DEGRADED,
+                "reason": (
+                    "ipv6_acl_not_implemented" if self.ipv6_acl_enabled else
+                    "ipv6_acl_disabled"
+                ),
+                "rules": [],
+            }
         if len(rules) > MAX_ACL_RULES_PER_POLICY:
             return {
                 "status": ACL_DEGRADED,

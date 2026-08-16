@@ -46,7 +46,7 @@ def acl_rule(rule_id, priority, **overrides):
     return rule
 
 
-def effective_acl(rules):
+def effective_acl(rules, **index_options):
     return EffectiveAclIndex(
         policies=[{"id": "policy-1", "default_action": "allow"}],
         rules=rules,
@@ -56,6 +56,7 @@ def effective_acl(rules):
             "target_type": "port",
             "target_id": PORT_ID,
         }],
+        **index_options
     ).effective_for_port(port(), snapshot())
 
 
@@ -143,6 +144,39 @@ class EffectiveAclTestCase(unittest.TestCase):
             "unsupported_rule:src-port:source port matching is unsupported",
             result["reason"],
         )
+
+    def test_enabled_ipv6_rule_degrades_when_ipv6_acl_disabled(self):
+        result = effective_acl([
+            acl_rule(
+                "ipv6-disabled", 10,
+                ethertype="IPv6",
+                protocol="icmp",
+                src_cidr="2001:db8::7/64",
+            ),
+        ])
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertEqual("ipv6_acl_disabled", result["reason"])
+        self.assertEqual([], result["rules"])
+        self.assertNotIn("invalid_acl_ipv4_cidr", result["reason"])
+
+    def test_enabled_ipv6_rule_remains_degraded_until_compiler_exists(self):
+        result = effective_acl([
+            acl_rule(
+                "ipv6-unimplemented", 10,
+                ethertype="IPv6",
+                protocol="icmp",
+                src_cidr="2001:db8::7/64",
+            ),
+        ], ipv6_acl_enabled=True)
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertEqual("ipv6_acl_not_implemented", result["reason"])
+        self.assertEqual([], result["rules"])
 
     def test_shared_large_selector_is_interned_once_for_1000_rules(self):
         shared = tuple(selector_members(2048))
