@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "build.yml"
-MAINTAINED_BRANCH = "v0.9-neutron-agent"
+MAINTAINED_BRANCH = "main"
 
 
 def _mapping_block(source: str, key: str, indent: int) -> list[str]:

@@ -1,11 +1,11 @@
 # Aria Firewall
 
-Aria Firewall 是基于 eBPF/XDP/TC 的主机侧网络执行与观测组件。当前 `v0.9-neutron-agent` 分支的重点不是继续扩展本地 CLI 功能菜单，而是把现有 datapath 能力整理成 OpenStack Neutron Agent Mode 可落地的形态。
+Aria Firewall 是基于 eBPF/XDP/TC 的主机侧网络执行与观测组件。当前 `main` 分支的重点不是继续扩展本地 CLI 功能菜单，而是把现有 datapath 能力整理成 OpenStack Neutron Agent Mode 可落地的形态。
 
 当前分支基线：
 
 - 基线分支：`v0.9.0`
-- 目标分支：`v0.9-neutron-agent`
+- 目标分支：`main`
 - 现有 Rust 二进制仍是 `aria-agent`
 - OpenStack 运行角色名和容器名使用 `aria-datapath`
 - OpenStack 适配层为 `neutron-aria-agent`
@@ -274,7 +274,7 @@ Ready 不接管 OVS L2 转发状态：
 本分支协作规则：
 
 - 在仓库根目录执行开发和验证命令
-- 正确分支是 `v0.9-neutron-agent`
+- 正确分支是 `main`
 - 不在本机运行 `cargo build`、`cargo check`、`cargo test`
 - 修改完成后提交到 GitHub，由 GitHub Actions 编译验证
 - 如果 CI 失败，再根据 CI 日志修复

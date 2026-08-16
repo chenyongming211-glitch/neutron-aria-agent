@@ -5,7 +5,7 @@ on:
     branches: [main, 'v*']
     tags: ['v*']
   pull_request:
-    branches: [main, v0.9-neutron-agent]
+    branches: [main]
   schedule:
     - cron: '17 3 * * 1'
   workflow_dispatch:
