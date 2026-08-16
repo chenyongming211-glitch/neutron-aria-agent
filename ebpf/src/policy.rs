@@ -1,6 +1,6 @@
 use crate::common::{
-    policy_family_is_valid, PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY,
-    DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
+    policy_family_is_valid, DropKey, PipelineCtx, PolicyKey, PolicyValue, PortKey,
+    DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
 use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
@@ -77,7 +77,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
 
 #[inline(always)]
 unsafe fn record_policy_drop(p: &PipelineCtx, drop_reason: u8) {
-    drops::record_drop(&drops::DropArgs {
+    let key = DropKey {
         tap_id: p.tap_id,
         reason: drop_reason,
         direction: p.direction,
@@ -85,9 +85,8 @@ unsafe fn record_policy_drop(p: &PipelineCtx, drop_reason: u8) {
         ip_family: p.ip_family,
         src_id: p.src_id,
         dst_id: p.dst_id,
-        pkt_len: p.pkt_len,
-        now: p.now,
-    });
+    };
+    drops::record_drop(&key, p.pkt_len, p.now);
 }
 
 /// Returns (XDP action, drop_reason). drop_reason is 0 for PASS.

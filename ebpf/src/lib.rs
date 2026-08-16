@@ -28,7 +28,7 @@ mod trace;
 
 use common::{
     acl_banked_tap_id, fragment_ct_create_point, set_fragment_resolve_drop_ids, CtKey4, CtKey6,
-    FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    DropKey, FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
@@ -139,11 +139,6 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         (*pipe).reset_for_tc_packet(pkt_len, DIR_EGRESS);
-        (*pipe).ip_family = if (*info_ptr).is_ipv6 {
-            IP_FAMILY_V6
-        } else {
-            IP_FAMILY_V4
-        };
         match try_tc_egress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -160,6 +155,11 @@ unsafe fn try_tc_egress(
     let info = &mut *info;
     let p = &mut *pipe;
 
+    p.ip_family = if info.is_ipv6 {
+        IP_FAMILY_V6
+    } else {
+        IP_FAMILY_V4
+    };
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
@@ -350,11 +350,6 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         (*pipe).reset_for_tc_packet(pkt_len, DIR_INGRESS);
-        (*pipe).ip_family = if (*info_ptr).is_ipv6 {
-            IP_FAMILY_V6
-        } else {
-            IP_FAMILY_V4
-        };
         match try_tc_ingress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -371,6 +366,11 @@ unsafe fn try_tc_ingress(
     let info = &mut *info;
     let p = &mut *pipe;
 
+    p.ip_family = if info.is_ipv6 {
+        IP_FAMILY_V6
+    } else {
+        IP_FAMILY_V4
+    };
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
@@ -620,17 +620,16 @@ unsafe fn record_tc_parse_drop(
     ip_family: u8,
 ) {
     let skb = ctx.as_ptr() as *const __sk_buff;
-    drops::record_drop(&drops::DropArgs {
+    let key = DropKey {
         tap_id: resolve_tap_id_for_ifindex((*skb).ifindex),
-        src_id: 0,
-        dst_id: 0,
-        pkt_len,
-        now: bpf_ktime_get_ns(),
         reason,
         direction,
         proto,
         ip_family,
-    });
+        src_id: 0,
+        dst_id: 0,
+    };
+    drops::record_drop(&key, pkt_len, bpf_ktime_get_ns());
 }
 
 #[inline(always)]
@@ -712,7 +711,7 @@ fn trace_result_from_drop_reason(drop_reason: u8) -> u8 {
 /// Inline helper: record a drop from PipelineCtx.
 #[inline(always)]
 unsafe fn do_drop(p: &PipelineCtx) {
-    drops::record_drop(&drops::DropArgs {
+    let key = DropKey {
         tap_id: p.tap_id,
         reason: p.drop_reason,
         direction: p.direction,
@@ -720,9 +719,8 @@ unsafe fn do_drop(p: &PipelineCtx) {
         ip_family: p.ip_family,
         src_id: p.src_id,
         dst_id: p.dst_id,
-        pkt_len: p.pkt_len,
-        now: p.now,
-    });
+    };
+    drops::record_drop(&key, p.pkt_len, p.now);
 }
 
 #[inline(always)]
