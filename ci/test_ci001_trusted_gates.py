@@ -111,6 +111,20 @@ class TrustedGateContractTests(unittest.TestCase):
         with open(config_path, encoding="utf-8") as handle:
             self.assertIn("counters_report_enabled = false", handle.read())
 
+    def test_standalone_api_expansion_never_records_a_field_traffic_pass(self):
+        standalone_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            check_neutron_stage1.STANDALONE_TC_ACL_SMOKE_PATH,
+        )
+        with open(standalone_path, encoding="utf-8") as handle:
+            source = handle.read()
+        start = source.index("run_ethertype_any_expansion_smoke() {")
+        end = source.index("\ndie() {", start)
+        expansion = source[start:end]
+        self.assertNotIn("record_field_case", expansion)
+        self.assertIn("record_deferred_field_cases", expansion)
+        self.assertIn("ethertype-any-expansion.json", expansion)
+
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()
         required = set(check_neutron_stage1.REQUIRED_PYTHON_BEHAVIORS)
