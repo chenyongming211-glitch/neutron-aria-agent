@@ -1106,7 +1106,15 @@ mod tests {
         };
         let added = build_standalone_acl_publication_plan(&old, ACL_BANK_PRIMARY, &[add]).unwrap();
         assert_eq!(added.final_state.rules.len(), 2);
-        let port_set = added.final_state.port_sets.get("443").unwrap();
+        assert_eq!(added.final_state.port_sets.len(), 1);
+        let normalized_ports = added
+            .final_state
+            .port_sets
+            .keys()
+            .next()
+            .expect("both family rules must share one normalized port bitmap")
+            .clone();
+        let port_set = added.final_state.port_sets.get(&normalized_ports).unwrap();
         assert_eq!(port_set.ref_count, 2);
 
         let missing_v6 = build_standalone_acl_publication_plan(
@@ -1138,7 +1146,10 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(remove_v4.final_state.port_sets["443"].ref_count, 1);
+        assert_eq!(
+            remove_v4.final_state.port_sets[&normalized_ports].ref_count,
+            1
+        );
         assert!(remove_v4.released_port_sets.is_empty());
 
         let remove_v6 = build_standalone_acl_publication_plan(

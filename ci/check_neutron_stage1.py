@@ -712,6 +712,7 @@ def check_packaged_ini_contract():
     config = load_config(os.path.join(ROOT, KOLLA_AGENT_INI_PATH))
     expected = {"managed_domains": ["acl"], "ovs_bridge": "br-int", "request_timeout": 3.0,
                 "acl_source": "disabled", "ipv6_acl_enabled": False,
+                "counters_report_enabled": False,
                 "full_resync_enabled": False, "port_source": "disabled",
                 "rpc_events_enabled": False, "incremental_rpc_enabled": False}
     for name, value in expected.items():

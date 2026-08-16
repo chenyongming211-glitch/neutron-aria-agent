@@ -680,16 +680,16 @@ install_fixture_policy() {
             -d "{\"name\":\"fragment-peer-v6\",\"cidr\":\"${FRAGMENT_IPV6_PEER}/128\"}" \
             "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
         curl --fail -sS -H 'Content-Type: application/json' \
-            -d '{"src_group":"fragment-peer-v4","dst_group":"fragment-host-v4","proto":"udp","action":"allow","direction":"ingress","ports":"53"}' \
+            -d '{"src_group":"fragment-peer-v4","dst_group":"fragment-host-v4","proto":"udp","action":"allow","direction":"ingress","ports":"53","ethertype":"IPv4"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
         curl --fail -sS -H 'Content-Type: application/json' \
-            -d '{"src_group":"fragment-host-v4","dst_group":"fragment-peer-v4","proto":"udp","action":"allow","direction":"egress","ports":"53"}' \
+            -d '{"src_group":"fragment-host-v4","dst_group":"fragment-peer-v4","proto":"udp","action":"allow","direction":"egress","ports":"53","ethertype":"IPv4"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
         curl --fail -sS -H 'Content-Type: application/json' \
-            -d '{"src_group":"fragment-peer-v6","dst_group":"fragment-host-v6","proto":"udp","action":"allow","direction":"ingress","ports":"53"}' \
+            -d '{"src_group":"fragment-peer-v6","dst_group":"fragment-host-v6","proto":"udp","action":"allow","direction":"ingress","ports":"53","ethertype":"IPv6"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
         curl --fail -sS -H 'Content-Type: application/json' \
-            -d '{"src_group":"fragment-host-v6","dst_group":"fragment-peer-v6","proto":"udp","action":"allow","direction":"egress","ports":"53"}' \
+            -d '{"src_group":"fragment-host-v6","dst_group":"fragment-peer-v6","proto":"udp","action":"allow","direction":"egress","ports":"53","ethertype":"IPv6"}' \
             "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
     fi
     curl --fail -sS -H 'Content-Type: application/json' -X PUT \
@@ -1228,18 +1228,18 @@ policies=json.load(open(sys.argv[3],encoding="utf-8"))["policies"]
 assert config["acl"] is True,config
 assert config["conntrack"] is True,config
 assert {"peer","host","denied"}.issubset({row["name"] for row in groups}),groups
-expected={("peer","host","allow","ingress"),("host","peer","allow","egress"),
-          ("denied","host","drop","ingress"),("host","denied","drop","egress")}
+expected={("peer","host","allow","ingress","IPv4"),("host","peer","allow","egress","IPv4"),
+          ("denied","host","drop","ingress","IPv4"),("host","denied","drop","egress","IPv4")}
 if sys.argv[4]=="1":
     assert {"fragment-host-v4","fragment-peer-v4","fragment-host-v6","fragment-peer-v6"}.issubset(
         {row["name"] for row in groups}),groups
     expected.update({
-        ("fragment-peer-v4","fragment-host-v4","allow","ingress"),
-        ("fragment-host-v4","fragment-peer-v4","allow","egress"),
-        ("fragment-peer-v6","fragment-host-v6","allow","ingress"),
-        ("fragment-host-v6","fragment-peer-v6","allow","egress"),
+        ("fragment-peer-v4","fragment-host-v4","allow","ingress","IPv4"),
+        ("fragment-host-v4","fragment-peer-v4","allow","egress","IPv4"),
+        ("fragment-peer-v6","fragment-host-v6","allow","ingress","IPv6"),
+        ("fragment-host-v6","fragment-peer-v6","allow","egress","IPv6"),
     })
-actual={(row["src_group"],row["dst_group"],row["action"],row["direction"]) for row in policies}
+actual={(row["src_group"],row["dst_group"],row["action"],row["direction"],row["ethertype"]) for row in policies}
 assert actual==expected,(actual,expected)
 PY
     curl --fail -sS -X DELETE "${HTTP}/api/v1/${INSTANCE}/conntrack" \

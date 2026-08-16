@@ -162,6 +162,7 @@ class TrustedGateContractTests(unittest.TestCase):
         parser = configparser.ConfigParser()
         parser.read(config_path)
         self.assertFalse(parser.getboolean("agent", "counters_report_enabled"))
+        check_neutron_stage1.python_client()
         from neutron_aria.agent.config import load_config
         self.assertFalse(load_config(config_path).counters_report_enabled)
 
