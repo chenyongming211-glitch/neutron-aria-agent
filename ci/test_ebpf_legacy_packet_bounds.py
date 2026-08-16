@@ -160,7 +160,9 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             "pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32",
             self.policy_source,
         )
-        self.assertIn("p.matched_src_id = s;", self.policy_source)
+        self.assertIn("p.matched_src_id = key.src_id;", self.policy_source)
+        self.assertIn("p.matched_dst_id = key.dst_id;", self.policy_source)
+        self.assertIn("p.matched_proto = key.proto;", self.policy_source)
         self.assertIn("p.flags |= FLAG_POLICY_HIT;", self.policy_source)
         for name in ("POLICY_KEY_SCRATCH", "DROP_KEY_SCRATCH"):
             self.assertNotIn(
