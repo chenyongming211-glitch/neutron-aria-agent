@@ -148,12 +148,26 @@ class LegacyPacketBoundsTest(unittest.TestCase):
 
     def test_tc_policy_uses_map_backed_pipeline_state(self):
         self.assertNotIn("pub struct PolicyArgs", self.policy_source)
+        self.assertIn('map(name = "POLICY_KEY_SCRATCH")', self.maps_source)
+        self.assertIn('map(name = "DROP_KEY_SCRATCH")', self.maps_source)
+        self.assertIn("POLICY_KEY_SCRATCH.get_ptr_mut(0)", self.policy_source)
+        self.assertNotRegex(
+            self.policy_source,
+            re.compile(r"let\s+key\s*=\s*PolicyKey\s*\{"),
+            "family-qualified policy keys must not remain on the BPF stack",
+        )
         self.assertIn(
             "pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32",
             self.policy_source,
         )
         self.assertIn("p.matched_src_id = s;", self.policy_source)
         self.assertIn("p.flags |= FLAG_POLICY_HIT;", self.policy_source)
+        for name in ("POLICY_KEY_SCRATCH", "DROP_KEY_SCRATCH"):
+            self.assertNotIn(
+                '"%s"' % name,
+                self.inventory_source,
+                "%s is packet scratch, not persistent runtime state" % name,
+            )
         self.assertNotIn("let args = policy::PolicyArgs", self.lib_source)
         self.assertIn(
             "let result = policy::evaluate_policy(p, info.dst_port);",

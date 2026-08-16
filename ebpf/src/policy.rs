@@ -1,9 +1,9 @@
 use crate::common::{
-    policy_family_is_valid, DropKey, PipelineCtx, PolicyKey, PolicyValue, PortKey,
-    DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
+    policy_family_is_valid, PipelineCtx, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY,
+    DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
-use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
+use crate::maps::{POLICY_KEY_SCRATCH, POLICY_TABLE, PORT_BITMAP_POOL};
 use crate::stats;
 
 /// Check if ACL (policy evaluation) is enabled.
@@ -33,27 +33,35 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
         return XDP_PASS;
     }
 
+    let key_ptr = match POLICY_KEY_SCRATCH.get_ptr_mut(0) {
+        Some(key) => key,
+        None => return XDP_PASS,
+    };
+
     let mut i = 0u8;
     while i < 8 {
         let mask = ORDER[i as usize];
-        let key = PolicyKey {
-            tap_id: p.tap_id,
-            src_id: if (mask & 1) != 0 { 0 } else { p.src_id },
-            dst_id: if (mask & 2) != 0 { 0 } else { p.dst_id },
-            proto: if (mask & 4) != 0 { 0 } else { p.proto },
-            direction: p.direction,
-            bank: p.matched_bank,
-            ip_family: p.ip_family,
-        };
-        if let Some(policy) = POLICY_TABLE.get(&key) {
+        let s = if (mask & 1) != 0 { 0 } else { p.src_id };
+        let d = if (mask & 2) != 0 { 0 } else { p.dst_id };
+        let proto = if (mask & 4) != 0 { 0 } else { p.proto };
+
+        (*key_ptr).tap_id = p.tap_id;
+        (*key_ptr).src_id = s;
+        (*key_ptr).dst_id = d;
+        (*key_ptr).proto = proto;
+        (*key_ptr).direction = p.direction;
+        (*key_ptr).bank = p.matched_bank;
+        (*key_ptr).ip_family = p.ip_family;
+        let key = &*key_ptr;
+        if let Some(policy) = POLICY_TABLE.get(key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
-            p.matched_src_id = key.src_id;
-            p.matched_dst_id = key.dst_id;
-            p.matched_proto = key.proto;
+            p.matched_src_id = s;
+            p.matched_dst_id = d;
+            p.matched_proto = proto;
             p.matched_direction = p.direction;
             p.flags |= FLAG_POLICY_HIT;
             p.drop_reason = drop_reason;
-            stats::update_rule_stats(&key, p.pkt_len, result == XDP_DROP);
+            stats::update_rule_stats(key, p.pkt_len, result == XDP_DROP);
             if result == XDP_DROP {
                 record_policy_drop(p, drop_reason);
             }
@@ -73,16 +81,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
 
 #[inline(always)]
 unsafe fn record_policy_drop(p: &PipelineCtx, drop_reason: u8) {
-    let key = DropKey {
-        tap_id: p.tap_id,
-        reason: drop_reason,
-        direction: p.direction,
-        proto: p.proto,
-        ip_family: p.ip_family,
-        src_id: p.src_id,
-        dst_id: p.dst_id,
-    };
-    drops::record_drop(&key, p.pkt_len, p.now);
+    drops::record_pipeline_drop(p, drop_reason);
 }
 
 /// Returns (XDP action, drop_reason). drop_reason is 0 for PASS.

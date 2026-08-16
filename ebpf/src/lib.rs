@@ -28,7 +28,7 @@ mod trace;
 
 use common::{
     acl_banked_tap_id, fragment_ct_create_point, set_fragment_resolve_drop_ids, CtKey4, CtKey6,
-    DropKey, FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
@@ -122,7 +122,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
         };
         let parse_failure = parse_tc_packet(&ctx, info_ptr, family);
         if parse_failure != 0 {
-            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure, family);
+            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure);
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -324,7 +324,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
         };
         let parse_failure = parse_tc_packet(&ctx, info_ptr, family);
         if parse_failure != 0 {
-            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure, family);
+            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure);
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -592,15 +592,18 @@ unsafe fn parse_tc_family(
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 unsafe fn record_tc_parse_drop(
     ctx: &TcContext,
     direction: u8,
     pkt_len: u32,
     reason: u8,
-    ip_family: u8,
 ) {
     let skb = ctx.as_ptr() as *const __sk_buff;
+    // This helper is reached only after ethernet_ip_family returned 4 or 6.
+    // Re-read the same EtherType here so the family scalar is not live across
+    // the parser call in the TC entry frame.
+    let ip_family = parser::ethernet_ip_family(ctx.data(), ctx.data_end(), 0);
     let mut proto = 0;
     if reason == DROP_FRAGMENT_INVALID_L4 {
         if let Some(info) = maps::PKT_SCRATCH.get_ptr_mut(0) {
@@ -610,16 +613,18 @@ unsafe fn record_tc_parse_drop(
             }
         }
     }
-    let key = DropKey {
-        tap_id: resolve_tap_id_for_ifindex((*skb).ifindex),
-        reason,
-        direction,
-        proto,
-        ip_family,
-        src_id: 0,
-        dst_id: 0,
+    let key = match maps::DROP_KEY_SCRATCH.get_ptr_mut(0) {
+        Some(key) => key,
+        None => return,
     };
-    drops::record_drop(&key, pkt_len, bpf_ktime_get_ns());
+    (*key).tap_id = resolve_tap_id_for_ifindex((*skb).ifindex);
+    (*key).reason = reason;
+    (*key).direction = direction;
+    (*key).proto = proto;
+    (*key).ip_family = ip_family;
+    (*key).src_id = 0;
+    (*key).dst_id = 0;
+    drops::record_drop(&*key, pkt_len, bpf_ktime_get_ns());
 }
 
 #[inline(always)]
@@ -701,16 +706,7 @@ fn trace_result_from_drop_reason(drop_reason: u8) -> u8 {
 /// Inline helper: record a drop from PipelineCtx.
 #[inline(always)]
 unsafe fn do_drop(p: &PipelineCtx) {
-    let key = DropKey {
-        tap_id: p.tap_id,
-        reason: p.drop_reason,
-        direction: p.direction,
-        proto: p.proto,
-        ip_family: p.ip_family,
-        src_id: p.src_id,
-        dst_id: p.dst_id,
-    };
-    drops::record_drop(&key, p.pkt_len, p.now);
+    drops::record_pipeline_drop(p, p.drop_reason);
 }
 
 #[inline(always)]
