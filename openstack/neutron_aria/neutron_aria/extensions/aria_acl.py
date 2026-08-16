@@ -122,6 +122,12 @@ RESOURCE_ATTRIBUTE_MAP = {
         "project_id": {"allow_post": True, "allow_put": False, "is_visible": True, "default": None},
         "name": {"allow_post": True, "allow_put": True, "is_visible": True, "default": ""},
         "members": {"allow_post": True, "allow_put": True, "is_visible": True, "default": []},
+        "ethertype": {
+            "allow_post": False,
+            "allow_put": False,
+            "is_visible": True,
+            "default": None,
+        },
         "enabled": {"allow_post": True, "allow_put": True, "is_visible": True, "default": True},
         "revision_number": {"allow_post": False, "allow_put": False, "is_visible": True},
     },

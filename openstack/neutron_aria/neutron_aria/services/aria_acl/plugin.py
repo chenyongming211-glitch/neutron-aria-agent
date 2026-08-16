@@ -12,6 +12,8 @@ except ImportError:
     neutron_policy = None
 
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
+from neutron_aria.acl_contract import AclContractError
+from neutron_aria.acl_contract import address_set_ethertype
 from neutron_aria.acl_contract import port_contract_eligibility
 from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
@@ -200,7 +202,7 @@ class AriaAclPlugin(object):
             "create",
             current=address_set,
         )
-        return address_set
+        return self._project_address_set(address_set)
 
     def create_aria_acl_address_set_bulk(self, context, aria_acl_address_sets):
         return self._create_acl_bulk(
@@ -226,20 +228,28 @@ class AriaAclPlugin(object):
             "get_aria_acl_address_set",
             "aria_acl_address_sets",
         )
-        return self._repo(context).list_address_sets(
+        repository_fields = (
+            None if not fields or "ethertype" in fields else fields
+        )
+        address_sets = self._repo(context).list_address_sets(
             filters=filters,
-            fields=fields,
+            fields=repository_fields,
             sorts=sorts,
             limit=limit,
             marker=marker,
             page_reverse=page_reverse,
         )
+        return [self._project_address_set(value, fields) for value in address_sets]
 
     def get_aria_acl_address_set(self, context, address_set_id, fields=None):
-        return self._repo(context).get_address_set(
-            address_set_id,
-            fields=fields,
+        repository_fields = (
+            None if not fields or "ethertype" in fields else fields
         )
+        address_set = self._repo(context).get_address_set(
+            address_set_id,
+            fields=repository_fields,
+        )
+        return self._project_address_set(address_set, fields)
 
     def update_aria_acl_address_set(self, context, address_set_id, aria_acl_address_set):
         address_set = self._repo(context).update_address_set(
@@ -252,7 +262,7 @@ class AriaAclPlugin(object):
             "update",
             current=address_set,
         )
-        return address_set
+        return self._project_address_set(address_set)
 
     def delete_aria_acl_address_set(self, context, address_set_id):
         repo = self._repo(context)
@@ -669,6 +679,17 @@ class AriaAclPlugin(object):
             return {}
         return body.get(key, body)
 
+    @staticmethod
+    def _project_address_set(address_set, fields=None):
+        projected = dict(address_set)
+        try:
+            projected["ethertype"] = address_set_ethertype(
+                projected.get("members") or []
+            )
+        except AclContractError:
+            projected["ethertype"] = None
+        return project_fields(projected, fields)
+
     def _repo(self, context):
         if self.repository is not None:
             return ErrorMappingRepositoryProxy(self.repository)
@@ -711,6 +732,8 @@ class AriaAclPlugin(object):
                 "bulk_create",
                 current=summary,
             )
+        if resource == "address_set":
+            return [self._project_address_set(value) for value in created]
         return created
 
     def _notify_acl_change(self, context, resource, operation, current=None, resource_id=None):

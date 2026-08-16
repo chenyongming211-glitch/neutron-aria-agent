@@ -134,9 +134,13 @@ class AclSourceTestCase(unittest.TestCase):
                 ipv6_acl_enabled=True,
             )).load_index().effective_for_port({"id": "port-1"}, {"eligible": True})
 
-            self.assertFalse(result["enabled"])
-            self.assertEqual("ipv6_acl_not_implemented", result["reason"])
-            self.assertEqual([], result["rules"])
+            self.assertTrue(result["enabled"])
+            self.assertEqual("ready", result["reason"])
+            self.assertEqual("IPv6", result["rules"][0]["ethertype"])
+            self.assertEqual(
+                ["2001:db8::/64"],
+                result["rules"][0]["src_cidrs"],
+            )
         finally:
             if fd is not None:
                 os.close(fd)

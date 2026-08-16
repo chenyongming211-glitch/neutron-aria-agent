@@ -2,8 +2,12 @@ from __future__ import absolute_import
 
 import copy
 
+import netaddr
+
 from neutron_aria.acl_contract import AclContractError
-from neutron_aria.acl_contract import normalize_ipv4_cidr
+from neutron_aria.acl_contract import address_set_ethertype
+from neutron_aria.acl_contract import normalize_cidr
+from neutron_aria.acl_contract import normalize_ethertype
 from neutron_aria.acl_contract import validate_policy
 from neutron_aria.acl_contract import validate_rule
 from neutron_aria.db.aria_acl.errors import AriaAclConflictError
@@ -67,13 +71,8 @@ def _contract(validator, values):
 
 
 def _canonical_sort_key(value):
-    address, prefix = value.split("/")
-    octets = [int(octet) for octet in address.split(".")]
-    number = (
-        (octets[0] << 24) | (octets[1] << 16) |
-        (octets[2] << 8) | octets[3]
-    )
-    return number, int(prefix)
+    network = netaddr.IPNetwork(value)
+    return network.version, int(network.network), network.prefixlen
 
 
 def normalize_address_set_members(members):
@@ -82,7 +81,7 @@ def normalize_address_set_members(members):
         raise AriaAclValidationError(
             "address set exceeds %d raw members" % MAX_ADDRESS_SET_MEMBERS
         )
-    canonical = set()
+    raw_addresses = []
     for member in raw_members:
         if isinstance(member, dict):
             if "address" not in member:
@@ -98,8 +97,15 @@ def normalize_address_set_members(members):
             )
         if address is None or not str(address).strip():
             continue
+        raw_addresses.append(address)
+    try:
+        family = address_set_ethertype(raw_addresses)
+    except AclContractError as exc:
+        raise AriaAclValidationError(str(exc))
+    canonical = set()
+    for address in raw_addresses:
         try:
-            canonical.add(normalize_ipv4_cidr(address))
+            canonical.add(normalize_cidr(address, family))
         except AclContractError as exc:
             raise AriaAclValidationError(str(exc))
     return [
@@ -151,7 +157,11 @@ def _valid_referenced_address_set(repository, address_set_id, policy_project):
         raise AriaAclValidationError(
             "address set project_id does not match policy"
         )
-    return address_set
+    try:
+        family = address_set_ethertype(members)
+    except AclContractError as exc:
+        raise AriaAclValidationError(str(exc))
+    return address_set, family
 
 
 def prepare_policy(values):
@@ -163,26 +173,32 @@ def prepare_policy(values):
 def prepare_rule(repository, values, existing=None):
     final_values = copy.deepcopy(values)
     policy = _require_policy_project(repository, final_values)
+    try:
+        family = normalize_ethertype(final_values.get("ethertype") or "IPv4")
+    except AclContractError as exc:
+        raise AriaAclValidationError(str(exc))
+    final_values["ethertype"] = family
     for field in ("src_cidr", "dst_cidr"):
         if final_values.get(field):
             try:
-                final_values[field] = normalize_ipv4_cidr(final_values[field])
+                final_values[field] = normalize_cidr(final_values[field], family)
             except AclContractError as exc:
                 raise AriaAclValidationError(str(exc))
-    if final_values.get("ethertype"):
-        if str(final_values["ethertype"]).strip().lower() == "ipv4":
-            final_values["ethertype"] = "IPv4"
     policy_project = _project_id(policy)
     references = set()
     for field in ("src_address_set_id", "dst_address_set_id"):
         if final_values.get(field):
             references.add(final_values[field])
     for address_set_id in sorted(references):
-        _valid_referenced_address_set(
+        _, address_set_family = _valid_referenced_address_set(
             repository,
             address_set_id,
             policy_project,
         )
+        if address_set_family != family:
+            raise AriaAclValidationError(
+                "rule ethertype does not match address set family"
+            )
     _contract(validate_rule, final_values)
     if enabled(final_values):
         for rule in repository.list_rules(
@@ -238,6 +254,17 @@ def prepare_address_set(repository, values, existing=None):
             ):
                 raise AriaAclValidationError(
                     "address set project_id does not match policy"
+                )
+            try:
+                rule_family = normalize_ethertype(
+                    rule.get("ethertype") or "IPv4"
+                )
+                set_family = address_set_ethertype(final_values["members"])
+            except AclContractError as exc:
+                raise AriaAclValidationError(str(exc))
+            if rule_family != set_family:
+                raise AriaAclValidationError(
+                    "address set family does not match enabled rule ethertype"
                 )
     return final_values
 

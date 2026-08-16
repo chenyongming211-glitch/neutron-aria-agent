@@ -3,8 +3,13 @@ from __future__ import absolute_import
 import copy
 import heapq
 
+import netaddr
+
 from neutron_aria.acl_contract import AclContractError
-from neutron_aria.acl_contract import normalize_ipv4_cidr
+from neutron_aria.acl_contract import address_set_ethertype
+from neutron_aria.acl_contract import normalize_cidr
+from neutron_aria.acl_contract import normalize_ethertype
+from neutron_aria.acl_contract import protocol_number
 from neutron_aria.acl_contract import validate_address_set_reference
 from neutron_aria.acl_contract import validate_policy
 from neutron_aria.acl_contract import validate_rule
@@ -75,10 +80,6 @@ def _members(address_set):
     return result
 
 
-def _ip_version(address):
-    return "IPv6" if ":" in address else "IPv4"
-
-
 def _strict_priority(value):
     if isinstance(value, bool):
         raise ValueError("priority must be an integer")
@@ -99,41 +100,31 @@ def _rule_priority(rule):
         return 0
 
 
-def _strict_ipv4_cidr(value):
+def _strict_cidr(value, ethertype):
     try:
-        canonical = normalize_ipv4_cidr(value)
+        canonical = normalize_cidr(value, ethertype)
     except AclContractError as exc:
         raise ValueError(str(exc))
-    address, prefix_text = canonical.split("/")
-    octets = [int(octet) for octet in address.split(".")]
-    network = (
-        (octets[0] << 24) | (octets[1] << 16) |
-        (octets[2] << 8) | octets[3]
-    )
-    prefix = int(prefix_text)
-    return network, prefix, canonical
+    network = netaddr.IPNetwork(canonical)
+    return int(network.network), network.prefixlen, canonical
 
 
-def _canonical_ipv4_cidrs(cidrs):
+def _canonical_cidrs(cidrs, ethertype):
     return tuple(sorted(set(
-        _strict_ipv4_cidr(cidr)[:2] for cidr in cidrs or []
+        _strict_cidr(cidr, ethertype)[:2] for cidr in cidrs or []
     )))
 
 
-def _canonical_ipv4_strings(cidrs):
+def _canonical_strings(cidrs, ethertype):
     parsed = {}
     for cidr in cidrs or []:
-        network, prefix, canonical = _strict_ipv4_cidr(cidr)
+        network, prefix, canonical = _strict_cidr(cidr, ethertype)
         parsed[(network, prefix)] = canonical
     return [parsed[key] for key in sorted(parsed)]
 
 
-def _normalized_protocol(protocol):
-    value = str(protocol or "any").strip().lower()
-    known = {"any": 0, "tcp": 6, "udp": 17, "icmp": 1}
-    if value in known:
-        return known[value]
-    return int(value)
+def _normalized_protocol(protocol, ethertype):
+    return protocol_number(protocol, ethertype)
 
 
 def _normalized_action(action):
@@ -170,14 +161,15 @@ def _datapath_directions(direction):
     return frozenset((1,)) if value == "ingress" else frozenset((0,))
 
 
-def _intern_selector(cidrs, selectors, selector_ids):
+def _intern_selector(cidrs, family, selectors, selector_ids):
     selector = tuple(cidrs or ())
     if not selector:
         return 0
-    selector_id = selector_ids.get(selector)
+    selector_key = (family, selector)
+    selector_id = selector_ids.get(selector_key)
     if selector_id is None:
         selector_id = len(selectors)
-        selector_ids[selector] = selector_id
+        selector_ids[selector_key] = selector_id
         selectors.append(selector)
     return selector_id
 
@@ -193,18 +185,20 @@ def _acl_validation_view(compiled_rules):
             int(item.get("priority") or 0),
             str(item.get("id") or ""),
     )):
+        family = normalize_ethertype(rule.get("ethertype") or "IPv4")
         normalized.append({
             "id": str(rule.get("id") or ""),
             "direction": _normalized_direction(rule.get("direction")),
             "priority": int(rule.get("priority") or 0),
             "action": _normalized_action(rule.get("action")),
-            "protocol": _normalized_protocol(rule.get("protocol")),
+            "ethertype": family,
+            "protocol": _normalized_protocol(rule.get("protocol"), family),
             "directions": _datapath_directions(rule.get("direction")),
             "src_selector_id": _intern_selector(
-                rule.get("src_cidrs"), src_selectors, src_selector_ids,
+                rule.get("src_cidrs"), family, src_selectors, src_selector_ids,
             ),
             "dst_selector_id": _intern_selector(
-                rule.get("dst_cidrs"), dst_selectors, dst_selector_ids,
+                rule.get("dst_cidrs"), family, dst_selectors, dst_selector_ids,
             ),
             "ports": _normalized_ports(rule),
         })
@@ -223,14 +217,17 @@ def _selector_relation(left_id, right_id):
     return SELECTOR_DISJOINT
 
 
-def _selector_best_overlap(selectors, first_rule_indexes):
+def _selector_best_overlap(selectors, first_rule_indexes, selector_families=None):
+    selector_families = selector_families or ["IPv4"] * len(selectors)
     intervals = []
     for selector_id, selector in enumerate(selectors):
         if selector_id == 0 or first_rule_indexes[selector_id] is None:
             continue
         selector_intervals = []
-        for network, prefix in _canonical_ipv4_cidrs(selector):
-            host_mask = 0 if prefix == 32 else (1 << (32 - prefix)) - 1
+        family = selector_families[selector_id]
+        bits = 32 if family == "IPv4" else 128
+        for network, prefix in _canonical_cidrs(selector, family):
+            host_mask = 0 if prefix == bits else (1 << (bits - prefix)) - 1
             selector_intervals.append((network, network | host_mask))
         selector_intervals.sort()
         merged = []
@@ -240,7 +237,7 @@ def _selector_best_overlap(selectors, first_rule_indexes):
             else:
                 merged.append((start, end))
         intervals.extend(
-            (start, end, selector_id) for start, end in merged
+            (family, start, end, selector_id) for start, end in merged
         )
     intervals.sort()
 
@@ -258,7 +255,14 @@ def _selector_best_overlap(selectors, first_rule_indexes):
                 return
             heapq.heappop(active_selectors)
 
-    for start, end, selector_id in intervals:
+    active_family = None
+    for family, start, end, selector_id in intervals:
+        if family != active_family:
+            active_intervals = []
+            active_counts = {}
+            active_generations = {}
+            active_selectors = []
+            active_family = family
         while active_intervals and active_intervals[0][0] < start:
             _, expired_selector_id = heapq.heappop(active_intervals)
             remaining = active_counts[expired_selector_id] - 1
@@ -304,13 +308,15 @@ def _acl_overlap_reason(validation):
     for side in ("src", "dst"):
         selectors = validation[side + "_selectors"]
         first_rule_indexes = [None] * len(selectors)
+        selector_families = [None] * len(selectors)
         for rule_index, rule in enumerate(normalized):
             selector_id = rule[side + "_selector_id"]
             if (selector_id and
                     first_rule_indexes[selector_id] is None):
                 first_rule_indexes[selector_id] = rule_index
+                selector_families[selector_id] = rule["ethertype"]
         best_by_side[side] = _selector_best_overlap(
-            selectors, first_rule_indexes,
+            selectors, first_rule_indexes, selector_families,
         )
 
     src_best = best_by_side["src"]
@@ -328,6 +334,8 @@ def _acl_overlap_reason(validation):
     for left_index, left in enumerate(normalized):
         for right_index in range(left_index + 1, len(normalized)):
             right = normalized[right_index]
+            if left["ethertype"] != right["ethertype"]:
+                continue
             if (cidr_candidate is not None and
                     cidr_candidate[:2] == (left_index, right_index)):
                 return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
@@ -541,13 +549,12 @@ class EffectiveAclIndex(object):
     def _compile_rules_uncached(self, policy):
         policy_id = policy.get("id")
         rules = [rule for rule in self.rules_by_policy.get(policy_id, []) if _enabled(rule)]
-        if any(_normalized_ethertype(rule.get("ethertype")) == "ipv6" for rule in rules):
+        if (not self.ipv6_acl_enabled and any(
+                _normalized_ethertype(rule.get("ethertype")) == "ipv6"
+                for rule in rules)):
             return {
                 "status": ACL_DEGRADED,
-                "reason": (
-                    "ipv6_acl_not_implemented" if self.ipv6_acl_enabled else
-                    "ipv6_acl_disabled"
-                ),
+                "reason": "ipv6_acl_disabled",
                 "rules": [],
             }
         if len(rules) > MAX_ACL_RULES_PER_POLICY:
@@ -595,6 +602,10 @@ class EffectiveAclIndex(object):
 
     def _compile_rule(self, rule):
         try:
+            ethertype = normalize_ethertype(rule.get("ethertype") or "IPv4")
+        except AclContractError as exc:
+            return None, "unsupported_rule:%s:%s" % (rule.get("id"), exc)
+        try:
             validate_rule(rule)
         except AclContractError as exc:
             for side, field in (("src", "src_cidr"), ("dst", "dst_cidr")):
@@ -602,9 +613,10 @@ class EffectiveAclIndex(object):
                 if not raw_value:
                     continue
                 try:
-                    normalize_ipv4_cidr(raw_value)
+                    normalize_cidr(raw_value, ethertype)
                 except AclContractError:
-                    return None, "invalid_acl_ipv4_cidr:%s:%s:%s" % (
+                    return None, "invalid_acl_%s_cidr:%s:%s:%s" % (
+                        ethertype.lower(),
                         side,
                         rule.get("id"),
                         raw_value,
@@ -615,38 +627,31 @@ class EffectiveAclIndex(object):
         if self._has_l4_ports(rule) and str(protocol).lower() not in ("tcp", "udp", "6", "17"):
             return None, "l4_ports_require_tcp_or_udp:%s" % rule.get("id")
 
-        src_cidrs, error = self._compile_address_match(rule, "src")
+        src_cidrs, error = self._compile_address_match(rule, "src", ethertype)
         if error:
             return None, error
-        dst_cidrs, error = self._compile_address_match(rule, "dst")
+        dst_cidrs, error = self._compile_address_match(rule, "dst", ethertype)
         if error:
             return None, error
 
         for side, cidrs in (("src", src_cidrs), ("dst", dst_cidrs)):
             try:
-                canonical = _canonical_ipv4_strings(cidrs)
+                canonical = _canonical_strings(cidrs, ethertype)
             except (TypeError, ValueError):
                 invalid = None
                 for raw_value in cidrs:
                     try:
-                        _strict_ipv4_cidr(raw_value)
+                        _strict_cidr(raw_value, ethertype)
                     except (TypeError, ValueError):
                         invalid = raw_value
                         break
-                return None, "invalid_acl_ipv4_cidr:%s:%s:%s" % (
-                    side, rule.get("id"), invalid,
+                return None, "invalid_acl_%s_cidr:%s:%s:%s" % (
+                    ethertype.lower(), side, rule.get("id"), invalid,
                 )
             if side == "src":
                 src_cidrs = canonical
             else:
                 dst_cidrs = canonical
-
-        ethertype = rule.get("ethertype")
-        if ethertype:
-            normalized_ethertype = _normalized_ethertype(ethertype)
-            for cidr in src_cidrs + dst_cidrs:
-                if _ip_version(cidr).lower() != normalized_ethertype:
-                    return None, "ethertype_cidr_mismatch:%s" % rule.get("id")
 
         return {
             "id": rule.get("id"),
@@ -663,7 +668,7 @@ class EffectiveAclIndex(object):
             "dst_port_max": rule.get("dst_port_max"),
         }, None
 
-    def _compile_address_match(self, rule, prefix):
+    def _compile_address_match(self, rule, prefix, ethertype):
         cidr_key = "%s_cidr" % prefix
         address_set_key = "%s_address_set_id" % prefix
         cidr = rule.get(cidr_key)
@@ -688,6 +693,14 @@ class EffectiveAclIndex(object):
                 contract_address_set = dict(address_set)
                 contract_address_set["members"] = _members(address_set)
                 validate_address_set_reference(contract_address_set)
+                set_family = address_set_ethertype(
+                    contract_address_set["members"]
+                )
+                if set_family != ethertype:
+                    return [], "%s_address_set_family_mismatch:%s" % (
+                        prefix,
+                        address_set_id,
+                    )
             except AclContractError as exc:
                 return [], "%s_address_set_invalid:%s:%s" % (
                     prefix,
