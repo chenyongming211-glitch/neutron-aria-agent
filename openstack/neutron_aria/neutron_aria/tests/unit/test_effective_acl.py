@@ -178,6 +178,23 @@ class EffectiveAclTestCase(unittest.TestCase):
         self.assertEqual("ipv6_acl_not_implemented", result["reason"])
         self.assertEqual([], result["rules"])
 
+    def test_mixed_ip_family_policy_degrades_when_ipv6_acl_disabled(self):
+        result = effective_acl([
+            acl_rule("ipv4", 10, src_cidr="192.0.2.7/24"),
+            acl_rule(
+                "ipv6", 20,
+                ethertype="IPv6",
+                protocol="icmp",
+                src_cidr="2001:db8::7/64",
+            ),
+        ])
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertEqual("ipv6_acl_disabled", result["reason"])
+        self.assertEqual([], result["rules"])
+
     def test_shared_large_selector_is_interned_once_for_1000_rules(self):
         shared = tuple(selector_members(2048))
         rules = [compiled_acl_rule(
