@@ -24,7 +24,7 @@
 - Pin the Python network dependency exactly as `netaddr>=0.7.19,<1.0.0` in both requirements and package metadata.
 - Public rules use one family each: `ethertype=IPv4|IPv6`; omission means `IPv4`; dual stack uses two rules.
 - Kernel policy and matched-conntrack family values are only `4` or `6`; `DropKey.ip_family` additionally accepts `0` for non-IP/unknown.
-- Selector names are exactly `__neutron_acl:<port-id>:<src|dst>:selector:<ipv4|ipv6>:<ordinal>`; selector ordinals are independent per side and family.
+- Selector names are exactly `neutron:<port-id>:<src|dst>:selector:<ipv4|ipv6>:<ordinal>`; selector ordinals are independent per side and family.
 - Source-port matching stays unsupported; priority remains metadata; overlap with different actions stays a controller validation error.
 - No hidden ND/RA/MLD bypass and no ICMPv6 type/code matching are added.
 - Existing limits remain 1,000 effective rules per port and 2,048 address-set members.
@@ -656,28 +656,30 @@ waived for another feature.
 - Create: `agent/src/neutron_acl_ip.rs`
 - Modify: `agent/src/main.rs`
 - Modify: `agent/src/neutron_api.rs`
-- Modify: `agent/src/control_plane.rs`
-- Modify: `ci/check_neutron_stage1.py`
+- Verify existing family-bearing interface: `agent/src/control_plane.rs`
+- Verify existing `neutron_acl_` hosted filter: `.github/workflows/build.yml`
 
 **Interfaces:**
 - Consumes: Tasks 2–4 family ABI, persisted state, and datapath APIs.
 - Produces: `IpFamily`, `AclCidr`, family-aware rule normalization/overlap/protocol logic, `AclSelectorId { family, ordinal }`, and family-bearing `AclApplyPlan`/`OwnedAclPolicySpec`.
 
-- [ ] **Step 1: Add RED compiler and namespace tests**
+- [x] **Step 1: Add RED compiler and namespace tests**
 
 Add `neutron_acl_ipv6_` cases to the existing `ready_acl` compiler harness:
 
 | Test name | Input | Exact assertion |
 | --- | --- | --- |
 | `neutron_acl_ipv6_v4_wildcard_deny_never_compiles_as_v6` | IPv4 any/any deny plus IPv6 any/any allow | two policies with families `4` and `6`, actions deny and allow respectively |
-| `neutron_acl_ipv6_selector_names_are_family_qualified` | IPv4 `10.0.0.0/24` and IPv6 `2001:db8::/64` src selectors | names `__neutron_acl:port-1:src:selector:ipv4:0` and `__neutron_acl:port-1:src:selector:ipv6:0`, distinct IDs |
+| `neutron_acl_ipv6_selector_names_are_family_qualified` | IPv4 `10.0.0.0/24` and IPv6 `2001:db8::/64` src selectors | names `neutron:port-1:src:selector:ipv4:0` and `neutron:port-1:src:selector:ipv6:0`, distinct IDs |
 | `neutron_acl_ipv6_group_info_never_mixes_families` | both selectors above | every planned group contains CIDRs of exactly its encoded family |
 | `neutron_acl_ipv6_protocol_aliases_are_family_aware` | IPv4 `icmp`, IPv6 `icmp`, IPv6 `icmpv6`, wrong numeric `1/58` cases | protocols `1`, `58`, `58`; wrong-family numeric inputs reject |
 | `neutron_acl_ipv6_opposite_actions_coexist` | same direction/protocol, IPv4 allow and IPv6 deny | translation succeeds with two family-qualified effective keys |
 
-Add the filter to hosted Rust behavior tests and capture RED.
+The existing hosted `neutron_acl_` filter already selects the new
+`neutron_acl_ipv6_` cases, so verify that behavior rather than adding a
+duplicate filter. Capture RED from that lane.
 
-- [ ] **Step 2: Implement `neutron_acl_ip.rs`**
+- [x] **Step 2: Implement `neutron_acl_ip.rs`**
 
 Define the focused types:
 
@@ -715,9 +717,14 @@ pub(crate) fn acl_protocol(value: Option<&str>, family: IpFamily) -> Result<u8, 
 
 Use standard-library address parsing; reject `%` zone identifiers and IPv4-mapped IPv6. Keep all overlap operations family-local.
 
-- [ ] **Step 3: Replace IPv4-only compiler structures**
+- [x] **Step 3: Replace IPv4-only compiler structures**
 
-Remove `AclIpv4Cidr` and `ensure_ipv4_cidrs`. Add `family: IpFamily` to `CanonicalAclRule`, `NormalizedAclRule`, `AclEffectivePolicyKey`, `AclPolicyPlan`, validation-cache keys, and `OwnedAclPolicySpec`.
+Remove `AclIpv4Cidr` and `ensure_ipv4_cidrs`. Add `family: IpFamily` to
+`CanonicalAclRule`, `NormalizedAclRule`, `AclEffectivePolicyKey` and
+`AclPolicyPlan`, and pass it into the existing family-bearing
+`OwnedAclPolicySpec`. Keep the validation-cache key as the full ACL snapshot
+hash: each rule's `ethertype` is already part of that snapshot identity, while
+a single standalone family field would not represent a dual-stack snapshot.
 
 Define selector identity as:
 
@@ -737,15 +744,33 @@ impl AclSelectorId {
 }
 ```
 
-Build independent src/dst selector tables per family. `acl_group_for_selector` returns `"any"` for ordinal zero and otherwise formats the exact family-qualified namespace. Validate that every non-any group's CIDRs match its encoded family before producing `AclApplyPlan`.
+Build independent src/dst selector tables per family.
+`acl_group_for_selector` returns `"any"` for `ordinal=None`; concrete ordinal
+zero is the first family-qualified selector. Validate that every non-any
+group's CIDRs match its encoded family before producing `AclApplyPlan`.
 
-- [ ] **Step 4: Preserve atomic policy conflict semantics**
+- [x] **Step 4: Preserve atomic policy conflict semantics**
 
 Include family in `AclEffectivePolicyKey`, so conflicting actions are compared only inside the same family. Keep priority out of the key and retain controller overlap validation. Convert each planned policy to `OwnedAclPolicySpec { ..., ip_family: family.as_u8() }`.
 
-- [ ] **Step 5: Push GREEN and verify Rust behavior**
+- [x] **Step 5: Push GREEN and verify Rust behavior**
 
 Commit `feat(acl): compile family-qualified IPv6 policies`, push, and require the new `neutron_acl_ipv6_` tests plus all existing `neutron_acl_`, shadow-bank, ownership, and transaction tests to pass.
+
+**Task 5 evidence (2026-08-16):**
+
+- RED commit `f8dfa4e` / Build `31941407874`: `rust-behavior` job
+  `95151065155` failed on the intentionally missing dual-stack compiler module
+  and family-bearing plan field; the independent Rust/eBPF build passed.
+- GREEN commits `3262191` and `8cb4a27` / Build `31942101889`: all five
+  `neutron_acl_ipv6_` cases passed, the complete `neutron_acl_` filter passed
+  63 tests, and warning-denied Rust/eBPF build, 480-byte stack gate, static
+  agent build, packaging, fast contracts, database contracts and clean install
+  all passed.
+- Quality Build `31942377417`: full host workspace tests passed. Strict Clippy
+  remains red on 106 pre-existing diagnostics (tracked by `DEBT-CI-006`), down
+  from the prior 107-diagnostic baseline; no diagnostic references the Task 5
+  files and the normalized diagnostic set adds no new item.
 
 ---
 

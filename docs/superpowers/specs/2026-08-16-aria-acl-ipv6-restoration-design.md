@@ -57,7 +57,7 @@ family in `PolicyKey`, an IPv4 wildcard deny can match IPv6 traffic, and the
 inverse is also possible.
 
 The family-less selector group namespace is a second isolation defect. Current
-names such as `__neutron_acl:<port>:src:selector:0` can identify both an IPv4
+names such as `neutron:<port>:src:selector:0` can identify both an IPv4
 and an IPv6 selector. `StateManager::add_group` appends a new CIDR to an
 existing same-name group and retains its ID. The network writer does select
 the correct IPv4 or IPv6 trie from each CIDR, so mixed membership does not by
@@ -241,10 +241,10 @@ builds and exact maintained-4.18-kernel load/behavior remain mandatory.
 Owned Neutron selector groups use canonical names:
 
 ```text
-__neutron_acl:<port-id>:src:selector:ipv4:<ordinal>
-__neutron_acl:<port-id>:src:selector:ipv6:<ordinal>
-__neutron_acl:<port-id>:dst:selector:ipv4:<ordinal>
-__neutron_acl:<port-id>:dst:selector:ipv6:<ordinal>
+neutron:<port-id>:src:selector:ipv4:<ordinal>
+neutron:<port-id>:src:selector:ipv6:<ordinal>
+neutron:<port-id>:dst:selector:ipv4:<ordinal>
+neutron:<port-id>:dst:selector:ipv6:<ordinal>
 ```
 
 `any` remains the reserved selector with group ID `0`; family isolation for
