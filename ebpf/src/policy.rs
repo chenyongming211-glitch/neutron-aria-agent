@@ -1,9 +1,9 @@
 use crate::common::{
-    policy_family_is_valid, PipelineCtx, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY,
+    policy_family_is_valid, PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY,
     DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
-use crate::maps::{POLICY_KEY_SCRATCH, POLICY_TABLE, PORT_BITMAP_POOL};
+use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
 use crate::stats;
 
 /// Check if ACL (policy evaluation) is enabled.
@@ -35,23 +35,19 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8)
         return XDP_PASS;
     }
 
-    let key_ptr = match POLICY_KEY_SCRATCH.get_ptr_mut(0) {
-        Some(key) => key,
-        None => return XDP_PASS,
-    };
-
     let mut i = 0u8;
     while i < 8 {
         let mask = ORDER[i as usize];
-        (*key_ptr).tap_id = p.tap_id;
-        (*key_ptr).src_id = if (mask & 1) != 0 { 0 } else { p.src_id };
-        (*key_ptr).dst_id = if (mask & 2) != 0 { 0 } else { p.dst_id };
-        (*key_ptr).proto = if (mask & 4) != 0 { 0 } else { p.proto };
-        (*key_ptr).direction = p.direction;
-        (*key_ptr).bank = p.matched_bank;
-        (*key_ptr).ip_family = ip_family;
-        let key = &*key_ptr;
-        if let Some(policy) = POLICY_TABLE.get(key) {
+        let key = PolicyKey {
+            tap_id: p.tap_id,
+            src_id: if (mask & 1) != 0 { 0 } else { p.src_id },
+            dst_id: if (mask & 2) != 0 { 0 } else { p.dst_id },
+            proto: if (mask & 4) != 0 { 0 } else { p.proto },
+            direction: p.direction,
+            bank: p.matched_bank,
+            ip_family,
+        };
+        if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
             p.matched_src_id = key.src_id;
             p.matched_dst_id = key.dst_id;
@@ -59,7 +55,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8)
             p.matched_direction = p.direction;
             p.flags |= FLAG_POLICY_HIT;
             p.drop_reason = drop_reason;
-            stats::update_rule_stats(key, p.pkt_len, result == XDP_DROP);
+            stats::update_rule_stats(&key, p.pkt_len, result == XDP_DROP);
             if result == XDP_DROP {
                 record_policy_drop(p, drop_reason);
             }

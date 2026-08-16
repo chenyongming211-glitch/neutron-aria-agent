@@ -40,11 +40,6 @@ pub static CT_KEY6_SCRATCH: PerCpuArray<CtKey6> = PerCpuArray::with_max_entries(
 #[map(name = "CT_VALUE_SCRATCH")]
 pub static CT_VALUE_SCRATCH: PerCpuArray<CtValue> = PerCpuArray::with_max_entries(2, 0);
 
-// Policy lookup key scratch (packet-local, never persisted). Keeping the
-// family-qualified key out of the TC phase stack preserves the legacy budget.
-#[map(name = "POLICY_KEY_SCRATCH")]
-pub static POLICY_KEY_SCRATCH: PerCpuArray<PolicyKey> = PerCpuArray::with_max_entries(1, 0);
-
 #[map(name = "DROP_KEY_SCRATCH")]
 pub static DROP_KEY_SCRATCH: PerCpuArray<DropKey> = PerCpuArray::with_max_entries(1, 0);
 
