@@ -344,14 +344,23 @@ closure remains separate work.
   selected-tail failures. If malformed or unsupported WAL data blocks that
   checkpoint, startup returns the typed
   `legacy_acl_family_checkpoint_blocked_by_wal_failure` error before runtime
-  replay or later state writers can reserialize family zero; concrete-family
-  snapshots retain the existing best-effort malformed-WAL behavior.
+  replay or later state writers can reserialize family zero. No compaction is
+  attempted in that blocked case, so both durable files retain their previous
+  bytes; concrete-family snapshots retain the existing best-effort
+  malformed-WAL behavior.
 - Atomic publication of the normalized cursor-bearing `state.json` is the
-  migration commit point. Failures before publication are fatal and preserve
-  the prior authoritative durable state. WAL truncation, fsync, or checkpoint
-  header failures after publication are recoverable committed outcomes: startup
-  uses the normalized state and the next load converges through cursor/marker
-  replay without attempting byte rollback of the two durable files.
+  migration commit point. A failure before the checkpoint marker is appended
+  and synced preserves both files byte-for-byte. A failure after that sync but
+  before state publication is still fatal and leaves the old snapshot bytes and
+  cursor authoritative, but the WAL legally retains one unmatched orphan
+  marker. Replay ignores a marker unless its ID matches the snapshot cursor, so
+  restart reconstructs the same prior effective state and can retry migration
+  with a later checkpoint ID. The orphan marker must not be truncated or rolled
+  back because doing so would weaken the crash-safe marker-before-publication
+  order. WAL truncation, fsync, or checkpoint-header failures after publication
+  are recoverable committed outcomes: startup uses the normalized state and the
+  next load converges through cursor/marker replay without attempting durable
+  byte rollback.
 
 ### 9.2 Neutron transaction WAL
 

@@ -89,6 +89,7 @@ struct WalApplyOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FamilyMigrationCheckpointPhase {
     BeforeCheckpointMarker,
+    AfterCheckpointMarkerBeforeSnapshotPublication,
     AfterSnapshotPublication,
 }
 
@@ -471,6 +472,7 @@ impl WalWriter {
         self.append_checkpoint_buffered(checkpoint_id)?;
         self.sync()?;
         self.next_checkpoint_id = checkpoint_id.checked_add(1);
+        hook(FamilyMigrationCheckpointPhase::AfterCheckpointMarkerBeforeSnapshotPublication)?;
 
         let state_dir = self
             .wal_path
@@ -1598,6 +1600,9 @@ mod tests {
             FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => {
                 Err("injected pre-publication failure".to_string())
             }
+            FamilyMigrationCheckpointPhase::AfterCheckpointMarkerBeforeSnapshotPublication => {
+                Ok(())
+            }
             FamilyMigrationCheckpointPhase::AfterSnapshotPublication => Ok(()),
         })
         .expect_err("pre-publication checkpoint failure must remain fatal");
@@ -1717,6 +1722,9 @@ mod tests {
 
         let committed = load_with_wal_with_compact_hook(&state_path, |phase| match phase {
             FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => Ok(()),
+            FamilyMigrationCheckpointPhase::AfterCheckpointMarkerBeforeSnapshotPublication => {
+                Ok(())
+            }
             FamilyMigrationCheckpointPhase::AfterSnapshotPublication => {
                 Err("injected post-publication cleanup failure".to_string())
             }
@@ -1858,6 +1866,9 @@ mod tests {
                 &serde_json::to_string_pretty(&state).unwrap(),
                 |phase| match phase {
                     FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => Ok(()),
+                    FamilyMigrationCheckpointPhase::AfterCheckpointMarkerBeforeSnapshotPublication => {
+                        Ok(())
+                    }
                     FamilyMigrationCheckpointPhase::AfterSnapshotPublication => {
                         Err("injected strict post-publication failure".to_string())
                     }

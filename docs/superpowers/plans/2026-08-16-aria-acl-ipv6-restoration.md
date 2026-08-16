@@ -487,13 +487,19 @@ normalization before any pinned-map replay and write the migrated state
 atomically through the existing checkpoint path. A complete WAL scan with any
 selected-tail failure blocks family migration with typed reason
 `legacy_acl_family_checkpoint_blocked_by_wal_failure` before runtime or state
-writers, while concrete-family snapshots keep the prior best-effort
-malformed-WAL behavior. The atomic cursor-bearing snapshot publication is the
-migration commit point: pre-publication failure is fatal with the prior durable
-state authoritative; post-publication WAL truncate/fsync/header failure is a
+writers and before compaction, preserving both durable files byte-for-byte;
+concrete-family snapshots keep the prior best-effort malformed-WAL behavior.
+The atomic cursor-bearing snapshot publication is the migration commit point.
+A failure before marker append preserves both files. A failure after the marker
+is appended and synced but before snapshot publication is fatal with the old
+snapshot bytes/cursor authoritative; the unmatched marker may remain in the
+WAL and must be ignored on restart rather than truncated or rolled back. The
+retry must reconstruct the same prior effective `FirewallState`, allocate a
+later checkpoint ID, and converge without stale or duplicate family-qualified
+policy identities. Post-publication WAL truncate/fsync/header failure is a
 recoverable committed outcome, returns the normalized cursor-bearing state,
-and relies on cursor replay for restart convergence rather than rolling back
-durable bytes.
+and relies on cursor replay for restart convergence rather than durable byte
+rollback.
 
 - [ ] **Step 4: Update every state/control-plane constructor and preimage identity**
 
