@@ -9,7 +9,11 @@ use aria_core::ebpf_ops::{
     ProjectionEntry, ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry,
     StandaloneReplayRoute,
 };
-use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
+use aria_core::common::{IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6};
+use aria_core::state::{
+    migrate_legacy_rule_families, FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo,
+};
+use aria_core::wal::{apply_wal_entry, WalEntry};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -35,7 +39,85 @@ fn acl_rule(src_group_id: u32, dst_group_id: u32) -> RuleInfo {
         ports: None,
         bitmap_idx: None,
         direction: 0,
+        ip_family: IP_FAMILY_V4,
     }
+}
+
+fn rule_identity(rule: &RuleInfo) -> (u32, u32, u8, u8, u8) {
+    (
+        rule.src_group_id,
+        rule.dst_group_id,
+        rule.proto,
+        rule.direction,
+        rule.ip_family,
+    )
+}
+
+#[test]
+fn wal_inventory_ipv6_rule_round_trips_family() {
+    let stored = WalEntry::AddRule {
+        src_id: 10,
+        dst_id: 20,
+        proto: 6,
+        action: 1,
+        ports: None,
+        direction: 0,
+        ip_family: IP_FAMILY_V6,
+    };
+    let encoded = serde_json::to_string(&stored).expect("WAL entry serializes");
+    let decoded: WalEntry = serde_json::from_str(&encoded).expect("WAL entry deserializes");
+    let mut replayed = FirewallState::default();
+
+    assert!(apply_wal_entry(&mut replayed, decoded));
+    assert_eq!(replayed.rules.len(), 1);
+    assert_eq!(rule_identity(&replayed.rules[0]), (10, 20, 6, 0, 6));
+}
+
+#[test]
+fn local_projection_legacy_ipv4_rule_infers_family() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "ipv4-source", 10, &["10.0.0.0/24"]);
+    let mut legacy = acl_rule(10, 0);
+    legacy.ip_family = IP_FAMILY_UNSPECIFIED;
+
+    let migrated = migrate_legacy_rule_families(&legacy, &state.groups)
+        .expect("one-family legacy selector must infer its family");
+
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(rule_identity(&migrated[0]), (10, 0, 6, 0, 4));
+}
+
+#[test]
+fn local_projection_legacy_any_rule_expands_both_families() {
+    let mut legacy = acl_rule(0, 0);
+    legacy.ip_family = IP_FAMILY_UNSPECIFIED;
+
+    let migrated = migrate_legacy_rule_families(&legacy, &FirewallState::default().groups)
+        .expect("legacy any/any rule must expand into both concrete families");
+    let identities = migrated.iter().map(rule_identity).collect::<Vec<_>>();
+
+    assert_eq!(identities, vec![(0, 0, 6, 0, 4), (0, 0, 6, 0, 6)]);
+}
+
+#[test]
+fn local_projection_legacy_mixed_selector_families_fail_closed_before_replay() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "ipv4-source", 10, &["10.0.0.0/24"]);
+    insert_group(&mut state, "ipv6-destination", 20, &["2001:db8::/64"]);
+    let mut legacy = acl_rule(10, 20);
+    legacy.ip_family = IP_FAMILY_UNSPECIFIED;
+    let mut replayed = Vec::new();
+
+    let error = match migrate_legacy_rule_families(&legacy, &state.groups) {
+        Ok(rules) => {
+            replayed.extend(rules);
+            panic!("mixed legacy selector families unexpectedly replayed")
+        }
+        Err(error) => error,
+    };
+
+    assert_eq!(error, "legacy_acl_rule_mixed_family");
+    assert!(replayed.is_empty());
 }
 
 fn qos_reference(name: &str, group_id: u32) -> QosRuleInfo {
