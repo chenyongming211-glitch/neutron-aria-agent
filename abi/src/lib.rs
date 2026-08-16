@@ -899,11 +899,12 @@ mod userspace_pod {
 /// are intentionally not re-exported through this module.
 pub mod userspace {
     pub use super::{
-        acl_banked_tap_id, acl_next_bank, fragment_metric_index, normalize_acl_bank,
-        normalize_acl_ingress_hook, CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6,
-        CtValue, DropKey, DropValue, FirewallConfig, FlowStatsValue, FragmentConfig,
-        FragmentContextKey4, FragmentContextKey6, FragmentContextValue, FragmentEpochValue,
-        FragmentKind, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx, KernelDropConfig,
+        acl_banked_tap_id, acl_next_bank, ct_acl_family_is_current, drop_family_is_valid,
+        fragment_metric_index, normalize_acl_bank, normalize_acl_ingress_hook,
+        policy_family_is_valid, CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue,
+        DropKey, DropValue, FirewallConfig, FlowStatsValue, FragmentConfig, FragmentContextKey4,
+        FragmentContextKey6, FragmentContextValue, FragmentEpochValue, FragmentKind,
+        GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx, KernelDropConfig,
         KernelDropFilterValue, KernelDropKey, KernelDropValue, MirrorConfig, MirrorKey,
         MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey, QosStatsValue,
         RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpValue, SslScratch, SslWriteScratch,

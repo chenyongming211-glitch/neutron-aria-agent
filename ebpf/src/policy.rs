@@ -30,12 +30,6 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
     if !policy_family_is_valid(p.ip_family) {
-        p.matched_src_id = 0;
-        p.matched_dst_id = 0;
-        p.matched_proto = 0;
-        p.matched_direction = p.direction;
-        p.flags &= !FLAG_POLICY_HIT;
-        p.drop_reason = 0;
         return XDP_PASS;
     }
 

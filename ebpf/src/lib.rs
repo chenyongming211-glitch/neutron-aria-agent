@@ -139,7 +139,11 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         (*pipe).reset_for_tc_packet(pkt_len, DIR_EGRESS);
-        (*pipe).ip_family = family;
+        (*pipe).ip_family = if (*info_ptr).is_ipv6 {
+            IP_FAMILY_V6
+        } else {
+            IP_FAMILY_V4
+        };
         match try_tc_egress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -346,7 +350,11 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         (*pipe).reset_for_tc_packet(pkt_len, DIR_INGRESS);
-        (*pipe).ip_family = family;
+        (*pipe).ip_family = if (*info_ptr).is_ipv6 {
+            IP_FAMILY_V6
+        } else {
+            IP_FAMILY_V4
+        };
         match try_tc_ingress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
