@@ -577,6 +577,48 @@ async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixLi
     Ok(listener)
 }
 
+async fn serve_acl_runtime_schema_blocked(
+    config: &Config,
+    neutron_peer_auth: NeutronPeerAuth,
+    reason: String,
+) -> Result<(), String> {
+    if !config.neutron_socket_enabled() {
+        return Err(format!(
+            "cannot publish blocked ACL runtime schema status because Neutron UDS is disabled: {}",
+            reason
+        ));
+    }
+    let listener = bind_neutron_socket(&config.neutron_socket_path, config.neutron_socket_mode)
+        .await?;
+    let socket_path = config.neutron_socket_path.clone();
+    let router = neutron_api::build_acl_runtime_schema_blocked_router(reason.clone());
+    let listener = listener.tap_io(move |stream: &mut tokio::net::UnixStream| {
+        neutron_peer_auth.audit_and_enforce(stream);
+    });
+    info!(
+        socket_path = %socket_path,
+        reason = %reason,
+        "Neutron UDS API serving blocked ACL runtime schema status"
+    );
+
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let mut sigterm = signal(SignalKind::terminate())
+        .map_err(|error| format!("create blocked-mode SIGTERM handler: {}", error))?;
+    let mut sigint = signal(SignalKind::interrupt())
+        .map_err(|error| format!("create blocked-mode SIGINT handler: {}", error))?;
+    tokio::select! {
+        result = server => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(format!("blocked Neutron UDS server stopped: {}", error)),
+                Err(error) => Err(format!("blocked Neutron UDS server task failed: {}", error)),
+            }
+        }
+        _ = sigterm.recv() => Ok(()),
+        _ = sigint.recv() => Ok(()),
+    }
+}
+
 fn align_neutron_socket_group(socket_path: &Path) -> Result<(), String> {
     let Some(parent) = socket_path.parent() else {
         return Ok(());
@@ -970,20 +1012,37 @@ async fn main() {
     if config.mode == AgentMode::NeutronManaged {
         let shared_pin_path = Path::new(&config.pin_path)
             .join(control_plane::MANAGED_SHARED_PIN_NAMESPACE);
-        let live_link_count = match acl_runtime_schema::count_managed_link_pins(&shared_pin_path) {
-            Ok(count) => count,
+        let activity = match acl_runtime_schema::inventory_managed_runtime_activity(
+            Path::new(&config.state_path),
+            &shared_pin_path,
+        ) {
+            Ok(activity) => activity,
             Err(error) => {
-                error!(error = %error, "failed to inventory ACL runtime schema links");
-                std::process::exit(1);
+                error!(error = %error, "failed to inventory ACL runtime schema activity");
+                if let Err(serve_error) = serve_acl_runtime_schema_blocked(
+                    &config,
+                    neutron_peer_auth.clone(),
+                    error,
+                )
+                .await
+                {
+                    error!(error = %serve_error, "failed to publish blocked ACL runtime schema status");
+                    std::process::exit(1);
+                }
+                return;
             }
         };
         match acl_runtime_schema::prepare_acl_runtime_schema(
             Path::new(&config.state_path),
             &shared_pin_path,
-            live_link_count,
+            activity,
         ) {
             Ok(acl_runtime_schema::AclRuntimeSchemaPreparation::Adopted) => {
-                info!(live_link_count, "adopted current ACL runtime schema");
+                info!(
+                    live_link_count = activity.link_pin_count,
+                    persisted_iface_count = activity.persisted_iface_count,
+                    "adopted current ACL runtime schema"
+                );
             }
             Ok(acl_runtime_schema::AclRuntimeSchemaPreparation::RebuiltDormant) => {
                 info!("rebuilt dormant ACL runtime schema metadata and pins");
@@ -991,10 +1050,21 @@ async fn main() {
             Err(error) => {
                 error!(
                     error = %error,
-                    live_link_count,
+                    live_link_count = activity.link_pin_count,
+                    persisted_iface_count = activity.persisted_iface_count,
                     "refusing unsafe ACL runtime schema adoption"
                 );
-                std::process::exit(1);
+                if let Err(serve_error) = serve_acl_runtime_schema_blocked(
+                    &config,
+                    neutron_peer_auth.clone(),
+                    error,
+                )
+                .await
+                {
+                    error!(error = %serve_error, "failed to publish blocked ACL runtime schema status");
+                    std::process::exit(1);
+                }
+                return;
             }
         }
     }

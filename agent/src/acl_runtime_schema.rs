@@ -8,6 +8,7 @@ pub(crate) const ACL_POLICY_KEY_SCHEMA_VERSION: u32 = 2;
 
 const ACL_RUNTIME_METADATA_FILE: &str = "acl-runtime-schema.json";
 const ACL_RUNTIME_METADATA_TEMP_FILE: &str = "acl-runtime-schema.json.tmp";
+const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +22,30 @@ pub(crate) enum AclRuntimeSchemaDisposition {
     Adopt,
     RebuildDormant,
     RefuseLive { reason: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ManagedRuntimeActivity {
+    pub(crate) link_pin_count: usize,
+    pub(crate) persisted_iface_count: usize,
+}
+
+impl ManagedRuntimeActivity {
+    fn may_be_live(self) -> bool {
+        self.link_pin_count != 0 || self.persisted_iface_count != 0
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedLiveIfacesEvidence {
+    schema_version: u32,
+    ifaces: Vec<PersistedLiveIfaceEvidence>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedLiveIfaceEvidence {
+    iface: String,
+    ifindex: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,18 +63,86 @@ pub(crate) fn current_acl_runtime_metadata() -> AclRuntimeMetadata {
 
 pub(crate) fn classify_acl_runtime_schema(
     metadata: Option<&AclRuntimeMetadata>,
-    live_link_count: usize,
+    activity: ManagedRuntimeActivity,
 ) -> AclRuntimeSchemaDisposition {
     if metadata == Some(&current_acl_runtime_metadata()) {
         return AclRuntimeSchemaDisposition::Adopt;
     }
-    if live_link_count == 0 {
+    if !activity.may_be_live() {
         AclRuntimeSchemaDisposition::RebuildDormant
     } else {
         AclRuntimeSchemaDisposition::RefuseLive {
             reason: "acl_runtime_schema_mismatch_live".to_string(),
         }
     }
+}
+
+fn persisted_live_ifaces_path(
+    base_state_path: &Path,
+    shared_pin_path: &Path,
+) -> Result<PathBuf, String> {
+    let namespace = shared_pin_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "managed runtime pin path has no UTF-8 namespace: {}",
+                shared_pin_path.display()
+            )
+        })?;
+    Ok(base_state_path.join(format!(".{}.live-ifaces.json", namespace)))
+}
+
+fn count_persisted_live_ifaces(
+    base_state_path: &Path,
+    shared_pin_path: &Path,
+) -> Result<usize, String> {
+    let path = persisted_live_ifaces_path(base_state_path, shared_pin_path)?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "read persisted live ifaces {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    };
+    let evidence: PersistedLiveIfacesEvidence = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse persisted live ifaces {}: {}", path.display(), error))?;
+    if evidence.schema_version != 1
+        && evidence.schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION
+    {
+        return Err(format!(
+            "persisted live ifaces schema {} is unsupported (expected 1 or {})",
+            evidence.schema_version, PERSISTED_LIVE_IFACES_SCHEMA_VERSION
+        ));
+    }
+    for entry in &evidence.ifaces {
+        if entry.iface.trim().is_empty() || entry.ifindex == 0 {
+            return Err(format!(
+                "persisted live ifaces {} contains an invalid interface identity",
+                path.display()
+            ));
+        }
+    }
+    Ok(evidence.ifaces.len())
+}
+
+pub(crate) fn inventory_managed_runtime_activity(
+    base_state_path: &Path,
+    shared_pin_path: &Path,
+) -> Result<ManagedRuntimeActivity, String> {
+    Ok(ManagedRuntimeActivity {
+        link_pin_count: count_managed_link_pins(shared_pin_path)?,
+        // Legacy clsact TC attachments do not have a pinnable link object. The
+        // durable interface reservation is therefore live-safety evidence, not
+        // merely bookkeeping. Unknown or malformed evidence is an error so the
+        // caller cannot classify an uncertain runtime as dormant.
+        persisted_iface_count: count_persisted_live_ifaces(base_state_path, shared_pin_path)?,
+    })
 }
 
 fn metadata_path(base_state_path: &Path) -> PathBuf {
@@ -229,10 +322,10 @@ pub(crate) fn count_managed_link_pins(shared_pin_path: &Path) -> Result<usize, S
 pub(crate) fn prepare_acl_runtime_schema(
     base_state_path: &Path,
     shared_pin_path: &Path,
-    live_link_count: usize,
+    activity: ManagedRuntimeActivity,
 ) -> Result<AclRuntimeSchemaPreparation, String> {
     let metadata = load_acl_runtime_metadata(base_state_path)?;
-    match classify_acl_runtime_schema(metadata.as_ref(), live_link_count) {
+    match classify_acl_runtime_schema(metadata.as_ref(), activity) {
         AclRuntimeSchemaDisposition::Adopt => Ok(AclRuntimeSchemaPreparation::Adopted),
         AclRuntimeSchemaDisposition::RefuseLive { reason } => Err(reason),
         AclRuntimeSchemaDisposition::RebuildDormant => {
@@ -293,7 +386,10 @@ mod tests {
         };
 
         assert_eq!(
-            classify_acl_runtime_schema(Some(&metadata), 0),
+            classify_acl_runtime_schema(
+                Some(&metadata),
+                ManagedRuntimeActivity::default(),
+            ),
             AclRuntimeSchemaDisposition::RebuildDormant
         );
     }
@@ -306,7 +402,13 @@ mod tests {
         };
 
         assert_eq!(
-            classify_acl_runtime_schema(Some(&metadata), 1),
+            classify_acl_runtime_schema(
+                Some(&metadata),
+                ManagedRuntimeActivity {
+                    link_pin_count: 1,
+                    persisted_iface_count: 0,
+                },
+            ),
             AclRuntimeSchemaDisposition::RefuseLive {
                 reason: "acl_runtime_schema_mismatch_live".to_string(),
             }
@@ -335,14 +437,13 @@ mod tests {
         assert_eq!(activity.link_pin_count, 0);
         assert_eq!(activity.persisted_iface_count, 1);
         assert_eq!(
-            classify_acl_runtime_schema_activity(Some(&old), activity),
+            classify_acl_runtime_schema(Some(&old), activity),
             AclRuntimeSchemaDisposition::RefuseLive {
                 reason: "acl_runtime_schema_mismatch_live".to_string(),
             }
         );
         assert_eq!(
-            prepare_acl_runtime_schema_with_activity(&state_path, &pin_path, activity)
-                .unwrap_err(),
+            prepare_acl_runtime_schema(&state_path, &pin_path, activity).unwrap_err(),
             "acl_runtime_schema_mismatch_live"
         );
         assert!(pin_path.exists(), "live legacy TC pins must not be removed");
@@ -380,7 +481,13 @@ mod tests {
         };
 
         assert_eq!(
-            classify_acl_runtime_schema(Some(&metadata), 3),
+            classify_acl_runtime_schema(
+                Some(&metadata),
+                ManagedRuntimeActivity {
+                    link_pin_count: 3,
+                    persisted_iface_count: 0,
+                },
+            ),
             AclRuntimeSchemaDisposition::Adopt
         );
     }
@@ -405,7 +512,10 @@ mod tests {
             Some(metadata.clone())
         );
         assert_eq!(
-            classify_acl_runtime_schema(Some(&metadata), 0),
+            classify_acl_runtime_schema(
+                Some(&metadata),
+                ManagedRuntimeActivity::default(),
+            ),
             AclRuntimeSchemaDisposition::Adopt
         );
 
@@ -428,7 +538,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            prepare_acl_runtime_schema(&state_path, &pin_path, 0).unwrap(),
+            prepare_acl_runtime_schema(
+                &state_path,
+                &pin_path,
+                ManagedRuntimeActivity::default(),
+            )
+            .unwrap(),
             AclRuntimeSchemaPreparation::RebuiltDormant
         );
         assert!(!pin_path.exists());
@@ -437,7 +552,12 @@ mod tests {
             Some(current_acl_runtime_metadata())
         );
         assert_eq!(
-            prepare_acl_runtime_schema(&state_path, &pin_path, 0).unwrap(),
+            prepare_acl_runtime_schema(
+                &state_path,
+                &pin_path,
+                ManagedRuntimeActivity::default(),
+            )
+            .unwrap(),
             AclRuntimeSchemaPreparation::Adopted
         );
 
@@ -456,7 +576,15 @@ mod tests {
         };
         publish_acl_runtime_metadata(&state_path, &old).unwrap();
 
-        let error = prepare_acl_runtime_schema(&state_path, &pin_path, 1).unwrap_err();
+        let error = prepare_acl_runtime_schema(
+            &state_path,
+            &pin_path,
+            ManagedRuntimeActivity {
+                link_pin_count: 1,
+                persisted_iface_count: 0,
+            },
+        )
+        .unwrap_err();
 
         assert_eq!(error, "acl_runtime_schema_mismatch_live");
         assert!(pin_path.join("tap0_tc_ingress_link").exists());

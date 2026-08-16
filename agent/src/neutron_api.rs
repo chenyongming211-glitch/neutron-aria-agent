@@ -1123,6 +1123,95 @@ pub(crate) struct NeutronRouterRuntime {
     pub(crate) background: NeutronBackgroundTasks,
 }
 
+#[derive(Clone)]
+struct AclRuntimeSchemaBlockedState {
+    reason: String,
+}
+
+fn acl_runtime_schema_blocked_status(reason: String) -> NeutronStatusV1Response {
+    NeutronStatusV1Response {
+        status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
+        status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
+        transaction_state: NeutronStatusTransactionState::Blocked,
+        overall_readiness: NeutronStatusOverallReadiness::Blocked,
+        required_action: NeutronStatusRequiredAction::Operator,
+        recovery_cause: None,
+        last_classified_generation: 0,
+        generation: 0,
+        accepted_generation: 0,
+        applied_generation: 0,
+        pending_generation: None,
+        desired_hash: None,
+        applied_desired_hash: None,
+        wal_status: reason.clone(),
+        wal_replay_failures: 0,
+        authority_state: reason,
+        managed_ports: Vec::new(),
+        port_statuses: Vec::new(),
+        active_instances: Vec::new(),
+        counters: None,
+    }
+}
+
+async fn get_acl_runtime_schema_blocked_status(
+    State(state): State<AclRuntimeSchemaBlockedState>,
+) -> impl IntoResponse {
+    Json(acl_runtime_schema_blocked_status(state.reason))
+}
+
+async fn get_acl_runtime_schema_blocked_readiness(
+    State(state): State<AclRuntimeSchemaBlockedState>,
+) -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(acl_runtime_schema_blocked_status(state.reason)),
+    )
+}
+
+async fn reject_acl_runtime_schema_blocked_mutation(
+    State(state): State<AclRuntimeSchemaBlockedState>,
+) -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": state.reason,
+            "details": "ACL runtime schema requires operator intervention before mutations can resume",
+        })),
+    )
+}
+
+pub(crate) fn build_acl_runtime_schema_blocked_router(reason: String) -> Router {
+    let state = AclRuntimeSchemaBlockedState { reason };
+    Router::new()
+        .route("/readyz", get(get_acl_runtime_schema_blocked_readiness))
+        .route(
+            "/api/v1/neutron/capabilities",
+            get(get_neutron_capabilities),
+        )
+        .route(
+            "/api/v1/neutron/status",
+            get(get_acl_runtime_schema_blocked_status),
+        )
+        .route(
+            "/api/v1/neutron/snapshot/recover-pending",
+            post(reject_acl_runtime_schema_blocked_mutation),
+        )
+        .route(
+            "/api/v1/neutron/snapshot",
+            put(reject_acl_runtime_schema_blocked_mutation),
+        )
+        .route(
+            "/api/v1/neutron/ports/{port_id}/snapshot",
+            put(reject_acl_runtime_schema_blocked_mutation),
+        )
+        .route(
+            "/api/v1/neutron/ports/{port_id}",
+            delete(reject_acl_runtime_schema_blocked_mutation),
+        )
+        .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
+        .with_state(state)
+}
+
 pub(crate) fn build_router(
     registry: Arc<TapRegistry>,
     control_plane: Arc<ControlPlane>,

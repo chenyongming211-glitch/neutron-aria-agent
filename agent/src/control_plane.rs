@@ -1848,6 +1848,15 @@ fn managed_acl_publication_steps(
     steps
 }
 
+fn execute_acl_family_staging<F>(mut stage_family: F) -> Result<(), ControlPlaneError>
+where
+    F: FnMut(u8) -> Result<(), ControlPlaneError>,
+{
+    stage_family(IP_FAMILY_V4)?;
+    stage_family(IP_FAMILY_V6)?;
+    Ok(())
+}
+
 fn managed_general_projection_mutations(
     committed: &aria_core::ebpf_ops::ManagedGroupProjection,
     proposed: &aria_core::ebpf_ops::ManagedGroupProjection,
@@ -3890,44 +3899,60 @@ impl ControlPlane {
         aria_core::ebpf_ops::scrub_acl_bank(runtime, bank)
             .map_err(ControlPlaneError::KernelError)?;
 
-        for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {
-            aria_core::ebpf_ops::add_acl_network_in_bank(
-                direction, &cidr, group_id, bank, runtime, ebpf_path,
-            )
-            .map_err(|error| {
-                ControlPlaneError::KernelError(format!(
-                    "stage shadow bank {} {} group {} cidr {}: {}",
-                    bank, direction, group_id, cidr, error
-                ))
-            })?;
-        }
+        let network_plan = managed_acl_shadow_network_plan(projection);
+        execute_acl_family_staging(|family| {
+            for (direction, cidr, group_id) in &network_plan {
+                let cidr_family = if cidr.contains(':') {
+                    IP_FAMILY_V6
+                } else {
+                    IP_FAMILY_V4
+                };
+                if cidr_family != family {
+                    continue;
+                }
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    direction, cidr, *group_id, bank, runtime, ebpf_path,
+                )
+                .map_err(|error| {
+                    ControlPlaneError::KernelError(format!(
+                        "stage shadow bank {} family {} {} group {} cidr {}: {}",
+                        bank, family, direction, group_id, cidr, error
+                    ))
+                })?;
+            }
 
-        for rule in &state.rules {
-            let key = Self::owned_acl_policy_key_from_rule(state, rule);
-            let is_new_port_set = new_port_sets_by_key.get(&key).copied().unwrap_or(false);
-            aria_core::ebpf_ops::add_policy_in_bank(
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.action,
-                rule.ports.as_deref(),
-                rule.bitmap_idx,
-                is_new_port_set,
-                rule.direction,
-                bank,
-                rule.ip_family,
-                runtime,
-                ebpf_path,
-            )
-            .map_err(|e| {
-                ControlPlaneError::KernelError(format!(
-                    "stage shadow bank {} policy src={} dst={} proto={} direction={}: {}",
-                    bank, rule.src_group_id, rule.dst_group_id, rule.proto, rule.direction, e
-                ))
-            })?;
-        }
-
-        Ok(())
+            for rule in state.rules.iter().filter(|rule| rule.ip_family == family) {
+                let key = Self::owned_acl_policy_key_from_rule(state, rule);
+                let is_new_port_set = new_port_sets_by_key.get(&key).copied().unwrap_or(false);
+                aria_core::ebpf_ops::add_policy_in_bank(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.action,
+                    rule.ports.as_deref(),
+                    rule.bitmap_idx,
+                    is_new_port_set,
+                    rule.direction,
+                    bank,
+                    rule.ip_family,
+                    runtime,
+                    ebpf_path,
+                )
+                .map_err(|e| {
+                    ControlPlaneError::KernelError(format!(
+                        "stage shadow bank {} family {} policy src={} dst={} proto={} direction={}: {}",
+                        bank,
+                        family,
+                        rule.src_group_id,
+                        rule.dst_group_id,
+                        rule.proto,
+                        rule.direction,
+                        e
+                    ))
+                })?;
+            }
+            Ok(())
+        })
     }
 
     fn stage_standalone_acl_shadow_bank(
