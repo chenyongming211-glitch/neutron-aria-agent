@@ -1,3 +1,178 @@
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+pub(crate) const ACL_RUNTIME_SCHEMA_VERSION: u32 = 3;
+pub(crate) const ACL_POLICY_KEY_SCHEMA_VERSION: u32 = 2;
+
+const ACL_RUNTIME_METADATA_FILE: &str = "acl-runtime-schema.json";
+const ACL_RUNTIME_METADATA_TEMP_FILE: &str = "acl-runtime-schema.json.tmp";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AclRuntimeMetadata {
+    pub(crate) runtime_schema: u32,
+    pub(crate) acl_policy_key_schema: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AclRuntimeSchemaDisposition {
+    Adopt,
+    RebuildDormant,
+    RefuseLive { reason: String },
+}
+
+pub(crate) fn current_acl_runtime_metadata() -> AclRuntimeMetadata {
+    AclRuntimeMetadata {
+        runtime_schema: ACL_RUNTIME_SCHEMA_VERSION,
+        acl_policy_key_schema: ACL_POLICY_KEY_SCHEMA_VERSION,
+    }
+}
+
+pub(crate) fn classify_acl_runtime_schema(
+    metadata: Option<&AclRuntimeMetadata>,
+    live_link_count: usize,
+) -> AclRuntimeSchemaDisposition {
+    if metadata == Some(&current_acl_runtime_metadata()) {
+        return AclRuntimeSchemaDisposition::Adopt;
+    }
+    if live_link_count == 0 {
+        AclRuntimeSchemaDisposition::RebuildDormant
+    } else {
+        AclRuntimeSchemaDisposition::RefuseLive {
+            reason: "acl_runtime_schema_mismatch_live".to_string(),
+        }
+    }
+}
+
+fn metadata_path(base_state_path: &Path) -> PathBuf {
+    base_state_path.join(ACL_RUNTIME_METADATA_FILE)
+}
+
+fn metadata_temp_path(base_state_path: &Path) -> PathBuf {
+    base_state_path.join(ACL_RUNTIME_METADATA_TEMP_FILE)
+}
+
+pub(crate) fn load_acl_runtime_metadata(
+    base_state_path: &Path,
+) -> Result<Option<AclRuntimeMetadata>, String> {
+    let path = metadata_path(base_state_path);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(format!(
+                "ACL runtime metadata path is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "inspect ACL runtime metadata {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    };
+    if metadata.len() == 0 {
+        return Err(format!("ACL runtime metadata is empty: {}", path.display()));
+    }
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("read ACL runtime metadata {}: {}", path.display(), error))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| format!("parse ACL runtime metadata {}: {}", path.display(), error))
+}
+
+fn remove_stale_metadata_temp(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path)
+            .map_err(|error| format!("remove stale ACL runtime metadata {}: {}", path.display(), error)),
+        Ok(_) => Err(format!(
+            "stale ACL runtime metadata path is not a regular file: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "inspect stale ACL runtime metadata {}: {}",
+            path.display(),
+            error
+        )),
+    }
+}
+
+pub(crate) fn publish_acl_runtime_metadata(
+    base_state_path: &Path,
+    metadata: &AclRuntimeMetadata,
+) -> Result<(), String> {
+    fs::create_dir_all(base_state_path).map_err(|error| {
+        format!(
+            "create ACL runtime metadata directory {}: {}",
+            base_state_path.display(),
+            error
+        )
+    })?;
+    let path = metadata_path(base_state_path);
+    let temp_path = metadata_temp_path(base_state_path);
+    remove_stale_metadata_temp(&temp_path)?;
+
+    let mut bytes = serde_json::to_vec(metadata)
+        .map_err(|error| format!("serialize ACL runtime metadata: {}", error))?;
+    bytes.push(b'\n');
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            format!(
+                "create ACL runtime metadata {}: {}",
+                temp_path.display(),
+                error
+            )
+        })?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&bytes).map_err(|error| {
+        format!(
+            "write ACL runtime metadata {}: {}",
+            temp_path.display(),
+            error
+        )
+    })?;
+    writer.flush().map_err(|error| {
+        format!(
+            "flush ACL runtime metadata {}: {}",
+            temp_path.display(),
+            error
+        )
+    })?;
+    writer.get_ref().sync_all().map_err(|error| {
+        format!(
+            "fsync ACL runtime metadata {}: {}",
+            temp_path.display(),
+            error
+        )
+    })?;
+    drop(writer);
+
+    fs::rename(&temp_path, &path).map_err(|error| {
+        format!(
+            "publish ACL runtime metadata {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    File::open(base_state_path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "fsync ACL runtime metadata directory {}: {}",
+                base_state_path.display(),
+                error
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
