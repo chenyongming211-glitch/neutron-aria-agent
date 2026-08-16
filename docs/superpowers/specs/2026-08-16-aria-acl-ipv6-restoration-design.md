@@ -3,8 +3,9 @@
 **Status:** Tasks 1-4 implemented in source. The current ACL-only product uses
 the bounded monolithic TC artifact with the approved 480-byte temporary ceiling
 defined by
-`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. Hosted GREEN
-and field evidence remain pending.
+`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. Exact-head
+hosted Build `31940674926` is GREEN; target-kernel and OpenStack field evidence
+remain pending.
 
 **Scope:** restore complete IPv6 support to the existing Neutron-managed and
 standalone Aria ACL product while preserving failure boundaries, Python 2.7

@@ -2,8 +2,8 @@
 
 **Date:** 2026-08-16
 
-**Status:** approved product constraint; implementation and hosted verification
-in progress; target-kernel evidence pending
+**Status:** approved product constraint; source implementation and exact-head
+hosted verification complete; target-kernel evidence pending
 
 ## 1. Decision
 
@@ -82,6 +82,20 @@ The current generation is accepted only when all of the following hold:
 
 Items 5 through 8 remain `deferred/pending` until executed in the user's test
 environment. Hosted CI must not report them as field PASS.
+
+Exact-head commit `0eafc85c14e7cdad2ad1f3e7a2ba4752a3c2f7af` passed Build
+[`31940674926`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31940674926):
+
+- `rust-build` job `95149272171` passed warning-denied eBPF, userspace and
+  agent builds, the 480-byte linked stack gate, static verification and release
+  packaging;
+- `rust-behavior` job `95149272257` passed the selected IPv6/family behavior
+  tests;
+- fast contracts, Neutron database contracts and clean-package installation
+  all passed.
+
+This is source and hosted-artifact evidence only. It does not close the exact
+4.18 verifier/load or OpenStack traffic rows.
 
 ## 5. Later Product Generation
 
