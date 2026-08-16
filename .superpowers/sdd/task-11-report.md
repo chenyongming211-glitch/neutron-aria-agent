@@ -2,10 +2,11 @@
 
 ## Status
 
-**DONE_WITH_CONCERNS.** The Task 11 implementation and the recovered public
-standalone family contract are committed on `main`; exact-head hosted Build
-`31956696938` is green. Retrieve its authenticated URL with
-`gh run view 31956696938 --json url --jq .url`. OpenStack and EL 4.18 field validation was not available and remains
+**DONE_WITH_CONCERNS.** The Task 11 implementation head is
+`a0101d3422085cd6439d051d0c10ced2536bcae3`; its exact-head hosted Build
+workflow-dispatch `31959117279` and push `31959108117` are green. Retrieve
+authenticated URLs with `gh run view <run-id> --json url --jq .url`. OpenStack
+and EL 4.18 field validation was not available and remains
 strictly `deferred/pending`; this report makes no field PASS claim.
 
 ## Commits
@@ -16,8 +17,13 @@ strictly `deferred/pending`; this report makes no field PASS claim.
 - `47d32a1` — hosted RED for standalone `ethertype=any` expansion.
 - `421aa02101727118e83448717b9d3d0bc9f17ebe` — public standalone IPv4/IPv6/any
   family contract, atomic expansion/deletion, explicit output, and CLI option.
-- This documentation-only closure commit — links the exact-head CI and records
-  this report.
+- `802c95403efc0f425c3fd3cbfd63c0a700238062` — review RED contracts.
+- `4532e696866d80acef9570fa4d0a8b2c2f87ca31` — first review GREEN.
+- `45dd1ab27faa12d9d29eb9e505ae71d25eab6c1e` — standalone field-record RED.
+- `2dcd36a5bb526bef191ff8858fdb4b0028033bce` — field-record and ICMP GREEN.
+- `2a48685820e4678237377109d1325ee11ea93106` — obsolete path removal GREEN.
+- `cf31ea9c38c5d309d95127f786de994c24d9c7c7` — fragment/config RED.
+- `a0101d3422085cd6439d051d0c10ced2536bcae3` — final reviewed GREEN.
 
 ## RED evidence
 
@@ -33,6 +39,15 @@ with two `E0559` errors: `StandaloneAclMutation::UpsertPolicy`
 and `DeletePolicy` did not contain `ip_families`. The run's fast contracts,
 Rust build, DB contracts, and clean install jobs were green. This isolated the
 missing behavior before the GREEN implementation.
+
+Review RED `802c954` used workflow-dispatch `31957581408`: trusted-gate fast
+job `95190458851` rejected the fragment early-return, and Rust behavior job
+`95190484772` failed only because `standalone_policy_family_protocols` was
+missing. The focused local RED for `45dd1ab` failed as expected because the
+standalone API expansion function wrote two conflicting `dual-stack` field
+rows. The focused local RED for `cf31ea9` failed as expected because fragment
+IPv6 policy JSON lacked `ethertype` and `counters_report_enabled` was absent
+from `[agent]` when parsed with `ConfigParser`.
 
 ## GREEN local checks
 
@@ -57,21 +72,33 @@ repository's no-local-Cargo rule; it was stopped immediately, not repeated,
 and is not used as Rust verification evidence. Hosted CI is the verification
 source for Rust/build/package work.
 
+Final reviewed local static results (no local Cargo) were:
+
+```text
+python3 -m unittest ci.test_ci001_trusted_gates.TrustedGateContractTests.test_standalone_fragment_fixture_and_recovery_are_family_qualified ci.test_ci001_trusted_gates.TrustedGateContractTests.test_packaged_counter_default_is_parsed_from_agent_section PASS (2 tests)
+bash -n deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh        PASS
+python3 ci/check_tc_acl_datapath.py --self-test                      PASS (16 rejection, 4 acceptance)
+python3 ci/check_standalone_tc_acl_smoke.py --self-test              PASS
+git diff --check                                                     PASS
+```
+
 ## Exact-head hosted CI
 
-`421aa02101727118e83448717b9d3d0bc9f17ebe` was verified by exact-head
-workflow-dispatch run `31956696938` (retrieve its authenticated URL with
-`gh run view 31956696938 --json url --jq .url`):
+`a0101d3422085cd6439d051d0c10ced2536bcae3` was verified by exact-head
+workflow-dispatch run `31959117279` (retrieve its authenticated URL with
+`gh run view 31959117279 --json url --jq .url`):
 
-- fast-contracts job `95188308650`: success.
-- neutron-agent-clean-install job `95188308654`: success.
-- neutron-db-contracts job `95188308672`: success.
-- rust-behavior job `95188333131`: success.
-- rust-build job `95188333164`: success with `RUSTFLAGS=-D warnings`; its log shows the eBPF/userspace builds, stack-budget report, Kolla Stage 2 bundle, release archive, manifest, and checksums.
+- fast-contracts job `95194274212`: success.
+- neutron-agent-clean-install job `95194274169`: success.
+- neutron-db-contracts job `95194274223`: success.
+- rust-behavior job `95194298441`: success.
+- rust-build job `95194298501`: success with `RUSTFLAGS=-D warnings`; its log shows the eBPF/userspace builds, stack-budget report, Kolla Stage 2 bundle, release archive, manifest, and checksums.
 
 The separate `release` job was skipped because artifact publishing was disabled
 for this non-tag dispatch; packaging itself ran in `rust-build`. The same SHA's
-push-triggered run `31956689529` is also green, but the dispatch run above is
+push-triggered run `31959108117` is also green (fast `95194249123`, install
+`95194249172`, DB `95194249209`, Rust behavior `95194272736`, Rust build
+`95194272690`), but the dispatch run above is
 the designated exact-head evidence.
 
 ## Requirement mapping and self-audit
@@ -81,9 +108,10 @@ the designated exact-head evidence.
 | Fixed CI discovery | Non-zero `acl_family_`, `acl_ipv6_`, `neutron_acl_ipv6_`, `acl_runtime_schema_`, `standalone_acl_any_`, plus high-value Python behavior IDs are enforced by `check_neutron_stage1.py` and trusted-gate tests. |
 | Static smoke structure | Both entrypoints expose the eight required case names and the required evidence schema; their checker does not claim traffic PASS. |
 | Managed dual-stack smoke | The managed smoke makes separate IPv4/IPv6 ingress/egress rules, tests both directions when prerequisites exist, fails on zero managed ports, and records command/verdict/interface/ifindex/kernel/version/status/counter evidence. |
-| Standalone `any` | The smoke itself uses the product REST API and GETs two explicit family entries; public Add/Delete/Batch accept omitted IPv4, IPv4, IPv6, and `any`; List/WithStats explicitly emit `ethertype`; CLI exposes optional `--ethertype`. |
-| Atomicity and identity | `any` creates/deletes IPv4 and IPv6 keys as one mutation. Delete prevalidates every requested direction/family, and rejected mutations remain in the unpublished clone. Family is in rule identity and stats lookup. |
-| Packaging/docs/defaults | Exact-head rust-build assembles the package; documentation retains schema/rebuild/rollback/default-off contracts and links hosted CI. |
+| Standalone `any` | The smoke itself uses the product REST API, filters only its exact created entries, verifies one IPv4 plus one IPv6, explicitly deletes each family, and leaves the eight traffic cases deferred; Add/Delete/Batch accept omitted IPv4, IPv4, IPv6, and `any`; List/WithStats explicitly emit `ethertype`; CLI exposes optional `--ethertype`. |
+| Atomicity and identity | Family-aware protocol expansion maps ICMP correctly (v4=1, v6=58), rejects conflicting family/protocol pairs, and prevalidates all `any` keys. A rejected delete preserves the serialized durable preimage; shared port bitmap refcount is tested 2→1→release. |
+| Checker/smoke review closure | The fragment-aware datapath wrapper runs its three added mutations plus the preserved 13 legacy mutations. Fragment fixture POST and recovery assertions use explicit IPv4/IPv6 ethertype five-tuples. Managed PASS requires family-qualified ingress and egress counter deltas. |
+| Packaging/docs/defaults | Exact-head rust-build assembles the package; `counters_report_enabled=false` is parsed from `[agent]`; documentation retains schema/rebuild/rollback/default-off contracts and links hosted CI. |
 
 The datapath checker remains a real source-contract gate: its fragment-aware
 wrapper and three mutation tests reject an unsafe CT-hit guard, context-install,
