@@ -1,8 +1,8 @@
 # Aria ACL IPv6 Restoration Design
 
 **Status:** Tasks 1-11 implementation complete; implementation head
-`a0101d3422085cd6439d051d0c10ced2536bcae3` exact-head hosted Build
-workflow-dispatch `31959117279` and push `31959108117` are GREEN (retrieve an
+`87965bd170118ea879d3c47bacb241c38e7a2db3` exact-head hosted Build
+workflow-dispatch `31959923011` and push `31959913784` are GREEN (retrieve an
 authenticated URL with `gh run view <run-id> --json url --jq .url`). The current ACL-only product uses
 the bounded monolithic TC artifact with the approved 480-byte temporary ceiling
 defined by
@@ -667,14 +667,15 @@ IPv6 ACL restoration is complete when all of the following are true:
 ## 18. Task 11 integration status
 
 Status: **implementation complete; hosted CI linked; field evidence pending**.
-Implementation head `a0101d3422085cd6439d051d0c10ced2536bcae3` exact-head
-hosted workflow-dispatch `31959117279` is GREEN (retrieve its authenticated
-URL with `gh run view 31959117279 --json url --jq .url`; fast-contracts, clean
+Implementation head `87965bd170118ea879d3c47bacb241c38e7a2db3` exact-head
+hosted workflow-dispatch `31959923011` is GREEN (retrieve its authenticated
+URL with `gh run view 31959923011 --json url --jq .url`; fast-contracts, clean
 install, DB contracts, Rust behavior, and
 warning-denied Rust build). Its `rust-build` job also assembled the Kolla bundle,
 release archive, manifest, and checksums; the separate artifact-publishing
 `release` job was correctly skipped by its publish condition. Same-head push
-`31959108117` is also GREEN. Fixed CI
+`31959913784` is also GREEN. Final broad review approved this head with no
+Critical, Important, or Minor findings. Fixed CI
 discovers non-zero `acl_family_`, `acl_ipv6_`, `neutron_acl_ipv6_`, and
 `acl_runtime_schema_` Rust filters plus the high-value Python family,
 migration, and counters behaviors. Smoke entrypoints expose case names and
