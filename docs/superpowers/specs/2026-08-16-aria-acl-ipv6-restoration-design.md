@@ -655,7 +655,7 @@ IPv6 ACL restoration is complete when all of the following are true:
 - no family-zero policy can be inserted or replayed;
 - legacy committed and pending state migrates idempotently before runtime
   materialization;
-- runtime schema 3 plus tail-call pipeline schema 1 upgrades and symmetric
+- runtime schema 3/policy-key schema 2 upgrades and symmetric
   rollback refuse unsafe live-map or mixed-program-generation reuse;
 - the Python/Rust mixed-version rollout is contract-tested;
 - all applicable hosted CI gates pass at the exact implementation head;

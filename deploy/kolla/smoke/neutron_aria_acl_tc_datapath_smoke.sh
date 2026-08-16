@@ -12,7 +12,7 @@ mkdir -p "${WORK_DIR}"
 # Field matrix records are deliberately distinct from this script's local
 # cleanup result.  They are deferred until a real OpenStack/4.18 run supplies
 # the matching topology; status="deferred/pending" is never a PASS.
-FIELD_EVIDENCE_STATUS="${FIELD_EVIDENCE_STATUS:-deferred/pending}"
+FIELD_EVIDENCE_STATUS="deferred/pending"
 FIELD_DUAL_STACK_SMOKE="${FIELD_DUAL_STACK_SMOKE:-0}"
 VM_IPV4="${VM_IPV4:-}"
 VM_IPV6="${VM_IPV6:-}"
@@ -43,6 +43,14 @@ if status == "pass":
         assert value not in ("", "unknown", "pending capture"),(name,value)
     assert os.path.isfile(os.environ["STATUS_SNAPSHOT"])
     assert os.path.isfile(os.environ["COUNTER_SNAPSHOT"])
+    observed_verdict=os.environ["OBSERVED_VERDICT"].strip().lower()
+    assert observed_verdict != "not run"
+    assert observed_verdict
+    assert "prerequisite" not in os.environ["CASE_COMMAND"].lower()
+    with open(os.environ["STATUS_SNAPSHOT"], encoding="utf-8") as handle:
+        assert isinstance(json.load(handle), (dict, list))
+    with open(os.environ["COUNTER_SNAPSHOT"], encoding="utf-8") as handle:
+        assert handle.read().strip()
 print(json.dumps({
     "case": os.environ["CASE_NAME"], "command": os.environ["CASE_COMMAND"],
     "expected_verdict": os.environ["EXPECTED_VERDICT"], "observed_verdict": os.environ["OBSERVED_VERDICT"],
@@ -73,18 +81,25 @@ create_field_family_rule() {
 }
 
 run_field_family_traffic() {
-    local case_name="$1" family_flag="$2" destination="$3" protocol="$4" source label
+    local case_name="$1" family_flag="$2" destination="$3" protocol="$4" source label metric_family ingress_before ingress_after egress_before egress_after
     label="field-${case_name}"
+    metric_family="$([ "${family_flag}" = -4 ] && printf ipv4 || printf ipv6)"
     source="$(ip "${family_flag}" route get "${destination}" | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')"
     [ -n "${source}" ] || die "${case_name} has no routed source for ${destination}"
     set_trace_filter "${source}" "${destination}"
     capture "${label}-before"
+    ingress_before="$(metric_family_hook_total "${WORK_DIR}/${label}-before-metrics.prom" tc_ingress "${metric_family}")"
+    egress_before="$(metric_family_hook_total "${WORK_DIR}/${label}-before-metrics.prom" tc_egress "${metric_family}")"
     ping "${family_flag}" -c 2 -W 1 -s "${PING_PAYLOAD_BYTES}" "${destination}" >"${WORK_DIR}/${label}-traffic.log" 2>&1 \
         || die "${case_name} VM traffic failed"
     capture "${label}-after"
+    ingress_after="$(metric_family_hook_total "${WORK_DIR}/${label}-after-metrics.prom" tc_ingress "${metric_family}")"
+    egress_after="$(metric_family_hook_total "${WORK_DIR}/${label}-after-metrics.prom" tc_egress "${metric_family}")"
+    [ $((ingress_after - ingress_before)) -ge 1 ] || die "${case_name} did not prove ${metric_family} ingress counter delta"
+    [ $((egress_after - egress_before)) -ge 1 ] || die "${case_name} did not prove ${metric_family} egress counter delta"
     FIELD_STATUS_SNAPSHOT="${WORK_DIR}/${label}-after-neutron-status.json"
     FIELD_COUNTER_SNAPSHOT="${WORK_DIR}/${label}-after-metrics.prom"
-    record_field_case "${case_name}" "ping ${family_flag} ${destination}" "allow in both TC directions" "allow observed" "pass"
+    record_field_case "${case_name}" "ping ${family_flag} ${destination}" "allow with family-qualified ingress and egress counter deltas" "allow observed with ingress+egress counters" "pass"
 }
 
 run_dual_stack_field_smoke() {
@@ -449,6 +464,23 @@ for line in open(path,encoding="utf-8"):
     labels=dict(re.findall(r'(\w+)="([^"]*)"',line))
     if (labels.get("instance")==instance and labels.get("hook")==hook and
             labels.get("reason")==reason and labels.get("family")==family):
+        total += int(float(line.rsplit(None,1)[1]))
+print(total)
+PY
+}
+
+metric_family_hook_total() {
+    local file="$1" hook="$2" family="$3"
+    python3 - "${file}" "${EXPECTED_IFNAME}" "${hook}" "${family}" <<'PY'
+import re,sys
+path,instance,hook,family=sys.argv[1:]
+total=0
+for line in open(path,encoding="utf-8"):
+    if not line.startswith("aria_ct_contract_packets_total{"):
+        continue
+    labels=dict(re.findall(r'(\w+)="([^"]*)"',line))
+    if (labels.get("instance")==instance and labels.get("hook")==hook and
+            labels.get("family")==family):
         total += int(float(line.rsplit(None,1)[1]))
 print(total)
 PY
@@ -1349,9 +1381,9 @@ PY
 }
 
 create_fragment_rule() {
-    local direction="$1" port="$2" priority="$3" label="$4" body id
-    body="$(printf '{\"aria_acl_rule\":{\"policy_id\":\"%s\",\"direction\":\"%s\",\"priority\":%s,\"action\":\"allow\",\"protocol\":\"udp\",\"dst_port_min\":%s,\"dst_port_max\":%s}}' \
-        "${policy_id}" "${direction}" "${priority}" "${port}" "${port}")"
+    local direction="$1" port="$2" priority="$3" label="$4" ethertype="${5:-IPv4}" body id
+    body="$(printf '{\"aria_acl_rule\":{\"policy_id\":\"%s\",\"direction\":\"%s\",\"priority\":%s,\"action\":\"allow\",\"protocol\":\"udp\",\"ethertype\":\"%s\",\"dst_port_min\":%s,\"dst_port_max\":%s}}' \
+        "${policy_id}" "${direction}" "${priority}" "${ethertype}" "${port}" "${port}")"
     id="$(curl_body POST aria-acl-rules "${body}" | tee "${WORK_DIR}/${label}.json" | json_field aria_acl_rule.id)"
     [ -n "${id}" ] || die "failed to create fragment ${direction} UDP/${port} rule"
     rule_ids+=("${id}")
@@ -1411,8 +1443,10 @@ run_fragment_tracking_field_smoke() {
     FRAGMENT_HOST_MAC="$(cat "/sys/class/net/${EXPECTED_IFNAME}/address")"
     FRAGMENT_TOKEN_SEED="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
     FRAGMENT_ID_COUNTER=0
-    create_fragment_rule ingress 53 300 fragment-rule-ingress-udp53
-    create_fragment_rule egress 53 300 fragment-rule-egress-udp53
+    create_fragment_rule ingress 53 300 fragment-rule-ingress-udp53-v4 IPv4
+    create_fragment_rule egress 53 300 fragment-rule-egress-udp53-v4 IPv4
+    create_fragment_rule ingress 53 300 fragment-rule-ingress-udp53-v6 IPv6
+    create_fragment_rule egress 53 300 fragment-rule-egress-udp53-v6 IPv6
     run_full_resync >"${WORK_DIR}/fragment-policy-full-resync.log"
     wait_port_enforced || die "fragment UDP/53 policy did not become enforced"
     for family in ipv4 ipv6; do

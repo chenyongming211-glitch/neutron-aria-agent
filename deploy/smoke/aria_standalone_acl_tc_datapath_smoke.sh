@@ -9,7 +9,7 @@ case "${MODE}" in system|tap) ;; *) echo "ERROR: MODE must be system or tap" >&2
 
 # These names and records are a field-matrix interface.  They do not claim
 # traffic success: absent prerequisites use status="deferred/pending".
-FIELD_EVIDENCE_STATUS="${FIELD_EVIDENCE_STATUS:-deferred/pending}"
+FIELD_EVIDENCE_STATUS="deferred/pending"
 STANDALONE_ETHERTYPE_ANY_SMOKE="${STANDALONE_ETHERTYPE_ANY_SMOKE:-0}"
 CASE_IPV4_ONLY="ipv4-only"
 CASE_IPV6_ONLY="ipv6-only"
@@ -113,6 +113,14 @@ if status == "pass":
         assert value not in ("", "unknown", "pending capture"),(name,value)
     assert os.path.isfile(os.environ["STATUS_SNAPSHOT"])
     assert os.path.isfile(os.environ["COUNTER_SNAPSHOT"])
+    observed_verdict=os.environ["OBSERVED_VERDICT"].strip().lower()
+    assert observed_verdict != "not run"
+    assert observed_verdict
+    assert "prerequisite" not in os.environ["CASE_COMMAND"].lower()
+    with open(os.environ["STATUS_SNAPSHOT"], encoding="utf-8") as handle:
+        assert isinstance(json.load(handle), (dict, list))
+    with open(os.environ["COUNTER_SNAPSHOT"], encoding="utf-8") as handle:
+        assert handle.read().strip()
 print(json.dumps({
     "case": os.environ["CASE_NAME"], "command": os.environ["CASE_COMMAND"],
     "expected_verdict": os.environ["EXPECTED_VERDICT"], "observed_verdict": os.environ["OBSERVED_VERDICT"],
@@ -144,22 +152,38 @@ run_ethertype_any_expansion_smoke() {
     # Exercise the product's public standalone API directly.  A caller cannot
     # substitute a command or a hand-written result for this expansion check.
     curl --fail -sS -H 'Content-Type: application/json' \
-        -d '{"src_group":"any","dst_group":"any","proto":"icmp","action":"allow","direction":"ingress","ports":null,"ethertype":"any"}' \
+        -d '{"src_group":"any","dst_group":"any","proto":"tcp","action":"allow","direction":"ingress","ports":null,"ethertype":"any"}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/ethertype-any-create.json"
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/ethertype-any-expansion.json"
     python3 - "${WORK_DIR}/ethertype-any-expansion.json" <<'PY' || die "ethertype=any did not expand to both families"
 import json,sys
 payload=json.load(open(sys.argv[1],encoding="utf-8"))
-rows=payload.get("rules") or payload.get("aria_acl_rules") or payload
+rows=payload["policies"]
 assert isinstance(rows,list),payload
-families={row.get("ethertype") for row in rows}
-assert families=={"IPv4","IPv6"},families
+created=[row for row in rows if (row.get("src_group"),row.get("dst_group"),row.get("proto"),row.get("action"),row.get("direction")) == ("any","any","tcp","allow","ingress")]
+assert {row.get("ethertype") for row in created}=={"IPv4","IPv6"},created
+assert sum(row.get("ethertype")=="IPv4" for row in created)==1,created
+assert sum(row.get("ethertype")=="IPv6" for row in created)==1,created
+PY
+    for ethertype in IPv4 IPv6; do
+        curl --fail -sS -X DELETE -H 'Content-Type: application/json' \
+            -d "{\"src_group\":\"any\",\"dst_group\":\"any\",\"proto\":\"tcp\",\"direction\":\"ingress\",\"ethertype\":\"${ethertype}\"}" \
+            "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/ethertype-any-delete-${ethertype}.json"
+    done
+    curl -fsS "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/ethertype-any-deleted.json"
+    python3 - "${WORK_DIR}/ethertype-any-deleted.json" <<'PY' || die "ethertype=any explicit family deletes left a policy behind"
+import json,sys
+payload=json.load(open(sys.argv[1],encoding="utf-8"))
+rows=payload["policies"]
+left=[row for row in rows if (row.get("src_group"),row.get("dst_group"),row.get("proto"),row.get("action"),row.get("direction")) == ("any","any","tcp","allow","ingress")]
+assert not left,left
 PY
     curl -fsS "${HTTP}/api/v1/instances" >"${WORK_DIR}/ethertype-any-instances.json"
     capture_acl_counters ethertype-any
     FIELD_STATUS_SNAPSHOT="${WORK_DIR}/ethertype-any-instances.json"
     FIELD_COUNTER_SNAPSHOT="${WORK_DIR}/ethertype-any-metrics.prom"
-    record_field_case "${CASE_WILDCARD_ISOLATION}" "POST /api/v1/${INSTANCE}/policies ethertype=any" "ethertype=any expands IPv4+IPv6" "two family-qualified rules observed" "pass"
+    record_field_case "${CASE_DUAL_STACK}" "POST/GET/DELETE /api/v1/${INSTANCE}/policies ethertype=any" "one IPv4 and one IPv6 family-qualified rule" "two exact created rules observed then deleted" "pass"
+    record_field_case "${CASE_WILDCARD_ISOLATION}" "field topology prerequisite" "opposite family remains isolated" "not run" "${FIELD_EVIDENCE_STATUS}"
     record_field_case "${CASE_IPV4_ONLY}" "standalone IPv4 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
     record_field_case "${CASE_IPV6_ONLY}" "standalone IPv6 fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"
     record_field_case "${CASE_DUAL_STACK}" "standalone dual-stack fixture traffic" "allow" "not run" "${FIELD_EVIDENCE_STATUS}"

@@ -38,7 +38,7 @@ mod tcprt;
 mod trace;
 
 pub(crate) use standalone_acl::{
-    standalone_policy_families, StandaloneAclBatchItem, StandaloneAclMutation,
+    standalone_policy_family_protocols, StandaloneAclBatchItem, StandaloneAclMutation,
 };
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
@@ -7306,6 +7306,50 @@ impl ControlPlane {
         Ok(plan.cleanup_pending)
     }
 
+    pub async fn add_policy_family_protocols(
+        &self,
+        instance: &str,
+        src_group: &str,
+        dst_group: &str,
+        action: u8,
+        direction: u8,
+        ports: Option<&str>,
+        family_protocols: &[(u8, u8)],
+    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            LocalWriteDomain::Acl,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        self.resolve_group_id(&state.state, src_group)?;
+        self.resolve_group_id(&state.state, dst_group)?;
+        Self::requested_directions(direction)?;
+        let plan = self
+            .apply_standalone_acl_mutations_locked(
+                instance,
+                &mut state,
+                &[StandaloneAclMutation::UpsertPolicyFamilyProtocols {
+                    src_group: src_group.to_string(),
+                    dst_group: dst_group.to_string(),
+                    action,
+                    direction,
+                    ports: ports.map(str::to_string),
+                    family_protocols: family_protocols.to_vec(),
+                }],
+            )
+            .await?;
+        if plan.accepted == 0 {
+            return Err(ControlPlaneError::ValidationError(plan.errors.join("; ")));
+        }
+        Ok(plan.cleanup_pending)
+    }
+
     pub async fn batch_add_policies(
         &self,
         instance: &str,
@@ -7348,6 +7392,46 @@ impl ControlPlane {
         )?;
         self.delete_policy_locked(instance, &mut state, src_group, dst_group, proto, direction, ip_families)
             .await
+    }
+
+    pub async fn delete_policy_family_protocols(
+        &self,
+        instance: &str,
+        src_group: &str,
+        dst_group: &str,
+        direction: u8,
+        family_protocols: &[(u8, u8)],
+    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            LocalWriteDomain::Acl,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        self.resolve_group_id(&state.state, src_group)?;
+        self.resolve_group_id(&state.state, dst_group)?;
+        Self::requested_directions(direction)?;
+        let plan = self
+            .apply_standalone_acl_mutations_locked(
+                instance,
+                &mut state,
+                &[StandaloneAclMutation::DeletePolicyFamilyProtocols {
+                    src_group: src_group.to_string(),
+                    dst_group: dst_group.to_string(),
+                    direction,
+                    family_protocols: family_protocols.to_vec(),
+                }],
+            )
+            .await?;
+        if plan.accepted == 0 {
+            return Err(ControlPlaneError::PolicyNotFound(plan.errors.join("; ")));
+        }
+        Ok(plan.cleanup_pending)
     }
 
     async fn delete_policy_locked(

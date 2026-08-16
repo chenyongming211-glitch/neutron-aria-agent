@@ -802,7 +802,7 @@ def check_dual_stack_smoke_contract():
     for path in (TC_ACL_DATAPATH_SMOKE_PATH, STANDALONE_TC_ACL_SMOKE_PATH):
         source = read_text(path)
         required = [
-            "record_field_case()", "FIELD_EVIDENCE_STATUS=\"${FIELD_EVIDENCE_STATUS:-deferred/pending}\"",
+            "record_field_case()", "FIELD_EVIDENCE_STATUS=\"deferred/pending\"",
             "zero managed ports", "status=\"deferred/pending\"",
         ]
         required.extend("CASE_%s" % case.upper().replace("-", "_") for case in DUAL_STACK_SMOKE_CASES)

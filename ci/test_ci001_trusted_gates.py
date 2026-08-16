@@ -102,8 +102,14 @@ class TrustedGateContractTests(unittest.TestCase):
             self.assertIn("observed_verdict != \"not run\"", smoke)
             self.assertIn("prerequisite", smoke)
         self.assertIn('payload["policies"]', standalone)
-        self.assertIn('"ethertype":"IPv6"', standalone)
+        self.assertIn('for ethertype in IPv4 IPv6', standalone)
         self.assertIn('DELETE', standalone)
+        config_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            "deploy", "kolla", "config", "neutron-aria-agent.ini",
+        )
+        with open(config_path, encoding="utf-8") as handle:
+            self.assertIn("counters_report_enabled = false", handle.read())
 
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()

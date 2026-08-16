@@ -52,7 +52,7 @@ def main():
         "curl() {", 'command curl -q "$@"',
         "summary.json.tmp", 'mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json"',
         "record_field_case()", "record_deferred_field_cases()", "run_ethertype_any_expansion_smoke()",
-        "ethertype=any expansion", "FIELD_EVIDENCE_STATUS=\"${FIELD_EVIDENCE_STATUS:-deferred/pending}\"",
+        "ethertype=any expansion", "FIELD_EVIDENCE_STATUS=\"deferred/pending\"",
     ) + SUMMARY_FIELDS + FIELD_CASES + FIELD_EVIDENCE_FIELDS
     missing = [term for term in required if term not in source]
     if missing:

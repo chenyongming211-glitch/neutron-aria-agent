@@ -32,6 +32,17 @@ fn parse_batch_add_policies(
     }
 }
 
+fn policy_table_headers(with_stats: bool) -> Vec<&'static str> {
+    let mut headers = vec![
+        "SrcGroup", "DstGroup", "Ethertype", "Proto", "Action", "Direction", "Bitmap",
+    ];
+    if with_stats {
+        headers.extend(["Packets", "Bytes", "DropPkts", "DropBytes"]);
+    }
+    headers.push("Ports");
+    headers
+}
+
 pub(crate) async fn handle_action(
     client: &api_client::ApiClient,
     instance: &str,
@@ -148,9 +159,10 @@ pub(crate) async fn handle_action(
                 if resp.policies.is_empty() {
                     println!("No policies configured");
                 } else {
+                    let header = policy_table_headers(false);
                     println!(
-                        "{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {}",
-                        "SrcGroup", "DstGroup", "Proto", "Action", "Direction", "Bitmap", "Ports"
+                        "{:<12} {:<12} {:<10} {:<8} {:<8} {:<10} {:<8} {}",
+                        header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7]
                     );
                     for p in &resp.policies {
                         let bitmap_str = match p.bitmap_idx {
@@ -158,9 +170,10 @@ pub(crate) async fn handle_action(
                             None => "-".to_string(),
                         };
                         println!(
-                            "{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {}",
+                            "{:<12} {:<12} {:<10} {:<8} {:<8} {:<10} {:<8} {}",
                             p.src_group,
                             p.dst_group,
+                            p.ethertype,
                             p.proto,
                             p.action,
                             p.direction,
@@ -178,19 +191,11 @@ pub(crate) async fn handle_action(
                 if resp.policies.is_empty() {
                     println!("No policies configured");
                 } else {
+                    let header = policy_table_headers(true);
                     println!(
-                        "{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {:>12} {:>12} {:>12} {:>12} {}",
-                        "SrcGroup",
-                        "DstGroup",
-                        "Proto",
-                        "Action",
-                        "Direction",
-                        "Bitmap",
-                        "Packets",
-                        "Bytes",
-                        "DropPkts",
-                        "DropBytes",
-                        "Ports"
+                        "{:<12} {:<12} {:<10} {:<8} {:<8} {:<10} {:<8} {:>12} {:>12} {:>12} {:>12} {}",
+                        header[0], header[1], header[2], header[3], header[4], header[5], header[6],
+                        header[7], header[8], header[9], header[10], header[11]
                     );
                     for p in &resp.policies {
                         let bitmap_str = match p.bitmap_idx {
@@ -198,9 +203,10 @@ pub(crate) async fn handle_action(
                             None => "-".to_string(),
                         };
                         println!(
-                            "{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {:>12} {:>12} {:>12} {:>12} {}",
+                            "{:<12} {:<12} {:<10} {:<8} {:<8} {:<10} {:<8} {:>12} {:>12} {:>12} {:>12} {}",
                             p.src_group,
                             p.dst_group,
+                            p.ethertype,
                             p.proto,
                             p.action,
                             p.direction,

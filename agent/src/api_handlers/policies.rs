@@ -9,8 +9,8 @@ use axum::{
 
 use super::common::{err_response, AppState};
 use crate::control_plane::{
-    standalone_policy_families, ControlPlaneError, LocalWriteDomain, StandaloneAclBatchItem,
-    StandaloneAclMutation,
+    standalone_policy_family_protocols, ControlPlaneError, LocalWriteDomain,
+    StandaloneAclBatchItem, StandaloneAclMutation,
 };
 use aria_api::*;
 
@@ -113,10 +113,6 @@ pub async fn add_policy(
         return Err(err_response(e));
     }
 
-    let proto = match proto_from_string(&req.proto) {
-        Ok(p) => p,
-        Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
-    };
     let action = match action_from_string(&req.action) {
         Ok(a) => a,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
@@ -125,21 +121,23 @@ pub async fn add_policy(
         Ok(d) => d,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
-    let ip_families = match standalone_policy_families(req.ethertype.as_deref()) {
+    let family_protocols = match standalone_policy_family_protocols(
+        req.ethertype.as_deref(),
+        &req.proto,
+    ) {
         Ok(value) => value,
         Err(error) => return Err(err_response(ControlPlaneError::ValidationError(error))),
     };
 
     let cleanup_pending = match cp
-        .add_policy(
+        .add_policy_family_protocols(
             &instance,
             &req.src_group,
             &req.dst_group,
-            proto,
             action,
             direction,
             req.ports.as_deref(),
-            &ip_families,
+            &family_protocols,
         )
         .await
     {
@@ -200,21 +198,26 @@ pub async fn delete_policy(
         return Err(err_response(e));
     }
 
-    let proto = match proto_from_string(&req.proto) {
-        Ok(p) => p,
-        Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
-    };
     let direction = match direction_from_string(&req.direction) {
         Ok(d) => d,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
-    let ip_families = match standalone_policy_families(req.ethertype.as_deref()) {
+    let family_protocols = match standalone_policy_family_protocols(
+        req.ethertype.as_deref(),
+        &req.proto,
+    ) {
         Ok(value) => value,
         Err(error) => return Err(err_response(ControlPlaneError::ValidationError(error))),
     };
 
     let cleanup_pending = match cp
-        .delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction, &ip_families)
+        .delete_policy_family_protocols(
+            &instance,
+            &req.src_group,
+            &req.dst_group,
+            direction,
+            &family_protocols,
+        )
         .await
     {
         Ok(cleanup_pending) => cleanup_pending_response(cleanup_pending),
@@ -369,16 +372,6 @@ pub async fn batch_add_policies(
 
     let mut items = Vec::with_capacity(req.policies.len());
     for (request_index, policy) in req.policies.into_iter().enumerate() {
-        let proto = match proto_from_string(&policy.proto) {
-            Ok(p) => p,
-            Err(e) => {
-                items.push(StandaloneAclBatchItem::Rejected {
-                    request_index,
-                    error: e,
-                });
-                continue;
-            }
-        };
         let action = match action_from_string(&policy.action) {
             Ok(a) => a,
             Err(e) => {
@@ -399,7 +392,10 @@ pub async fn batch_add_policies(
                 continue;
             }
         };
-        let ip_families = match standalone_policy_families(policy.ethertype.as_deref()) {
+        let family_protocols = match standalone_policy_family_protocols(
+            policy.ethertype.as_deref(),
+            &policy.proto,
+        ) {
             Ok(value) => value,
             Err(error) => {
                 items.push(StandaloneAclBatchItem::Rejected { request_index, error });
@@ -408,14 +404,13 @@ pub async fn batch_add_policies(
         };
         items.push(StandaloneAclBatchItem::Parsed {
             request_index,
-            mutation: StandaloneAclMutation::UpsertPolicy {
+            mutation: StandaloneAclMutation::UpsertPolicyFamilyProtocols {
                 src_group: policy.src_group,
                 dst_group: policy.dst_group,
-                proto,
                 action,
                 direction,
                 ports: policy.ports,
-                ip_families,
+                family_protocols,
             },
         });
     }

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use crate::neutron_acl_ip::{acl_protocol, IpFamily};
 
 #[derive(Clone, Debug)]
 pub(crate) enum StandaloneAclMutation {
@@ -20,6 +21,20 @@ pub(crate) enum StandaloneAclMutation {
         direction: u8,
         ip_families: Vec<u8>,
     },
+    UpsertPolicyFamilyProtocols {
+        src_group: String,
+        dst_group: String,
+        action: u8,
+        direction: u8,
+        ports: Option<String>,
+        family_protocols: Vec<(u8, u8)>,
+    },
+    DeletePolicyFamilyProtocols {
+        src_group: String,
+        dst_group: String,
+        direction: u8,
+        family_protocols: Vec<(u8, u8)>,
+    },
     AddReferencedGroupCidr {
         group_name: String,
         cidr: String,
@@ -35,6 +50,23 @@ pub(crate) fn standalone_policy_families(ethertype: Option<&str>) -> Result<Vec<
     }
 }
 
+pub(crate) fn standalone_policy_family_protocols(
+    ethertype: Option<&str>,
+    proto: &str,
+) -> Result<Vec<(u8, u8)>, String> {
+    standalone_policy_families(ethertype)?
+        .into_iter()
+        .map(|family| {
+            let family_kind = match family {
+                IP_FAMILY_V4 => IpFamily::Ipv4,
+                IP_FAMILY_V6 => IpFamily::Ipv6,
+                _ => return Err("standalone policy contains an invalid IP family".to_string()),
+            };
+            acl_protocol(Some(proto), family_kind).map(|protocol| (family, protocol))
+        })
+        .collect()
+}
+
 fn validate_policy_families(ip_families: &[u8]) -> Result<(), String> {
     if ip_families.is_empty() {
         return Err("standalone policy requires at least one IP family".to_string());
@@ -46,6 +78,15 @@ fn validate_policy_families(ip_families: &[u8]) -> Result<(), String> {
         return Err("standalone policy contains an invalid IP family".to_string());
     }
     Ok(())
+}
+
+fn validate_family_protocols(family_protocols: &[(u8, u8)]) -> Result<(), String> {
+    validate_policy_families(
+        &family_protocols
+            .iter()
+            .map(|(family, _)| *family)
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +301,69 @@ fn apply_mutation(
                     direction,
                         *ip_family,
                     )?;
+                    if let (Some(bitmap_idx), Some(ports_normalized)) =
+                        (result.bitmap_idx, result.port_set_released)
+                    {
+                        state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
+                    }
+                }
+            }
+            Ok(Vec::new())
+        }
+        StandaloneAclMutation::UpsertPolicyFamilyProtocols {
+            src_group,
+            dst_group,
+            action,
+            direction,
+            ports,
+            family_protocols,
+        } => {
+            validate_family_protocols(family_protocols)?;
+            let src_id = resolve_group_id(state, src_group)?;
+            let dst_id = resolve_group_id(state, dst_group)?;
+            for direction in requested_directions(*direction).map_err(|error| error.to_string())? {
+                for (ip_family, proto) in family_protocols {
+                    aria_core::ebpf_ops::validate_policy_ports(*proto, ports.as_deref())?;
+                    let result = state.apply_add_rule(
+                        src_id, dst_id, *proto, *action, ports.as_deref(), direction, *ip_family,
+                    )?;
+                    if let Some((bitmap_idx, ports_normalized)) = result.old_port_set_released {
+                        state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
+                    }
+                }
+            }
+            Ok(Vec::new())
+        }
+        StandaloneAclMutation::DeletePolicyFamilyProtocols {
+            src_group,
+            dst_group,
+            direction,
+            family_protocols,
+        } => {
+            validate_family_protocols(family_protocols)?;
+            let src_id = resolve_group_id(state, src_group)?;
+            let dst_id = resolve_group_id(state, dst_group)?;
+            let directions = requested_directions(*direction).map_err(|error| error.to_string())?;
+            for candidate in &directions {
+                for (ip_family, proto) in family_protocols {
+                    if state.rules.iter().any(|rule| {
+                        rule.src_group_id == src_id
+                            && rule.dst_group_id == dst_id
+                            && rule.proto == *proto
+                            && rule.direction == *candidate
+                            && rule.ip_family == *ip_family
+                    }) {
+                        continue;
+                    }
+                    return Err(format!(
+                        "Policy not found: src={}, dst={}, proto={}, direction={}, ip_family={}",
+                        src_group, dst_group, proto, candidate, ip_family
+                    ));
+                }
+            }
+            for direction in directions {
+                for (ip_family, proto) in family_protocols {
+                    let result = state.apply_remove_rule(src_id, dst_id, *proto, direction, *ip_family)?;
                     if let (Some(bitmap_idx), Some(ports_normalized)) =
                         (result.bitmap_idx, result.port_set_released)
                     {
@@ -1088,6 +1192,66 @@ mod tests {
         };
         let removed = build_standalone_acl_publication_plan(&added.final_state, ACL_BANK_PRIMARY, &[delete]).unwrap();
         assert!(removed.final_state.rules.is_empty());
+    }
+
+    #[test]
+    fn standalone_acl_family_protocol_any_is_atomic_and_preserves_preimage_on_missing_half() {
+        let old = state_with_groups();
+        let add = StandaloneAclMutation::UpsertPolicyFamilyProtocols {
+            src_group: "client".into(),
+            dst_group: "server".into(),
+            action: 0,
+            direction: 0,
+            ports: Some("443".into()),
+            family_protocols: vec![(IP_FAMILY_V4, 6), (IP_FAMILY_V6, 6)],
+        };
+        let added = build_standalone_acl_publication_plan(&old, ACL_BANK_PRIMARY, &[add]).unwrap();
+        assert_eq!(added.final_state.rules.len(), 2);
+        let port_set = added.final_state.port_sets.get("443").unwrap();
+        assert_eq!(port_set.ref_count, 2);
+
+        let missing_v6 = build_standalone_acl_publication_plan(
+            &old,
+            ACL_BANK_PRIMARY,
+            &[StandaloneAclMutation::DeletePolicyFamilyProtocols {
+                src_group: "client".into(),
+                dst_group: "server".into(),
+                direction: 0,
+                family_protocols: vec![(IP_FAMILY_V4, 6), (IP_FAMILY_V6, 6)],
+            }],
+        )
+        .unwrap();
+        assert_eq!(missing_v6.accepted, 0);
+        assert_eq!(missing_v6.final_state.rules, old.rules);
+        assert_eq!(missing_v6.final_state.port_sets, old.port_sets);
+
+        let remove_v4 = build_standalone_acl_publication_plan(
+            &added.final_state,
+            ACL_BANK_PRIMARY,
+            &[StandaloneAclMutation::DeletePolicyFamilyProtocols {
+                src_group: "client".into(),
+                dst_group: "server".into(),
+                direction: 0,
+                family_protocols: vec![(IP_FAMILY_V4, 6)],
+            }],
+        )
+        .unwrap();
+        assert_eq!(remove_v4.final_state.port_sets["443"].ref_count, 1);
+        assert!(remove_v4.released_port_sets.is_empty());
+
+        let remove_v6 = build_standalone_acl_publication_plan(
+            &remove_v4.final_state,
+            ACL_BANK_PRIMARY,
+            &[StandaloneAclMutation::DeletePolicyFamilyProtocols {
+                src_group: "client".into(),
+                dst_group: "server".into(),
+                direction: 0,
+                family_protocols: vec![(IP_FAMILY_V6, 6)],
+            }],
+        )
+        .unwrap();
+        assert!(remove_v6.final_state.port_sets.is_empty());
+        assert_eq!(remove_v6.released_port_sets.len(), 1);
     }
 
     #[test]

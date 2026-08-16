@@ -290,9 +290,48 @@ def check_live_path(source, errors, direction, family):
         )
         if (any(term not in body for term in required)
                 or body.count("phase_ct_v%s(" % ("4" if family == "v4" else "6")) != 1
+                or body.count("phase_ct_fastpath_tc_%s_%s(" % (direction, family)) != 1
+                or body.count("phase_ct_miss_tc_%s_%s(" % (direction, family)) != 1
                 or ct_branch is None):
             errors.append(
                 "TC %s %s: require fragment-aware CT hit/miss branch after resolution and before context install"
+                % (direction, family)
+            )
+        bits = "4" if family == "v4" else "6"
+        post = "phase_post_accept_tc_%s(" % direction
+        flow = "stats::update_flow_stats_v%s(" % bits
+        policy_create = "if !ct_hit && create_point == FragmentCtCreatePoint::AfterPolicyQos"
+        install_create = "if !ct_hit && create_point == FragmentCtCreatePoint::AfterContextInstall"
+        action_drop = "if p.action == TC_ACT_SHOT as u32"
+        install_drop = "if install != FragmentInstallDecision::Pass"
+        action_at = body.find(action_drop)
+        policy_create_at = body.find(policy_create)
+        install_at = body.find("let install = fragment::install_allowed_v%s(" % bits)
+        install_drop_at = body.find(install_drop)
+        install_create_at = body.find(install_create)
+        flow_at = body.find(flow)
+        post_at = body.find(post)
+        wrapped_create = (
+            action_at >= 0
+            and policy_create_at > action_at
+            and install_at > policy_create_at
+            and install_drop_at > install_at
+            and install_create_at > install_drop_at
+            and flow_at > install_create_at
+            and post_at > flow_at
+            and body.count("phase_ct_create_v%s(" % bits) == 2
+        )
+        protected_drops = all(
+            block is not None and "return p.action as i32;" in block[0]
+            for block in (
+                _block_after(body, action_drop),
+                _block_after(body, install_drop),
+            )
+        )
+        forbidden = ("runtime::acl_ingress_hook", "phase_legacy_tc_ingress_")
+        if not wrapped_create or not protected_drops or any(term in body for term in forbidden):
+            errors.append(
+                "TC %s %s: require drop returns, guarded CT create, flow accounting, and post-processing after fragment install"
                 % (direction, family)
             )
         return
@@ -315,8 +354,19 @@ def check_hit_helper(source, errors, direction, family):
         return
     body = _blank_non_code(body)
     if "record_tc_ct_contract" in body:
-        if any(term in body for term in ("load_acl_packet_ids_", "phase_policy_tc_v", "ct_create_")):
-            errors.append("%s: cached hit must not re-evaluate ACL or create CT" % path)
+        qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
+        monitoring_policy_hit = re.search(
+            r"stats::monitoring_enabled\(p\.tap_id\)\s*&&\s*\(p\.flags\s*&\s*FLAG_POLICY_HIT\)\s*!=\s*0",
+            body,
+        )
+        drop_guard = _drop_guard_after(body, qos)
+        if (
+            any(term in body for term in ("load_acl_packet_ids_", "phase_policy_tc_v", "ct_create_"))
+            or not monitoring_policy_hit
+            or drop_guard is None
+            or "return;" not in drop_guard[0]
+        ):
+            errors.append("%s: cached hit must skip ACL/create, reapply QoS, and return dropped traffic" % path)
         return
     forbidden = ("load_acl_packet_ids_", "phase_policy_tc(", "ct_create_")
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
@@ -356,10 +406,22 @@ def check_miss_helper(source, errors, direction, family):
         return
     body = _blank_non_code(body)
     if "record_tc_ct_contract" in body:
-        policy = "phase_policy_tc_v%s(" % ("4" if family == "v4" else "6")
+        bits = "4" if family == "v4" else "6"
+        policy = "phase_policy_tc_v%s(" % bits
+        acl_load = "load_acl_packet_ids_v%s(" % bits
         qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
-        if policy not in body or qos not in body or "ct_create_" in body:
-            errors.append("%s: miss must evaluate family policy and QoS without early CT creation" % path)
+        policy_drop = _drop_guard_after(body, policy)
+        qos_drop = _drop_guard_after(body, qos)
+        if (
+            policy not in body
+            or acl_load not in body
+            or "ct_create_" in body
+            or policy_drop is None
+            or qos_drop is None
+            or "return;" not in policy_drop[0]
+            or "return;" not in qos_drop[0]
+        ):
+            errors.append("%s: miss must evaluate family policy and QoS, return drops, and defer CT creation" % path)
         return
     bits = "4" if family == "v4" else "6"
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
@@ -441,7 +503,7 @@ def check_managed_smoke_entrypoint(errors):
     required = (
         "record_field_case()", "run_dual_stack_field_smoke()",
         "zero managed ports is a field failure", "FIELD_DUAL_STACK_SMOKE",
-        "FIELD_EVIDENCE_STATUS=\"${FIELD_EVIDENCE_STATUS:-deferred/pending}\"",
+        "FIELD_EVIDENCE_STATUS=\"deferred/pending\"",
     ) + FIELD_CASES + FIELD_EVIDENCE_FIELDS
     missing = [term for term in required if term not in source]
     if missing:
@@ -563,7 +625,7 @@ def _inject_ingress_v4_unconditional_hit(body):
 def _inject_ingress_v4_both_helpers_in_hit_arm(body):
     pattern = re.compile(
         r"^(?P<indent>[ \t]*)phase_ct_fastpath_tc_ingress_v4\s*"
-        r"\(\s*ctx\s*,\s*info\s*,\s*p\s*,\s*&\s*ct_key\s*\)\s*;",
+        r"\(\s*ctx\s*,\s*info\s*,\s*p\s*,\s*&?\s*ct_key\s*\)\s*;",
         re.MULTILINE,
     )
     match = pattern.search(body)
@@ -662,7 +724,7 @@ def _remove_egress_v4_hit_qos_return(body):
 
 def _remove_ingress_v4_miss_acl_return(body):
     return _remove_drop_return_after(
-        body, "phase_policy_tc(", "ingress v4 miss ACL drop"
+        body, "phase_policy_tc_v4(", "ingress v4 miss ACL drop"
     )
 
 
@@ -673,8 +735,9 @@ def _remove_ingress_v4_miss_qos_return(body):
 
 
 def _remove_egress_v4_miss_ct_guard(body):
-    guard = _block_after(body, "if runtime::conntrack_enabled(p.tap_id)")
-    if guard is None:
+    marker = "if !ct_hit && create_point == FragmentCtCreatePoint::AfterContextInstall"
+    guard = _block_after(body, marker)
+    if guard is None or "phase_ct_create_v4(p, ct_key);" not in guard[0]:
         raise ValueError("egress v4 miss CT-guard mutation anchor drifted")
     return body[: guard[1]] + guard[0] + body[guard[3] + 1 :]
 
@@ -704,20 +767,13 @@ def _remove_fragment_miss_branch(body):
 
 
 def run_mutation_self_tests(source, verbose=False):
+    fragment_specs = []
     if "fragment::resolve_v4" in source:
-        specs = (
+        fragment_specs = [
             ("fragment-aware CT hit guard", "try_tc_ingress_v4", _replace_fragment_ct_hit_guard),
             ("fragment context install", "try_tc_ingress_v4", _remove_fragment_context_install),
             ("fragment-aware miss branch", "try_tc_ingress_v4", _remove_fragment_miss_branch),
-        )
-        failures = []
-        for label, function, mutate in specs:
-            mutant = _mutate_function(source, function, mutate)
-            if not any(error.startswith("TC ingress v4:") for error in check_source(mutant)):
-                failures.append("mutation %s was accepted" % label)
-            elif verbose:
-                print("PASS: rejected mutation %s" % label)
-        return failures
+        ]
     specs = [
         (
             "XDP direct runtime ACL read",
@@ -793,12 +849,22 @@ def run_mutation_self_tests(source, verbose=False):
         ),
         (
             "egress v4 miss CT create without runtime guard",
-            "phase_ct_miss_tc_egress_v4",
+            "try_tc_egress_v4",
             _remove_egress_v4_miss_ct_guard,
-            "TC egress v4 miss:",
+            "TC egress v4:",
         ),
     ]
     failures = []
+    for label, function, mutate in fragment_specs:
+        try:
+            mutant = _mutate_function(source, function, mutate)
+        except (KeyError, ValueError) as exc:
+            failures.append("mutation %s could not run (%s)" % (label, exc))
+            continue
+        if not any(error.startswith("TC ingress v4:") for error in check_source(mutant)):
+            failures.append("mutation %s was accepted" % label)
+        elif verbose:
+            print("PASS: rejected mutation %s" % label)
     for label, function, mutate, expected_prefix in specs:
         try:
             mutant = _mutate_function(source, function, mutate)
@@ -857,7 +923,7 @@ def run_mutation_self_tests(source, verbose=False):
     if verbose:
         print(
             "Mutation scenarios: %d rejection, %d acceptance"
-            % (len(specs), len(accepted_specs) + len(accepted_source_specs))
+            % (len(fragment_specs) + len(specs), len(accepted_specs) + len(accepted_source_specs))
         )
     return failures
 
