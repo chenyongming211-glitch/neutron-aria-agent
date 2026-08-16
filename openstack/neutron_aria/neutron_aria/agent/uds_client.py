@@ -29,9 +29,15 @@ NEUTRON_CAPABILITY_HASH_V2 = "v0.9-neutron-capabilities-4"
 NEUTRON_STATUS_SCHEMA_VERSION_V2 = 2
 NEUTRON_STATUS_CONTRACT_HASH_V2 = "v0.9-neutron-status-2"
 NEUTRON_CAPABILITY_HASH_V3 = "v0.9-neutron-capabilities-5"
+NEUTRON_CAPABILITY_HASH_V4 = "v0.9-neutron-capabilities-6"
 NEUTRON_STATUS_SCHEMA_VERSION_V3 = 3
 NEUTRON_STATUS_CONTRACT_HASH_V3 = "v0.9-neutron-status-3"
 DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
+
+SUPPORTED_CAPABILITY_HASHES = frozenset((
+    NEUTRON_CAPABILITY_HASH_V3,
+    NEUTRON_CAPABILITY_HASH_V4,
+))
 
 
 STATUS_CONTRACT_V1 = "v1"
@@ -1178,6 +1184,24 @@ class UnixHTTPConnection(http_client.HTTPConnection):
         self.sock = sock
 
 
+def _snapshot_has_enabled_ipv6_acl(snapshot):
+    if not isinstance(snapshot, dict):
+        return False
+    for port in snapshot.get("ports") or []:
+        if not isinstance(port, dict):
+            continue
+        acl = port.get("acl")
+        if not isinstance(acl, dict) or acl.get("enabled") is not True:
+            continue
+        for rule in acl.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            family = rule.get("ethertype")
+            if isinstance(family, _STRING_TYPES) and family.strip().lower() == "ipv6":
+                return True
+    return False
+
+
 class LocalClient(object):
     def __init__(
         self,
@@ -1195,6 +1219,8 @@ class LocalClient(object):
         self._status_contract_mode = None
         self._status_contract_write_blocked = False
         self._status_contract_fresh_handshake = False
+        self._acl_ipv6_v1 = False
+        self._counters_v2 = False
 
     def capabilities(self, required_domains=None):
         try:
@@ -1218,6 +1244,8 @@ class LocalClient(object):
                 "invalid capabilities response: %s" % exc
             )
         self._status_contract_mode = mode
+        self._acl_ipv6_v1 = body["acl_ipv6_v1"]
+        self._counters_v2 = body["counters_v2"]
         self._status_contract_fresh_handshake = (
             self._status_contract_write_blocked
         )
@@ -1279,6 +1307,7 @@ class LocalClient(object):
 
     def put_snapshot(self, snapshot):
         self._require_status_contract_write_allowed()
+        self._require_ipv6_snapshot_capability(snapshot)
         return self._request("PUT", "/api/v1/neutron/snapshot", snapshot)
 
     def recover_pending_snapshot(self, expected_generation, expected_desired_hash=None):
@@ -1295,6 +1324,7 @@ class LocalClient(object):
             self._require_status_contract_write_allowed()
         capabilities = self.capabilities(required_domains=required_domains or [])
         self._require_status_contract_write_allowed()
+        self._require_ipv6_snapshot_capability(snapshot)
         if not capabilities.get("supports_port_scoped_snapshot"):
             raise LocalApiContractError(
                 "local API does not advertise supports_port_scoped_snapshot"
@@ -1316,6 +1346,8 @@ class LocalClient(object):
     def _latch_status_contract_error(self):
         self._status_contract_write_blocked = True
         self._status_contract_fresh_handshake = False
+        self._acl_ipv6_v1 = False
+        self._counters_v2 = False
 
     def _require_status_contract_write_allowed(self):
         if (
@@ -1325,6 +1357,13 @@ class LocalClient(object):
             raise LocalApiContractError(
                 "status contract write gate is latched closed"
             )
+
+    def _require_ipv6_snapshot_capability(self, snapshot):
+        if self._acl_ipv6_v1 or not _snapshot_has_enabled_ipv6_acl(snapshot):
+            return
+        raise LocalApiContractError(
+            "enabled IPv6 ACL snapshot requires acl_ipv6_v1 capability"
+        )
 
     def _connection(self, request_timeout=None):
         timeout = self.timeout if request_timeout is None else request_timeout
@@ -1466,13 +1505,34 @@ class LocalClient(object):
             raise LocalApiContractError("empty peer_auth_policy")
 
         capability_hash = body.get("capability_hash")
-        if (
-            capability_hash is not None and
-            capability_hash != expected_capability_hash
-        ):
+        if status_contract_mode == STATUS_CONTRACT_V3:
+            supported_hashes = SUPPORTED_CAPABILITY_HASHES
+        else:
+            supported_hashes = frozenset((expected_capability_hash,))
+        if capability_hash is not None and capability_hash not in supported_hashes:
             raise LocalApiContractError(
                 "unsupported capability_hash %r" % capability_hash
             )
+        if capability_hash == NEUTRON_CAPABILITY_HASH_V4:
+            if body.get("acl_ipv6_v1") is not True:
+                raise LocalApiContractError(
+                    "capability hash -6 requires acl_ipv6_v1=true"
+                )
+            if body.get("counters_v2") is not True:
+                raise LocalApiContractError(
+                    "capability hash -6 requires counters_v2=true"
+                )
+        else:
+            if body.get("acl_ipv6_v1") not in (None, False):
+                raise LocalApiContractError(
+                    "legacy capability hash cannot advertise acl_ipv6_v1"
+                )
+            if body.get("counters_v2") not in (None, False):
+                raise LocalApiContractError(
+                    "legacy capability hash cannot advertise counters_v2"
+                )
+            body["acl_ipv6_v1"] = False
+            body["counters_v2"] = False
 
     def _capability_request_timeout(self, body):
         timeout_ms = body.get("timeout_ms")

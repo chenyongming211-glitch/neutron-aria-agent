@@ -152,6 +152,14 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_capabilities_validates_required_domains",
     "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
     "test_capabilities_rejects_missing_domain",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_capabilities_current_hash_defaults_ipv6_and_counters_false",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_capabilities_future_hash_requires_ipv6_and_counters_true",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_ipv6_snapshot_requires_remote_capability",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_ipv4_snapshot_remains_allowed_during_capability_rollout",
     "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
     "test_status_v3_counters_section_is_preserved",
     "neutron_aria.tests.unit.test_uds_client.StatusContractV2RetryRedTestCase."
