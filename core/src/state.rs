@@ -561,6 +561,8 @@ impl FirewallState {
     }
 
     /// Add or update a rule in-memory. Returns AddRuleResult.
+    // The persisted rule identity is intentionally explicit at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_add_rule(
         &mut self,
         src_group_id: u32,
@@ -1066,6 +1068,8 @@ impl StateManager {
         Ok(state.tap_id)
     }
 
+    // Keep the durable-state wrapper aligned with FirewallState::apply_add_rule.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_rule(
         &self,
         src_group_id: u32,

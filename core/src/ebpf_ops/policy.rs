@@ -288,6 +288,8 @@ pub fn delete_policy(
     )
 }
 
+// The complete policy identity includes direction, bank, and address family.
+#[allow(clippy::too_many_arguments)]
 pub fn delete_policy_in_bank(
     src_id: u32,
     dst_id: u32,
