@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn port_counters_keep_same_policy_identity_separate_by_family() {
         let v4 = rule(7, 1, 2, 6, 0, 10, 100, 1, 10);
-        let mut v6 = rule(7, 1, 2, 6, 0, 20, 200, 1, 10);
+        let mut v6 = rule(7, 1, 2, 6, 0, 10, 100, 1, 10);
         v6.key.ip_family = IP_FAMILY_V6;
 
         let summary = aggregate_port_counters(&[v4, v6], &[], 7);
