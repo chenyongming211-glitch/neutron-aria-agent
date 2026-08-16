@@ -726,9 +726,11 @@ unsafe fn lookup_ipv4(map: &LpmTrie<[u8; 8], u32>, tap_id: u32, ip: u32) -> Opti
 }
 
 unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 20], u32>, tap_id: u32, ip: [u8; 16]) -> Option<u32> {
-    let mut bytes = [0u8; 20];
-    bytes[..4].copy_from_slice(&tap_id.to_be_bytes());
-    bytes[4..].copy_from_slice(&ip);
+    let tap = tap_id.to_be_bytes();
+    let bytes = [
+        tap[0], tap[1], tap[2], tap[3], ip[0], ip[1], ip[2], ip[3], ip[4], ip[5], ip[6], ip[7],
+        ip[8], ip[9], ip[10], ip[11], ip[12], ip[13], ip[14], ip[15],
+    ];
     let key = Key::new(160, bytes);
     map.get(&key).copied()
 }
