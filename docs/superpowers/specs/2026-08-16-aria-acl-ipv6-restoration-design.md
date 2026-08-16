@@ -1,11 +1,12 @@
 # Aria ACL IPv6 Restoration Design
 
-**Status:** Tasks 1-4 implemented in source. The current ACL-only product uses
+**Status:** Tasks 1-11 implementation complete; exact-head hosted Build
+[`31956696938`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938)
+is GREEN. The current ACL-only product uses
 the bounded monolithic TC artifact with the approved 480-byte temporary ceiling
 defined by
-`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. Exact-head
-hosted Build `31940674926` is GREEN; target-kernel and OpenStack field evidence
-remain pending.
+`2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. Target-kernel
+and OpenStack field evidence remain `deferred/pending`.
 
 **Scope:** restore complete IPv6 support to the existing Neutron-managed and
 standalone Aria ACL product while preserving failure boundaries, Python 2.7
@@ -664,7 +665,13 @@ IPv6 ACL restoration is complete when all of the following are true:
 
 ## 18. Task 11 integration status
 
-Status: **implementation complete pending exact-head hosted CI**. Fixed CI
+Status: **implementation complete; hosted CI linked; field evidence pending**.
+Exact-head hosted Build
+[`31956696938`](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/31956696938)
+is GREEN (fast-contracts, clean install, DB contracts, Rust behavior, and
+warning-denied Rust build). Its `rust-build` job also assembled the Kolla bundle,
+release archive, manifest, and checksums; the separate artifact-publishing
+`release` job was correctly skipped by its publish condition. Fixed CI
 discovers non-zero `acl_family_`, `acl_ipv6_`, `neutron_acl_ipv6_`, and
 `acl_runtime_schema_` Rust filters plus the high-value Python family,
 migration, and counters behaviors. Smoke entrypoints expose case names and
@@ -676,6 +683,5 @@ The product contract remains one-rule/one-family (omitted `ethertype=IPv4`,
 `any` expands); ICMP is family-mapped, there is no hidden ND bypass, and
 address sets/runtime/counters are family-qualified. Python-first deployment,
 runtime schema 3/policy-key schema 2 rebuild, symmetric rollback, and
-default-off IPv6/counters remain mandatory. The exact-head CI URL is appended
-only after that run passes; Task 12 remains the sole producer of OpenStack/4.18
-field PASS evidence.
+default-off IPv6/counters remain mandatory. Task 12 remains the sole producer
+of OpenStack/4.18 field PASS evidence.
