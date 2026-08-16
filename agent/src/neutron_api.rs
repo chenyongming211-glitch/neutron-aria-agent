@@ -15472,6 +15472,143 @@ mod tests {
         assert_eq!(plan.force_bypass_reason, None);
     }
 
+    fn acl_rule_for_family(
+        id: &str,
+        priority: i64,
+        family: &str,
+        protocol: &str,
+        action: &str,
+        src_cidrs: &[&str],
+    ) -> NeutronAclRuleSnapshot {
+        let mut rule = acl_rule_with(
+            id,
+            priority,
+            protocol,
+            action,
+            src_cidrs,
+            &[],
+            None,
+        );
+        rule.ethertype = Some(family.to_string());
+        rule
+    }
+
+    #[test]
+    fn neutron_acl_ipv6_v4_wildcard_deny_never_compiles_as_v6() {
+        let acl = ready_acl(vec![
+            acl_rule_for_family("v4-deny", 10, "IPv4", "any", "drop", &[]),
+            acl_rule_for_family("v6-allow", 20, "IPv6", "any", "allow", &[]),
+        ]);
+
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
+            .expect("cross-family wildcard actions must compile independently");
+        let mut policies = plan
+            .policies
+            .iter()
+            .map(|policy| (policy.ip_family, policy.action))
+            .collect::<Vec<_>>();
+        policies.sort_unstable();
+        assert_eq!(policies, vec![(4, 1), (6, 0)]);
+    }
+
+    #[test]
+    fn neutron_acl_ipv6_selector_names_are_family_qualified() {
+        let acl = ready_acl(vec![
+            acl_rule_for_family(
+                "v4-selector",
+                10,
+                "IPv4",
+                "tcp",
+                "drop",
+                &["10.0.0.0/24"],
+            ),
+            acl_rule_for_family(
+                "v6-selector",
+                20,
+                "IPv6",
+                "udp",
+                "drop",
+                &["2001:db8::/64"],
+            ),
+        ]);
+
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
+            .expect("dual-stack selectors must translate");
+        assert_eq!(
+            plan.groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "neutron:port-1:src:selector:ipv4:0",
+                "neutron:port-1:src:selector:ipv6:0",
+            ]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_ipv6_group_info_never_mixes_families() {
+        let acl = ready_acl(vec![
+            acl_rule_for_family(
+                "v4-selector",
+                10,
+                "IPv4",
+                "tcp",
+                "drop",
+                &["10.0.0.0/24"],
+            ),
+            acl_rule_for_family(
+                "v6-selector",
+                20,
+                "IPv6",
+                "udp",
+                "drop",
+                &["2001:db8::/64"],
+            ),
+        ]);
+
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
+            .expect("dual-stack selectors must translate");
+        for group in &plan.groups {
+            if group.name.contains(":ipv4:") {
+                assert!(group.cidrs.iter().all(|cidr| !cidr.contains(':')));
+            } else if group.name.contains(":ipv6:") {
+                assert!(group.cidrs.iter().all(|cidr| cidr.contains(':')));
+            } else {
+                panic!("selector group is not family-qualified: {}", group.name);
+            }
+        }
+    }
+
+    #[test]
+    fn neutron_acl_ipv6_protocol_aliases_are_family_aware() {
+        use crate::neutron_acl_ip::{acl_protocol, IpFamily};
+
+        assert_eq!(acl_protocol(Some("icmp"), IpFamily::Ipv4).unwrap(), 1);
+        assert_eq!(acl_protocol(Some("icmp"), IpFamily::Ipv6).unwrap(), 58);
+        assert_eq!(acl_protocol(Some("icmpv6"), IpFamily::Ipv6).unwrap(), 58);
+        assert!(acl_protocol(Some("58"), IpFamily::Ipv4).is_err());
+        assert!(acl_protocol(Some("1"), IpFamily::Ipv6).is_err());
+    }
+
+    #[test]
+    fn neutron_acl_ipv6_opposite_actions_coexist() {
+        let acl = ready_acl(vec![
+            acl_rule_for_family("v4-allow", 10, "IPv4", "tcp", "allow", &[]),
+            acl_rule_for_family("v6-deny", 20, "IPv6", "tcp", "drop", &[]),
+        ]);
+
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
+            .expect("opposite actions in different families must coexist");
+        let mut policies = plan
+            .policies
+            .iter()
+            .map(|policy| (policy.ip_family, policy.action))
+            .collect::<Vec<_>>();
+        policies.sort_unstable();
+        assert_eq!(policies, vec![(4, 0), (6, 1)]);
+    }
+
     #[test]
     fn neutron_acl_cidrs_match_python_strict_grammar() {
         assert_eq!(
