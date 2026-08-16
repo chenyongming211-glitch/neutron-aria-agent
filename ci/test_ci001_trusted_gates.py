@@ -166,6 +166,32 @@ class TrustedGateContractTests(unittest.TestCase):
         from neutron_aria.agent.config import load_config
         self.assertFalse(load_config(config_path).counters_report_enabled)
 
+    def test_managed_dual_stack_field_rules_clear_transitions_and_use_unique_priorities(self):
+        managed_path = os.path.join(
+            check_neutron_stage1.ROOT,
+            check_neutron_stage1.TC_ACL_DATAPATH_SMOKE_PATH,
+        )
+        with open(managed_path, encoding="utf-8") as handle:
+            source = handle.read()
+        start = source.index("run_dual_stack_field_smoke() {")
+        end = source.index("\nSERVICE_NAME=", start)
+        dual_stack = source[start:end]
+        cleanup_at = dual_stack.index("delete_rules_for_transition")
+        creates = (
+            "create_field_family_rule ingress IPv4 icmp 90",
+            "create_field_family_rule egress IPv4 icmp 90",
+            "create_field_family_rule ingress IPv6 58 91",
+            "create_field_family_rule egress IPv6 58 91",
+        )
+        for create in creates:
+            self.assertIn(create, dual_stack)
+            self.assertGreater(dual_stack.index(create), cleanup_at)
+        self.assertEqual(dual_stack.count("delete_rules_for_transition"), 1)
+        self.assertGreater(
+            dual_stack.index("run_full_resync"),
+            max(dual_stack.index(create) for create in creates),
+        )
+
     def test_required_python_behaviors_are_in_full_discovery(self):
         discovered = check_neutron_stage1.discovered_python_test_ids()
         required = set(check_neutron_stage1.REQUIRED_PYTHON_BEHAVIORS)
