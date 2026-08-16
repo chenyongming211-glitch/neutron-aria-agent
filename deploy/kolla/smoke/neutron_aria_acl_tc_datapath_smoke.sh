@@ -71,9 +71,9 @@ record_deferred_field_cases() {
 }
 
 create_field_family_rule() {
-    local direction="$1" ethertype="$2" protocol="$3" body id
-    body="$(printf '{"aria_acl_rule":{"policy_id":"%s","direction":"%s","priority":90,"action":"allow","protocol":"%s","ethertype":"%s"}}' \
-        "${policy_id}" "${direction}" "${protocol}" "${ethertype}")"
+    local direction="$1" ethertype="$2" protocol="$3" priority="$4" body id
+    body="$(printf '{"aria_acl_rule":{"policy_id":"%s","direction":"%s","priority":%s,"action":"allow","protocol":"%s","ethertype":"%s"}}' \
+        "${policy_id}" "${direction}" "${priority}" "${protocol}" "${ethertype}")"
     id="$(curl_body POST aria-acl-rules "${body}" | json_field aria_acl_rule.id)"
     [ -n "${id}" ] || die "failed to create ${ethertype} ${direction} field rule"
     rule_ids+=("${id}")
@@ -121,10 +121,14 @@ import json,sys
 rows=json.load(open(sys.argv[1],encoding="utf-8")).get("aria_acl_port_statuses") or []
 assert any(row.get("port_id")==sys.argv[2] for row in rows),rows
 PY
-    create_field_family_rule ingress IPv4 icmp
-    create_field_family_rule egress IPv4 icmp
-    create_field_family_rule ingress IPv6 58
-    create_field_family_rule egress IPv6 58
+    # The preceding stateful, selector, fragment, and deny phases own their
+    # rule IDs in rule_ids. Remove them once before the field matrix so its
+    # policy has no overlap candidates; created_rule_ids remains an audit log.
+    delete_rules_for_transition
+    create_field_family_rule ingress IPv4 icmp 90
+    create_field_family_rule egress IPv4 icmp 90
+    create_field_family_rule ingress IPv6 58 91
+    create_field_family_rule egress IPv6 58 91
     run_full_resync >"${WORK_DIR}/field-dual-stack-resync.log"
     wait_port_enforced || die "managed port did not enforce the dual-stack field rules"
     run_field_family_traffic "${CASE_IPV4_ONLY}" -4 "${VM_IPV4}" icmp
