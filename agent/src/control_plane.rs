@@ -7258,54 +7258,6 @@ impl ControlPlane {
         Ok((state.state.rules.clone(), state.state.groups.clone()))
     }
 
-    pub async fn add_policy(
-        &self,
-        instance: &str,
-        src_group: &str,
-        dst_group: &str,
-        proto: u8,
-        action: u8,
-        direction: u8,
-        ports: Option<&str>,
-        ip_families: &[u8],
-    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
-        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
-        let authority = self.neutron_authorities.read().await.get(instance).cloned();
-        ensure_serialized_local_write_allowed(
-            instance,
-            LocalWriteDomain::Acl,
-            Some(state.managed_acl_publication_mode),
-            authority.as_ref(),
-        )?;
-        Self::check_runtime_maps_ready(&state.pin_path)?;
-
-        self.resolve_group_id(&state.state, src_group)?;
-        self.resolve_group_id(&state.state, dst_group)?;
-        Self::validate_policy_ports(proto, ports)?;
-        Self::requested_directions(direction)?;
-        let plan = self
-            .apply_standalone_acl_mutations_locked(
-                instance,
-                &mut state,
-                &[StandaloneAclMutation::UpsertPolicy {
-                    src_group: src_group.to_string(),
-                    dst_group: dst_group.to_string(),
-                    proto,
-                    action,
-                    direction,
-                    ports: ports.map(str::to_string),
-                    ip_families: ip_families.to_vec(),
-                }],
-            )
-            .await?;
-        if plan.accepted == 0 {
-            return Err(ControlPlaneError::ValidationError(plan.errors.join("; ")));
-        }
-        Ok(plan.cleanup_pending)
-    }
-
     pub async fn add_policy_family_protocols(
         &self,
         instance: &str,
@@ -7371,29 +7323,6 @@ impl ControlPlane {
         Ok((plan.accepted, plan.errors, plan.cleanup_pending))
     }
 
-    pub async fn delete_policy(
-        &self,
-        instance: &str,
-        src_group: &str,
-        dst_group: &str,
-        proto: u8,
-        direction: u8,
-        ip_families: &[u8],
-    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
-        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
-        let authority = self.neutron_authorities.read().await.get(instance).cloned();
-        ensure_serialized_local_write_allowed(
-            instance,
-            LocalWriteDomain::Acl,
-            Some(state.managed_acl_publication_mode),
-            authority.as_ref(),
-        )?;
-        self.delete_policy_locked(instance, &mut state, src_group, dst_group, proto, direction, ip_families)
-            .await
-    }
-
     pub async fn delete_policy_family_protocols(
         &self,
         instance: &str,
@@ -7425,39 +7354,6 @@ impl ControlPlane {
                     dst_group: dst_group.to_string(),
                     direction,
                     family_protocols: family_protocols.to_vec(),
-                }],
-            )
-            .await?;
-        if plan.accepted == 0 {
-            return Err(ControlPlaneError::PolicyNotFound(plan.errors.join("; ")));
-        }
-        Ok(plan.cleanup_pending)
-    }
-
-    async fn delete_policy_locked(
-        &self,
-        instance: &str,
-        state: &mut InstanceState,
-        src_group: &str,
-        dst_group: &str,
-        proto: u8,
-        direction: u8,
-        ip_families: &[u8],
-    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
-        Self::check_runtime_maps_ready(&state.pin_path)?;
-        self.resolve_group_id(&state.state, src_group)?;
-        self.resolve_group_id(&state.state, dst_group)?;
-        Self::requested_directions(direction)?;
-        let plan = self
-            .apply_standalone_acl_mutations_locked(
-                instance,
-                state,
-                &[StandaloneAclMutation::DeletePolicy {
-                    src_group: src_group.to_string(),
-                    dst_group: dst_group.to_string(),
-                    proto,
-                    direction,
-                    ip_families: ip_families.to_vec(),
                 }],
             )
             .await?;
@@ -10947,15 +10843,14 @@ mod tests {
         .await;
 
         let add_error = cp
-            .add_policy(
+            .add_policy_family_protocols(
                 instance,
                 "policy-src",
                 "policy-dst",
-                libc::IPPROTO_TCP as u8,
                 0,
                 0,
                 None,
-                &[IP_FAMILY_V4],
+                &[(IP_FAMILY_V4, libc::IPPROTO_TCP as u8)],
             )
             .await
             .expect_err("ManagedAcl must block add_policy before authority commits");
@@ -10974,13 +10869,12 @@ mod tests {
         .await;
 
         let delete_error = cp
-            .delete_policy(
+            .delete_policy_family_protocols(
                 instance,
                 "policy-src",
                 "policy-dst",
-                libc::IPPROTO_TCP as u8,
                 0,
-                &[IP_FAMILY_V4],
+                &[(IP_FAMILY_V4, libc::IPPROTO_TCP as u8)],
             )
             .await
             .expect_err("ManagedAcl must block delete_policy before authority commits");
@@ -11152,28 +11046,26 @@ mod tests {
         }
 
         let add_error = cp
-            .add_policy(
+            .add_policy_family_protocols(
                 instance,
                 "policy-src",
                 "policy-dst",
-                libc::IPPROTO_TCP as u8,
                 0,
                 0,
                 None,
-                &[IP_FAMILY_V4],
+                &[(IP_FAMILY_V4, libc::IPPROTO_TCP as u8)],
             )
             .await
             .expect_err("missing maps must remain the first standalone add failure");
         self::assert_not_local_write_blocked(add_error, 503);
 
         let delete_error = cp
-            .delete_policy(
+            .delete_policy_family_protocols(
                 instance,
                 "policy-src",
                 "policy-dst",
-                libc::IPPROTO_TCP as u8,
                 0,
-                &[IP_FAMILY_V4],
+                &[(IP_FAMILY_V4, libc::IPPROTO_TCP as u8)],
             )
             .await
             .expect_err("missing maps must remain the first standalone delete failure");
