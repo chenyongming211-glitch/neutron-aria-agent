@@ -11,6 +11,10 @@ ADMIN_RC_FILE="${ROOT}/custom-adminrc"
 ADMINRC_RECORD="${ROOT}/adminrc-record"
 printf 'OS_AUTH_URL=http://keystone.invalid/v3\n' >"${ADMIN_RC_FILE}"
 
+PYTHONPATH="${REPO_ROOT}/openstack/neutronclient_aria" python3 -m unittest \
+    neutronclient_aria.tests.test_aria_acl_cli.AriaAclCliTest.test_rule_parser_accepts_ipv6_ethertype \
+    neutronclient_aria.tests.test_aria_acl_cli.AriaAclCliTest.test_rule_and_address_set_lists_include_ethertype
+
 cat >"${ROOT}/bin/id" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "-u" ]; then

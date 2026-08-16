@@ -16,13 +16,13 @@ def _bool(value):
 
 def _protocol(value):
     normalized = str(value).strip().lower()
-    if normalized in ("any", "tcp", "udp", "icmp"):
+    if normalized in ("any", "tcp", "udp", "icmp", "icmpv6", "ipv6-icmp"):
         return normalized
     try:
         number = int(normalized)
     except (TypeError, ValueError):
         raise argparse.ArgumentTypeError(
-            "protocol must be any/tcp/udp/icmp or 0..255"
+            "protocol must be any/tcp/udp/icmp/icmpv6/ipv6-icmp or 0..255"
         )
     if number < 0 or number > 255:
         raise argparse.ArgumentTypeError("protocol number must be in 0..255")
@@ -286,7 +286,10 @@ class AriaAclRuleList(_AriaAclList):
     resource_plural = "aria_acl_rules"
     path = "/aria-acl-rules"
     object_path = "/aria-acl-rules"
-    list_columns = ["id", "policy_id", "direction", "priority", "action", "protocol", "enabled"]
+    list_columns = [
+        "id", "policy_id", "direction", "priority", "action", "ethertype",
+        "protocol", "enabled",
+    ]
 
     def add_known_arguments(self, parser):
         parser.add_argument("--policy-id", dest="policy_id")
@@ -325,7 +328,7 @@ class AriaAclRuleCreate(_AriaAclCreate):
         parser.add_argument("--dst-port-min", type=int)
         parser.add_argument("--dst-port-max", type=int)
         parser.add_argument("--dst-port", type=int)
-        parser.add_argument("--ethertype", choices=["IPv4"])
+        parser.add_argument("--ethertype", choices=["IPv4", "IPv6"])
         self._add_enabled(parser)
 
     def args2body(self, parsed_args):
@@ -372,7 +375,7 @@ class AriaAclRuleUpdate(_AriaAclUpdate):
         parser.add_argument("--dst-port-min", type=int)
         parser.add_argument("--dst-port-max", type=int)
         parser.add_argument("--dst-port", type=int)
-        parser.add_argument("--ethertype", choices=["IPv4"])
+        parser.add_argument("--ethertype", choices=["IPv4", "IPv6"])
         self._add_enabled(parser)
 
     def args2body(self, parsed_args):
@@ -412,7 +415,9 @@ class AriaAclAddressSetList(_AriaAclList):
     resource_plural = "aria_acl_address_sets"
     path = "/aria-acl-address-sets"
     object_path = "/aria-acl-address-sets"
-    list_columns = ["id", "name", "members", "enabled", "revision_number"]
+    list_columns = [
+        "id", "name", "ethertype", "members", "enabled", "revision_number",
+    ]
 
 
 class AriaAclAddressSetShow(_AriaAclShow):
