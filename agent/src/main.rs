@@ -20,6 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api_handlers;
 mod api_routes;
+mod acl_runtime_schema;
 mod control_plane;
 mod ebpf_binary;
 mod fault_injection;
