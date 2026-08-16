@@ -314,6 +314,65 @@ mod tests {
     }
 
     #[test]
+    fn acl_runtime_schema_legacy_tc_inventory_refuses_cleanup_without_link_pin() {
+        let state_path = temp_state_path("legacy-tc-state");
+        let pin_path = temp_state_path("global-v2");
+        std::fs::create_dir_all(&state_path).unwrap();
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(
+            state_path.join(".global-v2.live-ifaces.json"),
+            br#"{"schema_version":2,"ifaces":[{"iface":"tap-legacy","ifindex":17,"active":true}]}"#,
+        )
+        .unwrap();
+        let old = AclRuntimeMetadata {
+            runtime_schema: 2,
+            acl_policy_key_schema: 1,
+        };
+        publish_acl_runtime_metadata(&state_path, &old).unwrap();
+
+        let activity = inventory_managed_runtime_activity(&state_path, &pin_path)
+            .expect("legacy TC inventory must be readable without a link pin");
+        assert_eq!(activity.link_pin_count, 0);
+        assert_eq!(activity.persisted_iface_count, 1);
+        assert_eq!(
+            classify_acl_runtime_schema_activity(Some(&old), activity),
+            AclRuntimeSchemaDisposition::RefuseLive {
+                reason: "acl_runtime_schema_mismatch_live".to_string(),
+            }
+        );
+        assert_eq!(
+            prepare_acl_runtime_schema_with_activity(&state_path, &pin_path, activity)
+                .unwrap_err(),
+            "acl_runtime_schema_mismatch_live"
+        );
+        assert!(pin_path.exists(), "live legacy TC pins must not be removed");
+        assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(old));
+
+        std::fs::remove_dir_all(state_path).unwrap();
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn acl_runtime_schema_malformed_legacy_inventory_blocks_cleanup() {
+        let state_path = temp_state_path("malformed-legacy-tc-state");
+        let pin_path = temp_state_path("global-v2");
+        std::fs::create_dir_all(&state_path).unwrap();
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(
+            state_path.join(".global-v2.live-ifaces.json"),
+            b"not-json",
+        )
+        .unwrap();
+
+        let error = inventory_managed_runtime_activity(&state_path, &pin_path).unwrap_err();
+
+        assert!(error.contains("parse persisted live ifaces"));
+        assert!(pin_path.exists(), "unknown legacy activity must fail safely");
+        std::fs::remove_dir_all(state_path).unwrap();
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
     fn acl_runtime_schema_current_metadata_is_adopted() {
         let metadata = AclRuntimeMetadata {
             runtime_schema: ACL_RUNTIME_SCHEMA_VERSION,

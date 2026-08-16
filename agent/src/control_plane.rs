@@ -11173,6 +11173,29 @@ mod tests {
         assert!(writes.iter().all(|(_, _, group_id)| *group_id != 30));
     }
 
+    #[test]
+    fn managed_acl_shadow_ipv6_failure_does_not_complete_atomic_stage() {
+        let mut staged_families = Vec::new();
+        let mut bank_switched = false;
+
+        let stage_result = execute_acl_family_staging(|family| {
+            staged_families.push(family);
+            if family == IP_FAMILY_V6 {
+                return Err(ControlPlaneError::KernelError(
+                    "forced IPv6 staging failure".to_string(),
+                ));
+            }
+            Ok(())
+        });
+        if stage_result.is_ok() {
+            bank_switched = true;
+        }
+
+        assert!(stage_result.is_err());
+        assert_eq!(staged_families, vec![IP_FAMILY_V4, IP_FAMILY_V6]);
+        assert!(!bank_switched, "a partial dual-family stage must not publish");
+    }
+
     fn managed_replacement(direction: &'static str) -> SharedNetworkMutation {
         SharedNetworkMutation::Replaced {
             direction,

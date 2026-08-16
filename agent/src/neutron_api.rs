@@ -7011,6 +7011,32 @@ mod tests {
 
     static STATUS_V1_SCENARIOS: OnceLock<Value> = OnceLock::new();
 
+    #[test]
+    fn acl_runtime_schema_blocked_status_is_operator_visible() {
+        let response = acl_runtime_schema_blocked_status(
+            "acl_runtime_schema_mismatch_live".to_string(),
+        );
+
+        assert_eq!(
+            response.transaction_state,
+            NeutronStatusTransactionState::Blocked
+        );
+        assert_eq!(
+            response.overall_readiness,
+            NeutronStatusOverallReadiness::Blocked
+        );
+        assert_eq!(response.required_action, NeutronStatusRequiredAction::Operator);
+        assert_eq!(response.wal_status, "acl_runtime_schema_mismatch_live");
+        assert_eq!(response.authority_state, "acl_runtime_schema_mismatch_live");
+        assert!(response.managed_ports.is_empty());
+        assert!(response.port_statuses.is_empty());
+        assert!(response.active_instances.is_empty());
+
+        let _router = build_acl_runtime_schema_blocked_router(
+            "acl_runtime_schema_mismatch_live".to_string(),
+        );
+    }
+
     #[derive(Deserialize)]
     struct StatusV1RuntimeSeed {
         accepted_generation: u64,

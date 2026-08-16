@@ -74,6 +74,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "tcx_attachment_"],
     ["test", "--locked", "-p", "aria-agent", "xdp_link_identity_"],
     ["test", "--locked", "-p", "aria-agent", "preexisting_acl_runtime_"],
+    ["test", "--locked", "-p", "aria-agent", "acl_runtime_schema_"],
     ["test", "--locked", "-p", "aria-api", "instance_info_reports_"],
     ["test", "--locked", "-p", "aria-agent", "tc_ct_contract_metric_labels_are_exact"],
     ["test", "--locked", "-p", "aria-core", "acl_ingress_hook_"],
