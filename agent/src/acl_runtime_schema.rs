@@ -23,6 +23,12 @@ pub(crate) enum AclRuntimeSchemaDisposition {
     RefuseLive { reason: String },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AclRuntimeSchemaPreparation {
+    Adopted,
+    RebuiltDormant,
+}
+
 pub(crate) fn current_acl_runtime_metadata() -> AclRuntimeMetadata {
     AclRuntimeMetadata {
         runtime_schema: ACL_RUNTIME_SCHEMA_VERSION,
@@ -171,6 +177,94 @@ pub(crate) fn publish_acl_runtime_metadata(
                 error
             )
         })
+}
+
+pub(crate) fn count_managed_link_pins(shared_pin_path: &Path) -> Result<usize, String> {
+    match fs::symlink_metadata(shared_pin_path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "managed runtime pin path is not a directory: {}",
+                shared_pin_path.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "inspect managed runtime pin path {}: {}",
+                shared_pin_path.display(),
+                error
+            ));
+        }
+    }
+    let mut count = 0usize;
+    for entry in fs::read_dir(shared_pin_path).map_err(|error| {
+        format!(
+            "read managed runtime pin path {}: {}",
+            shared_pin_path.display(),
+            error
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read managed runtime pin entry {}: {}",
+                shared_pin_path.display(),
+                error
+            )
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if ["_xdp_link", "_tc_egress_link", "_tc_ingress_link"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+        {
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| "managed runtime link pin count overflow".to_string())?;
+        }
+    }
+    Ok(count)
+}
+
+pub(crate) fn prepare_acl_runtime_schema(
+    base_state_path: &Path,
+    shared_pin_path: &Path,
+    live_link_count: usize,
+) -> Result<AclRuntimeSchemaPreparation, String> {
+    let metadata = load_acl_runtime_metadata(base_state_path)?;
+    match classify_acl_runtime_schema(metadata.as_ref(), live_link_count) {
+        AclRuntimeSchemaDisposition::Adopt => Ok(AclRuntimeSchemaPreparation::Adopted),
+        AclRuntimeSchemaDisposition::RefuseLive { reason } => Err(reason),
+        AclRuntimeSchemaDisposition::RebuildDormant => {
+            match fs::symlink_metadata(shared_pin_path) {
+                Ok(pin_metadata) if pin_metadata.file_type().is_dir() => {
+                    fs::remove_dir_all(shared_pin_path).map_err(|error| {
+                        format!(
+                            "remove dormant managed runtime pin directory {}: {}",
+                            shared_pin_path.display(),
+                            error
+                        )
+                    })?;
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "dormant managed runtime pin path is not a directory: {}",
+                        shared_pin_path.display()
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "inspect dormant managed runtime pin path {}: {}",
+                        shared_pin_path.display(),
+                        error
+                    ));
+                }
+            }
+            publish_acl_runtime_metadata(base_state_path, &current_acl_runtime_metadata())?;
+            Ok(AclRuntimeSchemaPreparation::RebuiltDormant)
+        }
+    }
 }
 
 #[cfg(test)]

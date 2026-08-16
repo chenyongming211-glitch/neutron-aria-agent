@@ -967,6 +967,38 @@ async fn main() {
         warn!(path = %config.state_path, error = %e, "failed to create state directory");
     }
 
+    if config.mode == AgentMode::NeutronManaged {
+        let shared_pin_path = Path::new(&config.pin_path)
+            .join(control_plane::MANAGED_SHARED_PIN_NAMESPACE);
+        let live_link_count = match acl_runtime_schema::count_managed_link_pins(&shared_pin_path) {
+            Ok(count) => count,
+            Err(error) => {
+                error!(error = %error, "failed to inventory ACL runtime schema links");
+                std::process::exit(1);
+            }
+        };
+        match acl_runtime_schema::prepare_acl_runtime_schema(
+            Path::new(&config.state_path),
+            &shared_pin_path,
+            live_link_count,
+        ) {
+            Ok(acl_runtime_schema::AclRuntimeSchemaPreparation::Adopted) => {
+                info!(live_link_count, "adopted current ACL runtime schema");
+            }
+            Ok(acl_runtime_schema::AclRuntimeSchemaPreparation::RebuiltDormant) => {
+                info!("rebuilt dormant ACL runtime schema metadata and pins");
+            }
+            Err(error) => {
+                error!(
+                    error = %error,
+                    live_link_count,
+                    "refusing unsafe ACL runtime schema adoption"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let trace_manager = Arc::new(trace_backend::TraceManager::new(
         resolved_ebpf.trace_backend,
     ));
