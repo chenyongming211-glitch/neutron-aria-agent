@@ -90,6 +90,111 @@ class UdsClientTestCase(unittest.TestCase):
         body.update(overrides)
         return body
 
+    def _v3_capabilities(self, **overrides):
+        body = self._capabilities(
+            error_codes_hash="v0.9-neutron-errors-3",
+            capability_hash="v0.9-neutron-capabilities-5",
+            status_schema_version_min=2,
+            status_schema_version_max=3,
+            status_contract_hash="v0.9-neutron-status-3",
+            counters_v1=True,
+        )
+        body.update(overrides)
+        return body
+
+    @staticmethod
+    def _acl_snapshot(ethertype):
+        return {
+            "generation": 12,
+            "host": "compute-1",
+            "ports": [{
+                "port_id": "port-1",
+                "ifname": "tap-port-1",
+                "acl": {
+                    "enabled": True,
+                    "rules": [{
+                        "id": "rule-1",
+                        "ethertype": ethertype,
+                    }],
+                },
+            }],
+        }
+
+    def test_capabilities_current_hash_defaults_ipv6_and_counters_false(self):
+        FakeConnection.responses.append(FakeResponse(
+            200,
+            "OK",
+            self._v3_capabilities(),
+        ))
+
+        body = self.client.capabilities(required_domains=["acl"])
+
+        self.assertFalse(body["acl_ipv6_v1"])
+        self.assertFalse(body["counters_v2"])
+
+    def test_capabilities_future_hash_requires_ipv6_and_counters_true(self):
+        future = self._v3_capabilities(
+            capability_hash="v0.9-neutron-capabilities-6",
+            acl_ipv6_v1=True,
+            counters_v2=True,
+        )
+        FakeConnection.responses.append(FakeResponse(200, "OK", future))
+        body = self.client.capabilities(required_domains=["acl"])
+        self.assertTrue(body["acl_ipv6_v1"])
+        self.assertTrue(body["counters_v2"])
+
+        for missing_field in ("acl_ipv6_v1", "counters_v2"):
+            invalid = dict(future)
+            invalid.pop(missing_field)
+            client = LocalClient(
+                "/tmp/aria-agent.sock",
+                timeout=1.0,
+                connection_factory=FakeConnection,
+            )
+            FakeConnection.responses.append(FakeResponse(200, "OK", invalid))
+            with self.assertRaises(LocalApiContractError):
+                client.capabilities(required_domains=["acl"])
+        for false_field in ("acl_ipv6_v1", "counters_v2"):
+            invalid = dict(future)
+            invalid[false_field] = False
+            client = LocalClient(
+                "/tmp/aria-agent.sock",
+                timeout=1.0,
+                connection_factory=FakeConnection,
+            )
+            FakeConnection.responses.append(FakeResponse(200, "OK", invalid))
+            with self.assertRaises(LocalApiContractError):
+                client.capabilities(required_domains=["acl"])
+
+    def test_ipv6_snapshot_requires_remote_capability(self):
+        FakeConnection.responses.append(FakeResponse(
+            200,
+            "OK",
+            self._v3_capabilities(),
+        ))
+        self.client.capabilities(required_domains=["acl"])
+        requests_before = len(FakeConnection.requests)
+
+        with self.assertRaises(LocalApiContractError):
+            self.client.put_snapshot(self._acl_snapshot("IPv6"))
+
+        self.assertEqual(requests_before, len(FakeConnection.requests))
+
+    def test_ipv4_snapshot_remains_allowed_during_capability_rollout(self):
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", self._v3_capabilities()),
+            FakeResponse(200, "OK", {
+                "generation": 12,
+                "results": [],
+                "active_instances": [],
+            }),
+        ])
+        self.client.capabilities(required_domains=["acl"])
+
+        response = self.client.put_snapshot(self._acl_snapshot("IPv4"))
+
+        self.assertEqual(12, response["generation"])
+
     def test_capabilities_validates_required_domains(self):
         FakeConnection.responses.append(FakeResponse(200, "OK", self._capabilities()))
 
