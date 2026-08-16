@@ -394,10 +394,27 @@ class AriaAclCliTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["--default-action", "deny"])
 
-    def test_rule_parser_rejects_ipv6_source_ports_and_unknown_protocol(self):
+    def test_rule_parser_accepts_ipv6_ethertype(self):
+        command = aria_acl.AriaAclRuleCreate(None, None)
+        parser = argparse.ArgumentParser()
+        command.add_known_arguments(parser)
+        args = parser.parse_args([
+            "--policy-id", "policy-1",
+            "--direction", "ingress",
+            "--priority", "100",
+            "--action", "allow",
+            "--ethertype", "IPv6",
+            "--protocol", "icmpv6",
+            "--src-cidr", "2001:db8::/64",
+        ])
+
+        body = command.args2body(args)["aria_acl_rule"]
+        self.assertEqual("IPv6", body["ethertype"])
+        self.assertEqual("icmpv6", body["protocol"])
+
+    def test_rule_parser_rejects_source_ports_and_unknown_protocol(self):
         command = aria_acl.AriaAclRuleCreate(None, None)
         for args in (
-            ["--policy-id", "p1", "--direction", "ingress", "--priority", "1", "--action", "allow", "--ethertype", "IPv6"],
             ["--policy-id", "p1", "--direction", "ingress", "--priority", "1", "--action", "allow", "--src-port-min", "80"],
             ["--policy-id", "p1", "--direction", "ingress", "--priority", "1", "--action", "allow", "--protocol", "bogus"],
         ):
@@ -520,6 +537,33 @@ class AriaAclCliTest(unittest.TestCase):
         self.assertEqual(
             ["10.0.0.0/24", "10.0.1.1/32"],
             body["members"],
+        )
+
+    def test_address_set_show_displays_computed_ethertype(self):
+        class FakeClient(object):
+            def show_ext(self, path, resource_id):
+                return {"aria_acl_address_set": {
+                    "id": resource_id,
+                    "members": ["2001:db8::/64"],
+                    "ethertype": "IPv6",
+                }}
+
+        command = aria_acl.AriaAclAddressSetShow(
+            FakeApp(FakeClient()),
+            None,
+        )
+        args = command.get_parser(
+            "aria-acl-address-set-show"
+        ).parse_args(["set-1"])
+        rows = self._show_result(command.execute(args))
+
+        self.assertEqual("IPv6", rows["ethertype"])
+
+    def test_rule_and_address_set_lists_include_ethertype(self):
+        self.assertIn("ethertype", aria_acl.AriaAclRuleList.list_columns)
+        self.assertIn(
+            "ethertype",
+            aria_acl.AriaAclAddressSetList.list_columns,
         )
 
 
