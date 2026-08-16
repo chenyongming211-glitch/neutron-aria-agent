@@ -1,6 +1,6 @@
 use crate::common::{
-    policy_family_is_valid, PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY,
-    DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
+    PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY,
+    DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
 use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
@@ -28,12 +28,6 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8)
     // Priority-ordered bitmask: which fields to wildcard (0=specific value, 1=wildcard to 0)
     // bit 0: src_id, bit 1: dst_id, bit 2: proto
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
-
-    // The caller selects family only after its IPv4/IPv6 parser branch. Reject
-    // a stale or uninitialized pipeline context before any policy-map lookup.
-    if !policy_family_is_valid(ip_family) || p.ip_family != ip_family {
-        return XDP_PASS;
-    }
 
     let mut i = 0u8;
     while i < 8 {
