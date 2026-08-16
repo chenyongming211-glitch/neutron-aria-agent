@@ -1447,6 +1447,137 @@ mod tests {
     }
 
     #[test]
+    fn legacy_family_checkpoint_pre_publication_failure_is_fatal_and_preserves_files() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        let snapshot_path = format!("{}/state.json", state_path);
+        let wal_path = format!("{}/state.wal", state_path);
+        fs::write(&wal_path, b"").unwrap();
+        let snapshot_before = fs::read(&snapshot_path).unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+
+        let error = load_with_wal_with_compact_hook(&state_path, |phase| match phase {
+            FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => {
+                Err("injected pre-publication failure".to_string())
+            }
+            FamilyMigrationCheckpointPhase::AfterSnapshotPublication => Ok(()),
+        })
+        .expect_err("pre-publication checkpoint failure must remain fatal");
+
+        assert!(matches!(
+            &error,
+            WalLoadError::LegacyAclFamilyCheckpoint { reason }
+                if reason.contains("injected pre-publication failure")
+        ));
+        assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn legacy_family_checkpoint_post_publication_failure_returns_committed_state() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        let wal_path = format!("{}/state.wal", state_path);
+        fs::write(
+            &wal_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&WalEntry::AddGroup {
+                    name: "retained-prefix".to_string(),
+                    cidr: "192.0.2.0/24".to_string(),
+                })
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        let committed = load_with_wal_with_compact_hook(&state_path, |phase| match phase {
+            FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => Ok(()),
+            FamilyMigrationCheckpointPhase::AfterSnapshotPublication => {
+                Err("injected post-publication cleanup failure".to_string())
+            }
+        })
+        .expect("published family checkpoint must remain usable");
+
+        assert_any_rule_projection(&committed, 0, "80");
+        assert!(committed.wal_replay_cursor.checkpoint_id > 0);
+        let checkpointed_snapshot = fs::read(format!("{}/state.json", state_path)).unwrap();
+        let retained_wal = fs::read(&wal_path).unwrap();
+        let restarted = load_with_wal(&state_path).expect("cursor recovery must converge");
+        assert_any_rule_projection(&restarted, 0, "80");
+        assert_eq!(restarted.wal_replay_cursor, committed.wal_replay_cursor);
+        assert_eq!(
+            fs::read(format!("{}/state.json", state_path)).unwrap(),
+            checkpointed_snapshot
+        );
+        assert_eq!(fs::read(&wal_path).unwrap(), retained_wal);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn legacy_family_snapshot_with_malformed_wal_is_typed_fatal_and_preserves_files() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        let snapshot_path = format!("{}/state.json", state_path);
+        let wal_path = format!("{}/state.wal", state_path);
+        fs::write(&wal_path, b"{unrelated malformed record}\n").unwrap();
+        let snapshot_before = fs::read(&snapshot_path).unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+
+        let error = load_with_wal(&state_path)
+            .expect_err("WAL failure must block publishing normalized family state");
+
+        assert!(matches!(
+            &error,
+            WalLoadError::LegacyAclFamilyCheckpointBlockedByWalFailure {
+                failure_count: 1,
+                reason,
+            } if reason == "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count=1"
+        ));
+        assert_eq!(error.reason(), "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count=1");
+        assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
+    fn concrete_family_snapshot_with_malformed_wal_remains_best_effort_usable() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        let mut state = FirewallState::default();
+        state
+            .apply_add_rule(0, 0, 6, 0, Some("80"), 0, IP_FAMILY_V4)
+            .unwrap();
+        let snapshot_path = format!("{}/state.json", state_path);
+        let wal_path = format!("{}/state.wal", state_path);
+        fs::write(&snapshot_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+        fs::write(&wal_path, b"{unrelated malformed record}\n").unwrap();
+        let snapshot_before = fs::read(&snapshot_path).unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+
+        let loaded = load_with_wal(&state_path)
+            .expect("malformed WAL remains best-effort without family migration");
+
+        assert_eq!(loaded.rules.len(), 1);
+        assert_eq!(loaded.rules[0].ip_family, IP_FAMILY_V4);
+        assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
     fn wal_compact_clears_wal() {
         let state_path = temp_state_path();
 

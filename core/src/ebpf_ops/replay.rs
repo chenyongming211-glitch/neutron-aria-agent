@@ -1088,4 +1088,53 @@ mod family_migration_startup_tests {
         assert!(!replay_called.load(Ordering::Relaxed));
         let _ = fs::remove_dir_all(path);
     }
+
+    #[test]
+    fn malformed_wal_blocks_legacy_family_state_before_replay_callback() {
+        let path = std::env::temp_dir().join(format!(
+            "aria-family-wal-fatal-replay-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        let mut state = FirewallState::default();
+        state
+            .apply_add_rule(
+                0,
+                0,
+                6,
+                0,
+                Some("80"),
+                0,
+                crate::common::IP_FAMILY_V4,
+            )
+            .unwrap();
+        state.rules[0].ip_family = 0;
+        fs::write(
+            path.join("state.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        fs::write(path.join("state.wal"), b"{malformed record}\n").unwrap();
+        let snapshot_before = fs::read(path.join("state.json")).unwrap();
+        let wal_before = fs::read(path.join("state.wal")).unwrap();
+        let replay_called = AtomicBool::new(false);
+
+        let error = load_state_then_replay(path.to_str().unwrap(), |_| {
+            replay_called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .expect_err("WAL failure must abort family migration before replay");
+
+        assert_eq!(
+            error,
+            "legacy_acl_family_checkpoint_blocked_by_wal_failure: failure_count=1"
+        );
+        assert!(!replay_called.load(Ordering::Relaxed));
+        assert_eq!(fs::read(path.join("state.json")).unwrap(), snapshot_before);
+        assert_eq!(fs::read(path.join("state.wal")).unwrap(), wal_before);
+        let _ = fs::remove_dir_all(path);
+    }
 }
