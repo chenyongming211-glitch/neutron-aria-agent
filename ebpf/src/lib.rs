@@ -34,10 +34,10 @@ use common::{
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
     DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON,
     FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT,
-    FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, IP_FAMILY_V4, TAP_ID_UNASSIGNED,
-    TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT,
-    TRACE_RESULT_DROP_FRAGMENT, TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP,
-    TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
+    FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, IP_FAMILY_V4, IP_FAMILY_V6,
+    TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
+    TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_FRAGMENT, TRACE_RESULT_DROP_QOS,
+    TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
 };
 use conntrack::{CtLookupResult, CtMissReason};
 use maps::{
@@ -66,11 +66,13 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
             Some(p) => p,
             None => return XDP_PASS,
         };
-        if !parser::parse_eth_ipv4(data, data_end, frame_len, 0, info_ptr)
-            && !parser::parse_eth_ipv6(data, data_end, frame_len, 0, info_ptr)
-        {
+        let family = if parser::parse_eth_ipv4(data, data_end, frame_len, 0, info_ptr) {
+            IP_FAMILY_V4
+        } else if parser::parse_eth_ipv6(data, data_end, frame_len, 0, info_ptr) {
+            IP_FAMILY_V6
+        } else {
             return XDP_PASS;
-        }
+        };
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
             None => return XDP_PASS,
@@ -83,7 +85,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         (*pipe).ct_state = 0;
         (*pipe).drop_reason = 0;
         (*pipe).matched_bank = 0;
-        (*pipe).ip_family = IP_FAMILY_V4;
+        (*pipe).ip_family = family;
         match try_xdp_firewall(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => XDP_PASS,
@@ -129,7 +131,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
                     proto = invalid_proto;
                 }
             }
-            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure, proto);
+            record_tc_parse_drop(&ctx, DIR_EGRESS, pkt_len, parse_failure, proto, family);
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -137,6 +139,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         (*pipe).reset_for_tc_packet(pkt_len, DIR_EGRESS);
+        (*pipe).ip_family = family;
         match try_tc_egress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -335,7 +338,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
                     proto = invalid_proto;
                 }
             }
-            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure, proto);
+            record_tc_parse_drop(&ctx, DIR_INGRESS, pkt_len, parse_failure, proto, family);
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -343,6 +346,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         (*pipe).reset_for_tc_packet(pkt_len, DIR_INGRESS);
+        (*pipe).ip_family = family;
         match try_tc_ingress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -605,6 +609,7 @@ unsafe fn record_tc_parse_drop(
     pkt_len: u32,
     reason: u8,
     proto: u8,
+    ip_family: u8,
 ) {
     let skb = ctx.as_ptr() as *const __sk_buff;
     drops::record_drop(&drops::DropArgs {
@@ -616,7 +621,7 @@ unsafe fn record_tc_parse_drop(
         reason,
         direction,
         proto,
-        _pad: 0,
+        ip_family,
     });
 }
 
@@ -652,6 +657,7 @@ fn get_matched(p: &PipelineCtx) -> conntrack::MatchedPolicy {
         proto: p.matched_proto,
         direction: p.matched_direction,
         bank: p.matched_bank,
+        ip_family: p.ip_family,
         policy_hit: (p.flags & FLAG_POLICY_HIT) != 0,
     }
 }
@@ -703,11 +709,11 @@ unsafe fn do_drop(p: &PipelineCtx) {
         reason: p.drop_reason,
         direction: p.direction,
         proto: p.proto,
+        ip_family: p.ip_family,
         src_id: p.src_id,
         dst_id: p.dst_id,
         pkt_len: p.pkt_len,
         now: p.now,
-        _pad: 0,
     });
 }
 

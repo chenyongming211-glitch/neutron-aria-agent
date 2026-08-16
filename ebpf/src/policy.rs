@@ -1,6 +1,6 @@
 use crate::common::{
-    PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY,
-    DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, IP_FAMILY_V4, XDP_DROP, XDP_PASS,
+    policy_family_is_valid, PipelineCtx, PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY,
+    DROP_ACL_DENY, DROP_ACL_PORT_DENY, FLAG_POLICY_HIT, XDP_DROP, XDP_PASS,
 };
 use crate::drops;
 use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
@@ -29,6 +29,16 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
     // bit 0: src_id, bit 1: dst_id, bit 2: proto
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
+    if !policy_family_is_valid(p.ip_family) {
+        p.matched_src_id = 0;
+        p.matched_dst_id = 0;
+        p.matched_proto = 0;
+        p.matched_direction = p.direction;
+        p.flags &= !FLAG_POLICY_HIT;
+        p.drop_reason = 0;
+        return XDP_PASS;
+    }
+
     let mut i = 0u8;
     while i < 8 {
         let mask = ORDER[i as usize];
@@ -43,7 +53,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
             proto,
             direction: p.direction,
             bank: p.matched_bank,
-            ip_family: IP_FAMILY_V4,
+            ip_family: p.ip_family,
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
@@ -78,11 +88,11 @@ unsafe fn record_policy_drop(p: &PipelineCtx, drop_reason: u8) {
         reason: drop_reason,
         direction: p.direction,
         proto: p.proto,
+        ip_family: p.ip_family,
         src_id: p.src_id,
         dst_id: p.dst_id,
         pkt_len: p.pkt_len,
         now: p.now,
-        _pad: 0,
     });
 }
 

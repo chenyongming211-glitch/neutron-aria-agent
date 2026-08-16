@@ -13,6 +13,7 @@ pub struct PortCounterBucket {
     pub dst_id: u32,
     pub proto: u8,
     pub direction: u8,
+    pub ip_family: u8,
     pub packets: u64,
     pub bytes: u64,
     pub dropped_packets: u64,
@@ -24,6 +25,7 @@ pub struct PortCounterReason {
     pub reason: u8,
     pub direction: u8,
     pub proto: u8,
+    pub ip_family: u8,
     pub packets: u64,
     pub bytes: u64,
 }
@@ -73,6 +75,7 @@ pub fn aggregate_port_counters(
             dst_id: entry.key.dst_id,
             proto: entry.key.proto,
             direction: entry.key.direction,
+            ip_family: entry.key.ip_family,
             packets: entry.packets,
             bytes: entry.bytes,
             dropped_packets: entry.dropped_packets,
@@ -81,30 +84,45 @@ pub fn aggregate_port_counters(
     }
     summary.policy_allow_packets =
         summary.policy_packets.saturating_sub(summary.policy_dropped_packets);
-    buckets.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(b.packets.cmp(&a.packets)));
+    buckets.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then(b.packets.cmp(&a.packets))
+            .then(a.ip_family.cmp(&b.ip_family))
+    });
     if buckets.len() > MAX_COUNTER_BUCKET_ROWS {
         buckets.truncate(MAX_COUNTER_BUCKET_ROWS);
         summary.truncated = true;
     }
     summary.buckets = buckets;
 
-    let mut reason_rows: BTreeMap<(u8, u8, u8), PortCounterReason> = BTreeMap::new();
+    let mut reason_rows: BTreeMap<(u8, u8, u8, u8), PortCounterReason> = BTreeMap::new();
     for entry in drop_stats {
         summary.drop_packets += entry.packets;
         summary.drop_bytes += entry.bytes;
         let row = reason_rows
-            .entry((entry.reason, entry.direction, entry.proto))
+            .entry((
+                entry.reason,
+                entry.direction,
+                entry.proto,
+                entry.ip_family,
+            ))
             .or_insert_with(|| PortCounterReason {
                 reason: entry.reason,
                 direction: entry.direction,
                 proto: entry.proto,
+                ip_family: entry.ip_family,
                 ..Default::default()
             });
         row.packets += entry.packets;
         row.bytes += entry.bytes;
     }
     let mut reasons: Vec<PortCounterReason> = reason_rows.into_values().collect();
-    reasons.sort_by(|a, b| b.packets.cmp(&a.packets));
+    reasons.sort_by(|a, b| {
+        b.packets
+            .cmp(&a.packets)
+            .then(a.ip_family.cmp(&b.ip_family))
+    });
     summary.reasons = reasons;
     summary
 }
@@ -211,6 +229,7 @@ fn collect_drop_rows(
                 reason: key.reason,
                 direction: key.direction,
                 proto: key.proto,
+                ip_family: key.ip_family,
                 src_id: key.src_id,
                 dst_id: key.dst_id,
                 packets,
@@ -290,6 +309,7 @@ mod tests {
             reason,
             direction: dir,
             proto,
+            ip_family: IP_FAMILY_V4,
             src_id: 0,
             dst_id: 0,
             packets,

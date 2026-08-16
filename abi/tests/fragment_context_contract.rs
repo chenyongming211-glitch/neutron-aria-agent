@@ -14,9 +14,9 @@ use aria_ebpf_abi::{
     FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
     FRAGMENT_METRIC_TRACKING_DISABLED, FRAGMENT_RUNTIME_MODE_MANAGED,
     FRAGMENT_RUNTIME_MODE_STANDALONE, IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP,
-    IP_FAMILY_V4, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
-    TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_FRAGMENT, TRACE_RESULT_DROP_QOS,
-    TRACE_RESULT_PASS,
+    IP_FAMILY_UNSPECIFIED, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
+    TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_FRAGMENT,
+    TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS,
 };
 
 const SECOND: u64 = 1_000_000_000;
@@ -584,7 +584,7 @@ fn assert_pipeline_ctx_reset_for_tc_packet(direction: u8, pkt_len: u32) {
     assert_eq!(pipeline.matched_proto, 0);
     assert_eq!(pipeline.matched_direction, 0);
     assert_eq!(pipeline.matched_bank, 0);
-    assert_eq!(pipeline.ip_family, IP_FAMILY_V4);
+    assert_eq!(pipeline.ip_family, IP_FAMILY_UNSPECIFIED);
     assert_eq!(pipeline.fragment_epoch_snapshot, 0);
     assert_eq!(pipeline.acl_bank_snapshot, 0);
     assert_eq!(pipeline.fragment_epoch_present, 0);

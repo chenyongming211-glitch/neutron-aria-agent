@@ -138,10 +138,10 @@ pub fn ct_acl_cache_is_current(
     expected_acl_bank: u8,
     expected_family: u8,
 ) -> bool {
-    validate_acl_bank == 0
-        || ((flags & CT_FLAG_ACL_EVALUATED) != 0
-            && ct_acl_bank_is_current(matched_bank, validate_acl_bank, expected_acl_bank)
-            && ct_acl_family_is_current(matched_family, expected_family))
+    ct_acl_family_is_current(matched_family, expected_family)
+        && (validate_acl_bank == 0
+            || ((flags & CT_FLAG_ACL_EVALUATED) != 0
+                && ct_acl_bank_is_current(matched_bank, validate_acl_bank, expected_acl_bank)))
 }
 
 #[repr(C)]
@@ -671,7 +671,7 @@ impl PipelineCtx {
         self.matched_proto = 0;
         self.matched_direction = 0;
         self.matched_bank = 0;
-        self.ip_family = IP_FAMILY_V4;
+        self.ip_family = IP_FAMILY_UNSPECIFIED;
         self.fragment_epoch_snapshot = 0;
         self.acl_bank_snapshot = 0;
         self.fragment_epoch_present = 0;
@@ -1050,6 +1050,8 @@ mod tests {
     #[test]
     fn tc_ct_cache_requires_acl_evaluation_when_acl_turns_on() {
         assert!(ct_acl_cache_is_current(0, 0, IP_FAMILY_V4, 0, 0, IP_FAMILY_V4));
+        assert!(!ct_acl_cache_is_current(0, 0, 0, 0, 0, IP_FAMILY_V4));
+        assert!(!ct_acl_cache_is_current(0, 0, IP_FAMILY_V6, 0, 0, IP_FAMILY_V4));
         assert!(!ct_acl_cache_is_current(0, 0, IP_FAMILY_V4, 1, 0, IP_FAMILY_V4));
         assert!(ct_acl_cache_is_current(
             CT_FLAG_ACL_EVALUATED,

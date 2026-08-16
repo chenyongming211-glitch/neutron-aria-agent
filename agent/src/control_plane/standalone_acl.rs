@@ -885,6 +885,7 @@ async fn execute_standalone_publication(
                 && old_rule.dst_group_id == new_rule.dst_group_id
                 && old_rule.proto == new_rule.proto
                 && old_rule.direction == new_rule.direction
+                && old_rule.ip_family == new_rule.ip_family
         }) {
             if let Err(error) = aria_core::monitoring::clear_rule_stats_for_policy(
                 runtime,
@@ -892,6 +893,7 @@ async fn execute_standalone_publication(
                 old_rule.dst_group_id,
                 old_rule.proto,
                 old_rule.direction,
+                old_rule.ip_family,
             ) {
                 warn!(error = %error, "failed to clear rule stats after standalone ACL publication");
             }

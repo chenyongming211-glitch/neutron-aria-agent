@@ -1,7 +1,7 @@
 use crate::common::{
     ct_acl_cache_is_current, ct_apply_confirmed_hit, ct_snapshot_is_stable, CtKey4, CtKey6,
     CtValue, PolicyKey, CT_ESTABLISHED, CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT, CT_NEW,
-    IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IP_FAMILY_V4,
+    IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IP_FAMILY_V4, IP_FAMILY_V6,
 };
 use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6, CT_VALUE_SCRATCH};
 use aya_ebpf::bindings::{BPF_EXIST, BPF_NOEXIST};
@@ -83,6 +83,7 @@ pub struct MatchedPolicy {
     pub proto: u8,
     pub direction: u8,
     pub bank: u8,
+    pub ip_family: u8,
     pub policy_hit: bool,
 }
 
@@ -96,7 +97,7 @@ impl MatchedPolicy {
             proto: self.proto,
             direction: self.direction,
             bank: self.bank,
-            ip_family: IP_FAMILY_V4,
+            ip_family: self.ip_family,
         }
     }
 }
@@ -127,6 +128,7 @@ fn extract_matched(entry: &CtValue, tap_id: u32) -> MatchedPolicy {
         proto: entry.matched_proto,
         direction: entry.direction,
         bank: entry.matched_bank,
+        ip_family: entry.matched_family,
         policy_hit: (entry.flags & CT_FLAG_POLICY_HIT) != 0,
     }
 }
@@ -335,7 +337,7 @@ pub unsafe fn ct_lookup_v6(
             (*entry).matched_family,
             validate_acl_bank,
             expected_acl_bank,
-            IP_FAMILY_V4,
+            IP_FAMILY_V6,
         ) {
             let _ = CT_TABLE_V6.remove(key);
             return CtLookupResult::Miss(CtMissReason::StaleBank);
@@ -363,7 +365,7 @@ pub unsafe fn ct_lookup_v6(
             (*entry).matched_family,
             validate_acl_bank,
             expected_acl_bank,
-            IP_FAMILY_V4,
+            IP_FAMILY_V6,
         ) {
             let _ = CT_TABLE_V6.remove(&rev);
             return CtLookupResult::Miss(CtMissReason::StaleBank);
@@ -407,7 +409,7 @@ pub unsafe fn ct_create_v4(
         matched_src_id: matched.src_id,
         matched_dst_id: matched.dst_id,
         matched_bank: matched.bank,
-        matched_family: IP_FAMILY_V4,
+        matched_family: matched.ip_family,
         _pad: [0; 2],
         last_seen: now,
         pkt_count: 1,
@@ -445,7 +447,7 @@ pub unsafe fn ct_create_v6(
         matched_src_id: matched.src_id,
         matched_dst_id: matched.dst_id,
         matched_bank: matched.bank,
-        matched_family: IP_FAMILY_V4,
+        matched_family: matched.ip_family,
         _pad: [0; 2],
         last_seen: now,
         pkt_count: 1,

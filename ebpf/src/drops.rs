@@ -1,4 +1,4 @@
-use crate::common::{DropKey, IP_FAMILY_UNSPECIFIED};
+use crate::common::DropKey;
 use crate::maps::{DROP_REASON_STATS, DROP_VALUE_BUF};
 
 #[repr(C)]
@@ -12,7 +12,7 @@ pub struct DropArgs {
     pub reason: u8,
     pub direction: u8,
     pub proto: u8,
-    pub _pad: u8,
+    pub ip_family: u8,
 }
 
 /// Record a drop event in the DROP_REASON_STATS per-CPU hash map.
@@ -23,7 +23,7 @@ pub unsafe fn record_drop(args: &DropArgs) {
         reason: args.reason,
         direction: args.direction,
         proto: args.proto,
-        ip_family: IP_FAMILY_UNSPECIFIED,
+        ip_family: args.ip_family,
         src_id: args.src_id,
         dst_id: args.dst_id,
     };

@@ -6774,6 +6774,7 @@ impl ControlPlane {
                     && current_rule.dst_group_id == old_rule.dst_group_id
                     && current_rule.proto == old_rule.proto
                     && current_rule.direction == old_rule.direction
+                    && current_rule.ip_family == old_rule.ip_family
             })
         }) {
             if let Err(error) = aria_core::monitoring::clear_rule_stats_for_policy(
@@ -6782,6 +6783,7 @@ impl ControlPlane {
                 rule.dst_group_id,
                 rule.proto,
                 rule.direction,
+                rule.ip_family,
             ) {
                 warn!(error = %error, "failed to clear rule stats after owned ACL diff delete");
             }

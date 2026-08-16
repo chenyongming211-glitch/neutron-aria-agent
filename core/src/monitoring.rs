@@ -1,8 +1,9 @@
 use crate::common::{
     fragment_metric_index, CtKey4, CtKey6, CtValue, FlowStatsValue, FragmentContextKey4,
     FragmentContextKey6, FragmentContextValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
-    MirrorKey, MirrorStatsValue, PolicyKey, QosKey, QosStatsValue, RuleStatsValue, TapMapRuntime,
-    TcpRtValue, CT_ESTABLISHED, CT_NEW, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6, IP_FAMILY_V4,
+    policy_family_is_valid, MirrorKey, MirrorStatsValue, PolicyKey, QosKey, QosStatsValue,
+    RuleStatsValue, TapMapRuntime, TcpRtValue, CT_ESTABLISHED, CT_NEW, FRAGMENT_FAMILY_IPV4,
+    FRAGMENT_FAMILY_IPV6,
     FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_HIT, FRAGMENT_METRIC_CONTEXT_INSERTED,
     FRAGMENT_METRIC_CONTEXT_MISSING, FRAGMENT_METRIC_CONTEXT_OVERLAP,
     FRAGMENT_METRIC_CONTEXT_STALE, FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
@@ -1000,7 +1001,11 @@ pub fn clear_rule_stats_for_policy(
     dst_id: u32,
     proto: u8,
     direction: u8,
+    ip_family: u8,
 ) -> Result<(), String> {
+    if !policy_family_is_valid(ip_family) {
+        return Err(format!("invalid ACL IP family {}", ip_family));
+    }
     let map_path = format!("{}/RULE_STATS", runtime.pin_path);
     let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open RULE_STATS: {:?}", e))?;
     let mut map = PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
@@ -1015,7 +1020,7 @@ pub fn clear_rule_stats_for_policy(
         proto,
         direction,
         bank,
-        ip_family: IP_FAMILY_V4,
+        ip_family,
     });
     execute_counted_map_delete_batch(
         keys,
