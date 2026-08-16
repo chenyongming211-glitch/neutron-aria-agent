@@ -177,7 +177,8 @@ pub struct DropKey {
 }
 ```
 
-`PipelineCtx._pad[0]` becomes `ip_family`; the remaining byte stays reserved.
+`PipelineCtx._pad2[0]` becomes `ip_family`; the two-byte `_pad` after
+`drop_reason` stays reserved.
 `MatchedPolicy` and every Rust-side constructor or comparison carry the same
 family. Compile-time layout assertions and `repr(C)` contract checks continue
 to enforce the existing sizes and offsets.
@@ -244,11 +245,12 @@ that selector is provided by `PolicyKey.ip_family`.
 ```rust
 struct AclSelectorId {
     family: IpFamily,
-    ordinal: usize,
+    ordinal: Option<usize>,
 }
 ```
 
-Ordinals are allocated independently inside each `(side,family)` namespace.
+`None` represents `any`; `Some(0)` is the first concrete selector. Concrete
+ordinals are allocated independently inside each `(side,family)` namespace.
 The same ordinal in IPv4 and IPv6 never resolves to the same group name.
 
 Every `GroupInfo` created by the Neutron ACL compiler must contain CIDRs from
