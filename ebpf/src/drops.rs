@@ -3,7 +3,7 @@ use crate::maps::{DROP_KEY_SCRATCH, DROP_REASON_STATS, DROP_VALUE_BUF};
 
 /// Record a post-family pipeline drop without materializing a DropKey on the
 /// legacy verifier stack.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn record_pipeline_drop(p: &PipelineCtx, reason: u8) {
     let key = match DROP_KEY_SCRATCH.get_ptr_mut(0) {
         Some(key) => key,
