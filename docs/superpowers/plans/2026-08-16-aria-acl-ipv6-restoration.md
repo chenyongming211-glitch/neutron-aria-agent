@@ -238,6 +238,7 @@ Wait for the exact commit's `fast-contracts` and `neutron-agent-clean-install` j
 - Modify: `abi/src/lib.rs`
 - Create: `abi/tests/acl_family_contract.rs`
 - Modify: `ci/check_neutron_stage1.py`
+- Modify as required for this ABI transition: every existing Rust `PolicyKey`, `CtValue`, `DropKey`, and `PipelineCtx` initializer and every `ct_acl_cache_is_current` caller found by `rg`; do not defer compilation repairs to Task 4.
 
 **Interfaces:**
 - Consumes: Task 1's numeric family contract.
@@ -383,10 +384,12 @@ pub fn ct_acl_family_is_current(matched_family: u8, expected_family: u8) -> bool
 
 Extend `ct_acl_cache_is_current` and `ct_snapshot_is_stable` to include `matched_family`; do not compare the retired padding byte as policy state.
 
+Keep this exact-head ABI commit buildable without claiming the Task 4 datapath work is complete. At existing production call sites, initialize the current IPv4-only ACL compatibility path with `IP_FAMILY_V4` for policy keys, matched CT state, pipeline context, and cache expectations. Initialize drop keys with `IP_FAMILY_UNSPECIFIED` until Task 4 supplies the parsed packet family. Update ABI/unit fixtures mechanically. Task 4 must replace these compatibility initializers with the real IPv4/IPv6 parser-derived family; Task 2 alone is not IPv6 enforcement evidence.
+
 - [ ] **Step 4: Commit and push the GREEN ABI implementation**
 
 ```bash
-git add abi/src/lib.rs
+git add abi/src/lib.rs core ebpf agent
 git commit -m "feat(acl): add address family to shared ABI"
 git push origin main
 ```
