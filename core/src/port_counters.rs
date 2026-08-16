@@ -274,7 +274,7 @@ pub fn read_port_counters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{PolicyKey, IP_FAMILY_V4};
+    use crate::common::{PolicyKey, IP_FAMILY_V4, IP_FAMILY_V6};
 
     fn rule(
         tap: u32,
@@ -334,6 +334,21 @@ mod tests {
         assert_eq!(summary.drop_packets, 30);
         assert_eq!(summary.buckets.len(), 2);
         assert!(!summary.truncated);
+    }
+
+    #[test]
+    fn port_counters_keep_same_policy_identity_separate_by_family() {
+        let v4 = rule(7, 1, 2, 6, 0, 10, 100, 1, 10);
+        let mut v6 = v4.clone();
+        v6.key.ip_family = IP_FAMILY_V6;
+        v6.packets = 20;
+        v6.bytes = 200;
+
+        let summary = aggregate_port_counters(&[v4, v6], &[], 7);
+
+        assert_eq!(summary.buckets.len(), 2);
+        assert_eq!(summary.buckets[0].ip_family, IP_FAMILY_V4);
+        assert_eq!(summary.buckets[1].ip_family, IP_FAMILY_V6);
     }
 
     #[test]

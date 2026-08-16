@@ -1940,6 +1940,50 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
             parsed["counters"]["ports"][0]["port_id"], "port-counters-1"
         )
 
+    def test_counters_v1_remains_accepted_with_unknown_family(self):
+        from neutron_aria.agent.uds_client import _decode_counters_v1
+        scenario = status_v3_scenario("counters-present-single-port")
+
+        decoded = _decode_counters_v1(scenario["status"]["counters"])
+
+        self.assertIsNone(decoded["ports"][0]["buckets"][0]["ip_family"])
+        self.assertIsNone(decoded["ports"][0]["reasons"][0]["ip_family"])
+
+    def test_counters_v2_bucket_requires_ipv4_or_ipv6_family(self):
+        from neutron_aria.agent.uds_client import _decode_status_v3
+        scenario = status_v3_scenario("counters-present-single-port")
+        status = copy.deepcopy(scenario["status"])
+        status["counters"]["counters_schema_version"] = 2
+        bucket = status["counters"]["ports"][0]["buckets"][0]
+        for family in (4, 6):
+            bucket["ip_family"] = family
+            for reason in status["counters"]["ports"][0]["reasons"]:
+                reason["ip_family"] = family
+            decoded = _decode_status_v3(status)
+            self.assertEqual(
+                decoded["counters"]["ports"][0]["buckets"][0]["ip_family"],
+                family,
+            )
+        bucket["ip_family"] = 0
+        decoded = _decode_status_v3(status)
+        self.assertIn("invalid_counters_v2", decoded["counters"]["counters_error"])
+
+    def test_counters_v2_reason_accepts_non_ip_family_zero(self):
+        from neutron_aria.agent.uds_client import _decode_status_v3
+        scenario = status_v3_scenario("counters-present-single-port")
+        status = copy.deepcopy(scenario["status"])
+        status["counters"]["counters_schema_version"] = 2
+        status["counters"]["ports"][0]["buckets"][0]["ip_family"] = 4
+        for reason in status["counters"]["ports"][0]["reasons"]:
+            reason["ip_family"] = 0
+
+        decoded = _decode_status_v3(status)
+
+        self.assertEqual(
+            decoded["counters"]["ports"][0]["reasons"][0]["ip_family"],
+            0,
+        )
+
     def test_status_v3_malformed_counters_are_contained_as_counter_error(self):
         from neutron_aria.agent.uds_client import _decode_status_v3
         scenario = status_v3_scenario("counters-present-single-port")

@@ -15,6 +15,10 @@ class AriaAclCounterMigrationTestCase(unittest.TestCase):
         "neutron_aria.db.aria_acl.migration.versions."
         "a4e7c2d9b610_add_acl_counter_schema"
     )
+    FAMILY_MIGRATION_MODULE = (
+        "neutron_aria.db.aria_acl.migration.versions."
+        "c7d4e9a1b260_add_acl_counter_family"
+    )
 
     def setUp(self):
         self.engine = sa.create_engine("sqlite://")
@@ -92,6 +96,45 @@ class AriaAclCounterMigrationTestCase(unittest.TestCase):
             self.engine,
             sa_module=sa,
         ))
+
+    def test_counter_migration_adds_nullable_family_and_rebuilds_unique_index(self):
+        base = self._migration()
+        self.assertTrue(base.upgrade_existing_schema(self.engine, sa_module=sa))
+        counters = sa.Table(
+            "aria_acl_port_counters", sa.MetaData(), autoload_with=self.engine,
+        )
+        with self.engine.begin() as connection:
+            connection.execute(counters.insert().values(
+                id="counter-before-v2", port_id="p1", host="h1",
+                kind="bucket", src_id=1, dst_id=2, proto=6,
+                direction="ingress", packets=1, bytes=10,
+            ))
+
+        migration = importlib.import_module(self.FAMILY_MIGRATION_MODULE)
+        self.assertTrue(migration.upgrade_existing_schema(self.engine, sa_module=sa))
+
+        inspector = sa.inspect(self.engine)
+        columns = dict(
+            (column["name"], column)
+            for column in inspector.get_columns("aria_acl_port_counters")
+        )
+        self.assertIn("ip_family", columns)
+        self.assertTrue(columns["ip_family"]["nullable"])
+        indexes = dict(
+            (index["name"], index)
+            for index in inspector.get_indexes("aria_acl_port_counters")
+        )
+        self.assertEqual(
+            indexes["uq_aria_acl_port_counters_natural"]["column_names"],
+            ["port_id", "host", "kind", "ip_family", "src_id", "dst_id",
+             "proto", "direction", "reason"],
+        )
+        with self.engine.connect() as connection:
+            row = connection.execute(sa.text(
+                "SELECT id, ip_family FROM aria_acl_port_counters"
+            )).fetchone()
+        self.assertEqual(("counter-before-v2", None), tuple(row))
+        self.assertFalse(migration.upgrade_existing_schema(self.engine, sa_module=sa))
 
 
 if __name__ == "__main__":

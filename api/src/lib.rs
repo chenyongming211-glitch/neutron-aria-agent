@@ -2588,9 +2588,11 @@ mod tests {
         );
         assert_eq!(
             capabilities["capability_hash"],
-            "v0.9-neutron-capabilities-5"
+            "v0.9-neutron-capabilities-6"
         );
         assert_eq!(capabilities["counters_v1"], true);
+        assert_eq!(capabilities["acl_ipv6_v1"], true);
+        assert_eq!(capabilities["counters_v2"], true);
     }
 
     #[test]
@@ -2600,7 +2602,9 @@ mod tests {
         assert_eq!(caps.status_schema_version_min, 2);
         assert_eq!(caps.status_schema_version_max, 3);
         assert_eq!(caps.status_contract_hash, "v0.9-neutron-status-3");
-        assert_eq!(caps.capability_hash, "v0.9-neutron-capabilities-5");
+        assert_eq!(caps.capability_hash, "v0.9-neutron-capabilities-6");
+        assert!(caps.acl_ipv6_v1);
+        assert!(caps.counters_v2);
     }
 
     #[test]

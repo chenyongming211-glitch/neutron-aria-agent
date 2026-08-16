@@ -268,6 +268,7 @@ class AriaAclCliTest(unittest.TestCase):
                     "aria_acl_port_counters": [
                         {
                             "kind": "bucket",
+                            "ip_family": 6,
                             "src_id": 1,
                             "dst_id": 2,
                             "proto": 6,
@@ -281,6 +282,7 @@ class AriaAclCliTest(unittest.TestCase):
                         },
                         {
                             "kind": "reason",
+                            "ip_family": 0,
                             "reason": 1,
                             "direction": 0,
                             "proto": 6,
@@ -301,9 +303,11 @@ class AriaAclCliTest(unittest.TestCase):
         self.assertIn("counters.bucket[1]", rows)
         self.assertIn("src=1 dst=2 proto=6 dir=ingress",
                       rows["counters.bucket[1]"])
+        self.assertIn("family=IPv6", rows["counters.bucket[1]"])
         self.assertIn("pkts=100", rows["counters.bucket[1]"])
         self.assertIn("counters.reason[1]", rows)
         self.assertIn("reason=ACL_DENY", rows["counters.reason[1]"])
+        self.assertIn("family=non-ip/unknown", rows["counters.reason[1]"])
         self.assertNotIn("aria_acl_port_counters", rows)
 
     def test_status_show_counters_renders_group_cidrs_from_map(self):

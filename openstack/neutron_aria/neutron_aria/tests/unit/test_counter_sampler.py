@@ -53,6 +53,18 @@ class CounterSamplerTestCase(unittest.TestCase):
         reason = [r for r in rows if r["kind"] == "reason"][0]
         self.assertAlmostEqual(reason["pps"], 10.0, places=3)
 
+    def test_counter_rows_keep_same_selector_ids_in_two_families(self):
+        current = self._port(100, 10, 1000)
+        v4 = dict(current["buckets"][0], ip_family=4)
+        v6 = dict(current["buckets"][0], ip_family=6)
+        current["buckets"] = [v4, v6]
+
+        rows, reset = diff_port_counters(None, current)
+        buckets = [row for row in rows if row["kind"] == "bucket"]
+
+        self.assertFalse(reset)
+        self.assertEqual([row["key"]["ip_family"] for row in buckets], [4, 6])
+
     def test_negative_delta_is_reset_and_rates_are_none(self):
         rows, reset = diff_port_counters(
             self._port(100, 10, 1000),
