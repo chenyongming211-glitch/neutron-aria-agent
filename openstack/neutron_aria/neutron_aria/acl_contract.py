@@ -1,5 +1,7 @@
 from __future__ import absolute_import
 
+import netaddr
+
 class AclContractError(ValueError):
     pass
 
@@ -15,54 +17,80 @@ def _integer(value, field):
         raise AclContractError("%s must be an integer" % field)
 
 
-def _protocol_number(value):
-    normalized = _text(value if value is not None else "any")
-    aliases = {"any": 0, "tcp": 6, "udp": 17, "icmp": 1}
-    if normalized in aliases:
-        return aliases[normalized]
-    number = _integer(normalized, "protocol")
-    if number < 0 or number > 255:
-        raise AclContractError("protocol must be in 0..255")
-    return number
+def normalize_ethertype(value):
+    token = _text(value or "IPv4")
+    if token == "ipv4":
+        return "IPv4"
+    if token == "ipv6":
+        return "IPv6"
+    raise AclContractError("ethertype must be IPv4 or IPv6")
+
+
+def normalize_cidr(value, ethertype):
+    text = str(value).strip()
+    if not text or "%" in text or any(char.isspace() for char in text):
+        raise AclContractError("invalid %s CIDR: %s" % (ethertype, value))
+    try:
+        network = netaddr.IPNetwork(text)
+    except (netaddr.AddrFormatError, ValueError):
+        raise AclContractError("invalid %s CIDR: %s" % (ethertype, value))
+    expected = 4 if normalize_ethertype(ethertype) == "IPv4" else 6
+    if network.version != expected:
+        raise AclContractError("ethertype and CIDR family must match")
+    if expected == 4:
+        parts = text.split("/")
+        octets = parts[0].split(".")
+        if len(parts) != 2 or len(octets) != 4:
+            raise AclContractError("invalid IPv4 CIDR: %s" % value)
+        for octet in octets:
+            if (
+                not octet or not octet.isdigit() or
+                (len(octet) > 1 and octet.startswith("0"))
+            ):
+                raise AclContractError("invalid IPv4 CIDR: %s" % value)
+    original_ip = netaddr.IPAddress(text.split("/", 1)[0])
+    if network.version == 6 and (int(original_ip) >> 32) == 0xffff:
+        raise AclContractError("IPv4-mapped IPv6 CIDR is unsupported")
+    return str(network.cidr)
 
 
 def normalize_ipv4_cidr(value):
-    text = str(value).strip()
-    parts = text.split("/")
-    if len(parts) != 2 or ":" in parts[0]:
-        raise AclContractError("only IPv4 CIDR is supported")
-    octets = parts[0].split(".")
-    if len(octets) != 4:
-        raise AclContractError("invalid IPv4 CIDR: %s" % value)
-    numbers = []
-    for octet in octets:
-        if (
-            not octet or not octet.isdigit() or
-            (len(octet) > 1 and octet.startswith("0"))
-        ):
-            raise AclContractError("invalid IPv4 CIDR: %s" % value)
-        number = int(octet)
-        if number < 0 or number > 255:
-            raise AclContractError("invalid IPv4 CIDR: %s" % value)
-        numbers.append(number)
-    if not parts[1] or not parts[1].isdigit():
-        raise AclContractError("invalid IPv4 prefix: %s" % parts[1])
-    prefix = int(parts[1])
-    if prefix < 0 or prefix > 32:
-        raise AclContractError("invalid IPv4 prefix: %s" % parts[1])
-    address = (
-        (numbers[0] << 24) | (numbers[1] << 16) |
-        (numbers[2] << 8) | numbers[3]
-    )
-    mask = 0 if prefix == 0 else (0xffffffff << (32 - prefix)) & 0xffffffff
-    network = address & mask
-    return "%d.%d.%d.%d/%d" % (
-        (network >> 24) & 0xff,
-        (network >> 16) & 0xff,
-        (network >> 8) & 0xff,
-        network & 0xff,
-        prefix,
-    )
+    return normalize_cidr(value, "IPv4")
+
+
+def protocol_number(value, ethertype):
+    family = normalize_ethertype(ethertype)
+    token = _text(value if value is not None else "any")
+    aliases = {"any": 0, "tcp": 6, "udp": 17}
+    if token in aliases:
+        return aliases[token]
+    if token == "icmp":
+        return 1 if family == "IPv4" else 58
+    if token in ("icmpv6", "ipv6-icmp"):
+        if family != "IPv6":
+            raise AclContractError("ICMPv6 requires IPv6 ethertype")
+        return 58
+    number = _integer(token, "protocol")
+    if number not in range(0, 256):
+        raise AclContractError("protocol must be in 0..255")
+    if (family == "IPv4" and number == 58) or (family == "IPv6" and number == 1):
+        raise AclContractError("ICMP protocol number does not match ethertype")
+    return number
+
+
+def address_set_ethertype(members):
+    families = set()
+    for member in members or []:
+        value = member.get("address") if isinstance(member, dict) else member
+        text = str(value).strip()
+        if not text:
+            continue
+        family = "IPv6" if ":" in text else "IPv4"
+        normalize_cidr(text, family)
+        families.add(family)
+    if len(families) > 1:
+        raise AclContractError("address set must contain one IP family")
+    return next(iter(families), None)
 
 
 def _validate_ipv4_cidr(value):
@@ -91,9 +119,7 @@ def validate_rule(values):
     if action not in ("allow", "deny", "drop"):
         raise AclContractError("action must be allow, deny, or drop")
 
-    ethertype = _text(values.get("ethertype") or "IPv4")
-    if ethertype != "ipv4":
-        raise AclContractError("only IPv4 is supported")
+    ethertype = normalize_ethertype(values.get("ethertype") or "IPv4")
 
     if values.get("src_cidr") and values.get("src_address_set_id"):
         raise AclContractError("source CIDR and address set are mutually exclusive")
@@ -101,12 +127,12 @@ def validate_rule(values):
         raise AclContractError("destination CIDR and address set are mutually exclusive")
     for field in ("src_cidr", "dst_cidr"):
         if values.get(field):
-            _validate_ipv4_cidr(values[field])
+            normalize_cidr(values[field], ethertype)
 
     if values.get("src_port_min") is not None or values.get("src_port_max") is not None:
         raise AclContractError("source port matching is unsupported")
 
-    protocol = _protocol_number(values.get("protocol"))
+    protocol = protocol_number(values.get("protocol"), ethertype)
     low_value = values.get("dst_port_min")
     high_value = values.get("dst_port_max")
     if low_value is not None or high_value is not None:
@@ -125,9 +151,8 @@ def validate_address_set_reference(values):
     members = [member for member in values.get("members") or [] if str(member).strip()]
     if not members:
         raise AclContractError("address set has no members")
-    for member in members:
-        address = member.get("address") if isinstance(member, dict) else member
-        _validate_ipv4_cidr(address)
+    if address_set_ethertype(members) is None:
+        raise AclContractError("address set has no members")
 
 
 def port_contract_eligibility(port):

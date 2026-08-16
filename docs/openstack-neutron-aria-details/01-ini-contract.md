@@ -37,6 +37,7 @@ revisionless_incremental_mode = disabled
 
 [acl]
 source = disabled
+ipv6_acl_enabled = false
 # fixture_path is CI/smoke only.
 # fixture_path = /etc/neutron-aria-agent/acl-fixture.json
 ```
@@ -52,6 +53,7 @@ source = disabled
 | `socket_path` | `[aria]` | UDS path to local datapath. |
 | `integration_bridge` | `[ovs]` | Used for inventory/classification or delegated validation. |
 | `acl.source` | `[acl]` | `disabled`, `fixture`, or `neutron`; production is `neutron`. |
+| `acl.ipv6_acl_enabled` | `[acl]` | Safe default `false`; Python accepts one-family IPv6 rules, but this switch does not enable IPv6 datapath enforcement. |
 | `integration_mode` | snapshot body | Must not appear in ini examples. |
 
 ## Local Datapath Config
@@ -116,6 +118,7 @@ function-by-function design until the config PR is opened.
 | `[neutron]` | `incremental_rpc_enabled` | P3 port-scoped apply gate; safe default `false`. When set to `true`, config validation requires RPC events, full resync, and `port_source=neutronclient`. |
 | `[neutron]` | `revisionless_incremental_mode` | Safe default `disabled`. `experimental` is allowed only on controlled test hosts when old Neutron has no trustworthy `revision_number`; production P3 still requires revision-aware events or reads. |
 | `[acl]` | `source` | `disabled`, `fixture`, or `neutron`; production target `neutron`. |
+| `[acl]` | `ipv6_acl_enabled` | Safe default `false`; it declares no IPv6 enforcement by itself. |
 | `[acl]` | `fixture_path` | CI/smoke only. |
 
 `integration_mode` is intentionally absent from the config model. The Python

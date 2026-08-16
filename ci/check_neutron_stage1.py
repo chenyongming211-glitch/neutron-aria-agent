@@ -109,6 +109,8 @@ REQUIRED_PYTHON_BEHAVIORS = (
     "test_rejects_unimplemented_qos_and_mirror_managed_domains",
     "neutron_aria.tests.unit.test_config.ConfigTestCase."
     "test_counters_report_enabled_defaults_false",
+    "neutron_aria.tests.unit.test_config.ConfigTestCase."
+    "test_ipv6_acl_enabled_defaults_false",
     "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
     "test_first_snapshot_has_no_rates",
     "neutron_aria.tests.unit.test_counter_sampler.CounterSamplerTestCase."
@@ -641,7 +643,8 @@ def check_packaged_ini_contract():
     from neutron_aria.agent.config import load_config
     config = load_config(os.path.join(ROOT, KOLLA_AGENT_INI_PATH))
     expected = {"managed_domains": ["acl"], "ovs_bridge": "br-int", "request_timeout": 3.0,
-                "acl_source": "disabled", "full_resync_enabled": False, "port_source": "disabled",
+                "acl_source": "disabled", "ipv6_acl_enabled": False,
+                "full_resync_enabled": False, "port_source": "disabled",
                 "rpc_events_enabled": False, "incremental_rpc_enabled": False}
     for name, value in expected.items():
         if getattr(config, name) != value:
@@ -669,6 +672,12 @@ def check_documented_ini_contract():
             line.strip() in forbidden_lines for line in contents.splitlines()
         ):
             raise SystemExit("ERROR: obsolete public configuration contract in %s" % path)
+    for path in (
+        os.path.join("docs", "openstack-neutron-aria-details", "01-ini-contract.md"),
+        os.path.join("docs", "openstack-neutron-agent-mode.md"),
+    ):
+        if "ipv6_acl_enabled = false" not in read_text(path):
+            raise SystemExit("ERROR: IPv6 ACL default-off contract is undocumented in %s" % path)
 
 
 def check_documented_status_contract():

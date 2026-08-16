@@ -2278,13 +2278,14 @@ revisionless_incremental_mode = disabled
 
 [acl]
 source = neutron
+ipv6_acl_enabled = false
 # fixture is CI/smoke only; tag-mapping is legacy lab/bootstrap only.
 # fixture_path = /etc/neutron-aria-agent/acl-fixture.json
 ```
 
 `integration_mode=coexist` 是 snapshot body 字段，由 `neutron-aria-agent`
 写入 `PUT /api/v1/neutron/snapshot`，不得出现在 ini 配置中。`neutron-uds-contract.json`
-是 CI/package 校验产物，不作为阶段一 runtime ini 字段。Python agent 启动后必须先调用 `GET /api/v1/neutron/capabilities`，再用返回的 `contract_version`、`body_max_bytes`、timeout、`error_codes_hash` 和 `peer_auth_policy` 校验本地 contract。生产配置必须使用 `[acl] source = neutron`，由 `aria_acl` Neutron service plugin/API/DB 提供 ACL 输入；`fixture` 只用于 CI/smoke，历史 tag + 本机 mapping 只允许作为 lab/bootstrap/迁移辅助。第一版不读取 Neutron Security Group，不依赖 TaaS，不从本地 CLI/API 创建 OpenStack 托管 ACL/QoS。
+是 CI/package 校验产物，不作为阶段一 runtime ini 字段。Python agent 启动后必须先调用 `GET /api/v1/neutron/capabilities`，再用返回的 `contract_version`、`body_max_bytes`、timeout、`error_codes_hash` 和 `peer_auth_policy` 校验本地 contract。生产配置必须使用 `[acl] source = neutron`，由 `aria_acl` Neutron service plugin/API/DB 提供 ACL 输入；`fixture` 只用于 CI/smoke，历史 tag + 本机 mapping 只允许作为 lab/bootstrap/迁移辅助。`[acl] ipv6_acl_enabled = false` 是本版本固定的默认关闭契约：Python 可校验单一 IPv6 地址族规则，但该开关不启用 IPv6 datapath enforcement。第一版不读取 Neutron Security Group，不依赖 TaaS，不从本地 CLI/API 创建 OpenStack 托管 ACL/QoS。
 
 具体 Neutron 配置文件、agent heartbeat 和 OVS `br-int` attach 事实必须按目标 OpenStack 版本验证，不能只写文档不做 smoke。
 

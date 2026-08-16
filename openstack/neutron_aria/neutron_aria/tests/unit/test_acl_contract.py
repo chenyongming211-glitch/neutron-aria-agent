@@ -22,24 +22,45 @@ class AclContractTestCase(unittest.TestCase):
             "action": "allow",
         })
 
-    def test_rule_rejects_ipv6_and_source_ports(self):
-        invalid = [
-            {
-                "direction": "ingress",
-                "priority": 1,
-                "action": "allow",
-                "ethertype": "IPv6",
-            },
-            {
+    def test_rule_rejects_source_ports(self):
+        with self.assertRaises(AclContractError):
+            validate_rule({
                 "direction": "ingress",
                 "priority": 1,
                 "action": "allow",
                 "src_port_min": 80,
-            },
-        ]
-        for values in invalid:
+            })
+
+    def test_rule_accepts_ipv6_and_resolves_icmp_by_family(self):
+        validate_rule({
+            "direction": "ingress", "priority": 1, "action": "allow",
+            "ethertype": "IPv6", "protocol": "icmp",
+            "src_cidr": "2001:db8::7/64",
+        })
+        self.assertEqual(
+            "2001:db8::/64",
+            acl_contract.normalize_cidr(" 2001:db8::7/64 ", "IPv6"),
+        )
+        self.assertEqual(1, acl_contract.protocol_number("icmp", "IPv4"))
+        self.assertEqual(58, acl_contract.protocol_number("icmp", "IPv6"))
+        self.assertEqual(58, acl_contract.protocol_number("icmpv6", "IPv6"))
+
+    def test_rule_rejects_cross_family_and_mapped_ipv6(self):
+        for ethertype, cidr in (
+            ("IPv4", "2001:db8::/64"),
+            ("IPv6", "192.0.2.0/24"),
+            ("IPv6", "::ffff:192.0.2.1/128"),
+            ("IPv6", "fe80::1%eth0/128"),
+        ):
             with self.assertRaises(AclContractError):
-                validate_rule(values)
+                acl_contract.normalize_cidr(cidr, ethertype)
+
+    def test_address_set_family_is_single_and_computed(self):
+        self.assertEqual("IPv4", acl_contract.address_set_ethertype(["10.0.0.1/24"]))
+        self.assertEqual("IPv6", acl_contract.address_set_ethertype(["2001:db8::1/64"]))
+        self.assertIsNone(acl_contract.address_set_ethertype([]))
+        with self.assertRaises(AclContractError):
+            acl_contract.address_set_ethertype(["10.0.0.0/24", "2001:db8::/64"])
 
     def test_rule_validates_destination_port_contract(self):
         validate_rule({
@@ -128,7 +149,7 @@ class AclContractTestCase(unittest.TestCase):
             acl_contract.normalize_ipv4_cidr("255.255.255.255/0"),
         )
 
-    def test_address_set_reference_requires_enabled_ipv4_members(self):
+    def test_address_set_reference_requires_enabled_single_family_members(self):
         validate_address_set_reference({
             "enabled": True,
             "members": ["10.0.0.1/32"],
@@ -136,7 +157,10 @@ class AclContractTestCase(unittest.TestCase):
         for values in (
             {"enabled": False, "members": ["10.0.0.1/32"]},
             {"enabled": True, "members": []},
-            {"enabled": True, "members": ["2001:db8::1/128"]},
+            {
+                "enabled": True,
+                "members": ["10.0.0.1/32", "2001:db8::1/128"],
+            },
         ):
             with self.assertRaises(AclContractError):
                 validate_address_set_reference(values)

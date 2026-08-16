@@ -123,6 +123,16 @@ heartbeat_detail_mode = everything
     def test_counters_report_enabled_defaults_false(self):
         self.assertFalse(AgentConfig().counters_report_enabled)
 
+    def test_ipv6_acl_enabled_defaults_false(self):
+        self.assertFalse(AgentConfig().ipv6_acl_enabled)
+
+    def test_loads_ipv6_acl_enabled(self):
+        path = self._write_config("[acl]\nipv6_acl_enabled = true\n")
+        try:
+            self.assertTrue(load_config(path).ipv6_acl_enabled)
+        finally:
+            os.unlink(path)
+
     def test_loads_counters_report_enabled(self):
         path = self._write_config("""
 [agent]
