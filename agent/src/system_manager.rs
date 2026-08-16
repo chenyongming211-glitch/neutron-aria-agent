@@ -613,7 +613,6 @@ pub async fn system_start(
 ) -> Result<(), String> {
     let _lifecycle_guard = control_plane.lock_runtime_lifecycle().await;
     let mut ownership = SystemStartOwnership::new();
-    ownership.owned_runtime_dirs = create_runtime_pin_directories(Path::new(pin_path))?;
     if let Err(error) = fs::create_dir_all(state_path) {
         return Err(start_error_with_cleanup(
             format!("Failed to create state directory: {}", error),
@@ -624,14 +623,24 @@ pub async fn system_start(
         ));
     }
 
+    let desired = aria_core::wal::load_with_wal(state_path).map_err(|error| {
+        start_error_with_cleanup(
+            format!("failed to load standalone state: {}", error),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        )
+    })?;
+    let mut desired = migrate_state_for_replay(state_path, &desired)?;
+    ownership.owned_runtime_dirs = create_runtime_pin_directories(Path::new(pin_path))?;
+
     // Set max_port_policies
     let sm = aria_core::state::StateManager::new(state_path);
     if let Err(e) = sm.set_max_port_policies(max_port_policies) {
         warn!(iface = %iface, error = %e, "failed to persist max_port_policies");
     }
-
-    let desired = aria_core::wal::load_with_wal(state_path);
-    let desired = migrate_state_for_replay(state_path, &desired)?;
+    desired.max_port_policies = max_port_policies;
     let desired_conntrack = desired.conntrack_enabled;
     let desired_acl = desired.acl_enabled;
     let fragment_tracking = control_plane.fragment_tracking_settings();
@@ -1536,6 +1545,13 @@ mod tests {
             1,
             "standalone startup must approve exactly one durable snapshot"
         );
+        let load = start
+            .find("aria_core::wal::load_with_wal(state_path)")
+            .unwrap();
+        let runtime_dirs = start.find("create_runtime_pin_directories").unwrap();
+        let state_update = start.find("set_max_port_policies").unwrap();
+        assert!(load < runtime_dirs);
+        assert!(load < state_update);
         assert!(start.contains("let mut quiesced_desired = desired.clone();"));
         assert!(start.contains("quiesced_desired.conntrack_enabled = false;"));
         assert!(start.contains("quiesced_desired.acl_enabled = false;"));

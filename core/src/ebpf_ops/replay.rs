@@ -79,6 +79,14 @@ pub fn migrate_state_for_replay(
     Ok(migrated)
 }
 
+fn load_state_then_replay<T>(
+    state_path: &str,
+    replay: impl FnOnce(&crate::state::FirewallState) -> Result<T, String>,
+) -> Result<T, String> {
+    let state = crate::wal::load_with_wal(state_path).map_err(|error| error.to_string())?;
+    replay(&state)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PinnedReplayRoute {
     Managed(ManagedReplayRoute),
@@ -353,8 +361,9 @@ fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
 }
 
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String> {
-    let state = crate::wal::load_with_wal(state_path);
-    replay_state_from_snapshot(bpf, state_path, &state)
+    load_state_then_replay(state_path, |state| {
+        replay_state_from_snapshot(bpf, state_path, state)
+    })
 }
 
 /// Replay one already-approved state snapshot into a freshly loaded eBPF object.
@@ -729,8 +738,9 @@ pub fn replay_standalone_state_to_pinned_maps(
     pin_path: &str,
     state_path: &str,
 ) -> Result<(), String> {
-    let state = crate::wal::load_with_wal(state_path);
-    replay_standalone_state_to_pinned_maps_from_snapshot(pin_path, state_path, &state)
+    load_state_then_replay(state_path, |state| {
+        replay_standalone_state_to_pinned_maps_from_snapshot(pin_path, state_path, state)
+    })
 }
 
 pub fn replay_standalone_state_to_pinned_maps_from_snapshot(
@@ -756,14 +766,15 @@ pub fn replay_managed_state_to_pinned_maps(
     if route.projection_mode() == GroupProjectionMode::StandaloneCompatibility {
         // Compatibility replay keeps the durable WAL snapshot as its projection
         // authority, matching the legacy standalone-compatible registration path.
-        let durable_state = crate::wal::load_with_wal(state_path);
-        let durable_state = migrate_state_for_replay(state_path, &durable_state)?;
-        return replay_state_to_pinned_maps_from_snapshot_with_mode(
-            pin_path,
-            state_path,
-            &durable_state,
-            PinnedReplayRoute::Managed(route),
-        );
+        return load_state_then_replay(state_path, |durable_state| {
+            let durable_state = migrate_state_for_replay(state_path, durable_state)?;
+            replay_state_to_pinned_maps_from_snapshot_with_mode(
+                pin_path,
+                state_path,
+                &durable_state,
+                PinnedReplayRoute::Managed(route),
+            )
+        });
     }
     let state = migrate_state_for_replay(state_path, state)?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
@@ -1025,7 +1036,7 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
 #[cfg(test)]
 mod family_migration_startup_tests {
     use super::*;
-    use crate::state::{FirewallState, RuleInfo};
+    use crate::state::FirewallState;
     use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1043,20 +1054,26 @@ mod family_migration_startup_tests {
         let mut state = FirewallState::default();
         let src_id = state.add_group("src", "192.0.2.0/24").unwrap();
         let dst_id = state.add_group("dst", "2001:db8::/64").unwrap();
-        state.rules.push(RuleInfo {
-            name: None,
-            src_group_id: src_id,
-            dst_group_id: dst_id,
-            proto: 6,
-            action: 1,
-            ports: None,
-            bitmap_idx: None,
-            direction: 0,
-            ip_family: 0,
-        });
         fs::write(
             path.join("state.json"),
             serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            path.join("state.wal"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "AddRule": {
+                        "src_id": src_id,
+                        "dst_id": dst_id,
+                        "proto": 6,
+                        "action": 1,
+                        "ports": null,
+                        "direction": 0
+                    }
+                })
+            ),
         )
         .unwrap();
         let replay_called = AtomicBool::new(false);

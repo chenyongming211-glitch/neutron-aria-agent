@@ -11,8 +11,8 @@ use tracing::{info, warn};
 
 use crate::common::{IP_FAMILY_V4, IP_FAMILY_V6};
 use crate::state::{
-    migrate_legacy_rule_families, persist_state_file_atomically, FirewallState, RuleInfo,
-    WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
+    migrate_legacy_rule_families, migrate_state_rule_families, persist_state_file_atomically,
+    FirewallState, RuleInfo, WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
 };
 
 /// Time-based compact interval (5 minutes)
@@ -27,6 +27,44 @@ fn acl_ip_family_is_valid(ip_family: u8) -> bool {
 
 pub fn last_wal_replay_failures() -> u64 {
     LAST_WAL_REPLAY_FAILURES.load(Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalLoadError {
+    LegacyAclFamilyMigration { reason: String },
+    LegacyAclFamilyCheckpoint { reason: String },
+}
+
+impl WalLoadError {
+    fn family_migration(reason: String) -> Self {
+        Self::LegacyAclFamilyMigration { reason }
+    }
+
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::LegacyAclFamilyMigration { reason }
+            | Self::LegacyAclFamilyCheckpoint { reason } => reason,
+        }
+    }
+}
+
+impl std::fmt::Display for WalLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyAclFamilyMigration { reason } => formatter.write_str(reason),
+            Self::LegacyAclFamilyCheckpoint { reason } => {
+                write!(formatter, "legacy ACL family checkpoint failed: {}", reason)
+            }
+        }
+    }
+}
+
+impl std::error::Error for WalLoadError {}
+
+#[derive(Debug, Clone, Copy)]
+struct WalApplyOutcome {
+    applied: bool,
+    family_migrated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -627,14 +665,19 @@ impl WalActor {
     }
 }
 
-/// Apply a single WAL entry to an in-memory FirewallState.
-/// Errors in individual entries are logged and skipped (best-effort replay).
-pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
+fn apply_wal_entry_for_load(
+    state: &mut FirewallState,
+    entry: WalEntry,
+) -> Result<WalApplyOutcome, WalLoadError> {
+    let mut family_migrated = false;
     match entry {
         WalEntry::AddGroup { name, cidr } => {
             if let Err(e) = state.add_group(&name, &cidr) {
                 warn!(error = %e, group = %name, cidr = %cidr, "WAL replay AddGroup failed");
-                return false;
+                return Ok(WalApplyOutcome {
+                    applied: false,
+                    family_migrated,
+                });
             }
         }
         WalEntry::DeleteGroup { name } => {
@@ -661,15 +704,12 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
                 direction,
                 ip_family,
             };
-            let normalized = match migrate_legacy_rule_families(&persisted, &state.groups) {
-                Ok(rules) => rules,
-                Err(e) => {
-                    warn!(error = %e, src_id, dst_id, proto, direction, ip_family, "WAL replay AddRule family migration failed");
-                    return false;
-                }
-            };
+            let normalized = migrate_legacy_rule_families(&persisted, &state.groups)
+                .map_err(WalLoadError::family_migration)?;
+            family_migrated = ip_family == 0;
+            let mut staged = state.clone();
             for rule in normalized {
-                if let Err(e) = state.apply_add_rule(
+                if let Err(e) = staged.apply_add_rule(
                     src_id,
                     dst_id,
                     proto,
@@ -679,9 +719,13 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
                     rule.ip_family,
                 ) {
                     warn!(error = %e, src_id, dst_id, proto, direction, ip_family = rule.ip_family, "WAL replay AddRule failed");
-                    return false;
+                    return Ok(WalApplyOutcome {
+                        applied: false,
+                        family_migrated,
+                    });
                 }
             }
+            *state = staged;
         }
         WalEntry::RemoveRule {
             src_id,
@@ -701,21 +745,22 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
                 direction,
                 ip_family,
             };
-            let normalized = match migrate_legacy_rule_families(&persisted, &state.groups) {
-                Ok(rules) => rules,
-                Err(e) => {
-                    warn!(error = %e, src_id, dst_id, proto, direction, ip_family, "WAL replay RemoveRule family migration failed");
-                    return false;
-                }
-            };
+            let normalized = migrate_legacy_rule_families(&persisted, &state.groups)
+                .map_err(WalLoadError::family_migration)?;
+            family_migrated = ip_family == 0;
+            let mut staged = state.clone();
             for rule in normalized {
                 if let Err(e) =
-                    state.apply_remove_rule(src_id, dst_id, proto, direction, rule.ip_family)
+                    staged.apply_remove_rule(src_id, dst_id, proto, direction, rule.ip_family)
                 {
                     warn!(error = %e, src_id, dst_id, proto, direction, ip_family = rule.ip_family, "WAL replay RemoveRule failed");
-                    return false;
+                    return Ok(WalApplyOutcome {
+                        applied: false,
+                        family_migrated,
+                    });
                 }
             }
+            *state = staged;
         }
         WalEntry::AddQos {
             group_name,
@@ -847,11 +892,51 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
             state.attached_iface = None;
         }
     }
-    true
+    Ok(WalApplyOutcome {
+        applied: true,
+        family_migrated,
+    })
+}
+
+/// Apply a single WAL entry to an in-memory FirewallState.
+/// Errors in individual entries are logged and skipped (best-effort replay).
+pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
+    match apply_wal_entry_for_load(state, entry) {
+        Ok(outcome) => outcome.applied,
+        Err(error) => {
+            warn!(error = %error, "WAL replay ACL family migration failed");
+            false
+        }
+    }
+}
+
+fn checkpoint_family_migrated_state(
+    state_path: &str,
+    state: &mut FirewallState,
+) -> Result<(), WalLoadError> {
+    let state_json = serde_json::to_string(state).map_err(|error| {
+        WalLoadError::LegacyAclFamilyCheckpoint {
+            reason: format!("serialize migrated ACL state: {}", error),
+        }
+    })?;
+    let mut wal = WalWriter::open(state_path)
+        .map_err(|reason| WalLoadError::LegacyAclFamilyCheckpoint { reason })?;
+    wal.compact(&state_json)
+        .map_err(|reason| WalLoadError::LegacyAclFamilyCheckpoint { reason })?;
+    let checkpoint_id = wal.current_checkpoint_id.ok_or_else(|| {
+        WalLoadError::LegacyAclFamilyCheckpoint {
+            reason: "compaction completed without a checkpoint ID".to_string(),
+        }
+    })?;
+    state.wal_replay_cursor = WalReplayCursor {
+        version: WAL_REPLAY_CURSOR_VERSION,
+        checkpoint_id,
+    };
+    Ok(())
 }
 
 /// Load state from snapshot + replay WAL entries.
-pub fn load_with_wal(state_path: &str) -> FirewallState {
+pub fn load_with_wal(state_path: &str) -> Result<FirewallState, WalLoadError> {
     // 1. Load base snapshot
     let state_file = format!("{}/state.json", state_path);
     let mut state = if let Ok(contents) = fs::read_to_string(&state_file) {
@@ -867,6 +952,8 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
         FirewallState::default()
     };
 
+    let snapshot_family_migrated =
+        migrate_state_rule_families(&mut state).map_err(WalLoadError::family_migration)?;
     let checkpoint_state = state.clone();
     let cursor_result = state.wal_replay_cursor.supported_checkpoint_id();
     let cursor_failed = cursor_result.is_err();
@@ -885,6 +972,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
         let mut replayed = 0u64;
         let mut failed = u64::from(cursor_failed);
         let mut prefix_discarded = false;
+        let mut family_migrated = snapshot_family_migrated;
         for (line_num, line_result) in reader.lines().enumerate() {
             match line_result {
                 Ok(line) => {
@@ -893,7 +981,9 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
                     }
                     match parse_persisted_wal_record(&line) {
                         Ok(PersistedWalRecord::Mutation(entry)) => {
-                            if apply_wal_entry(&mut state, entry) {
+                            let outcome = apply_wal_entry_for_load(&mut state, entry)?;
+                            family_migrated |= outcome.family_migrated;
+                            if outcome.applied {
                                 replayed += 1;
                             } else {
                                 failed += 1;
@@ -918,6 +1008,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
                                 replayed = 0;
                                 failed = 0;
                                 prefix_discarded = true;
+                                family_migrated = snapshot_family_migrated;
                             }
                         }
                         Err(e) => {
@@ -947,11 +1038,19 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
         if failed > 0 {
             warn!(path = %wal_path, failed, "WAL replay completed with failures");
         }
+        if family_migrated && failed == 0 {
+            checkpoint_family_migrated_state(state_path, &mut state)?;
+            info!(path = %state_path, rules = state.rules.len(), "checkpointed snapshot and WAL after ACL family migration");
+        }
     } else {
         LAST_WAL_REPLAY_FAILURES.store(u64::from(cursor_failed), Ordering::Relaxed);
+        if snapshot_family_migrated && !cursor_failed {
+            checkpoint_family_migrated_state(state_path, &mut state)?;
+            info!(path = %state_path, rules = state.rules.len(), "checkpointed snapshot after ACL family migration");
+        }
     }
 
-    state
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -1225,7 +1324,7 @@ mod tests {
         }
 
         // Load with WAL replay
-        let loaded = load_with_wal(&state_path);
+        let loaded = load_with_wal(&state_path).unwrap();
         assert!(loaded.groups.contains_key("web"), "snapshot group present");
         assert!(loaded.groups.contains_key("db"), "WAL group present");
         assert_eq!(loaded.rules.len(), 1, "WAL rule present");
@@ -1311,17 +1410,6 @@ mod tests {
         let mut state = FirewallState::default();
         let src_id = state.add_group("src", "10.0.0.0/24").unwrap();
         let dst_id = state.add_group("dst", "2001:db8::/64").unwrap();
-        state.rules.push(RuleInfo {
-            name: None,
-            src_group_id: src_id,
-            dst_group_id: dst_id,
-            proto: 6,
-            action: 1,
-            ports: None,
-            bitmap_idx: None,
-            direction: 0,
-            ip_family: 0,
-        });
         let snapshot_path = format!("{}/state.json", state_path);
         let wal_path = format!("{}/state.wal", state_path);
         fs::write(&snapshot_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
@@ -1329,7 +1417,16 @@ mod tests {
             &wal_path,
             format!(
                 "{}\n",
-                serde_json::to_string(&WalEntry::SetMaxPortPolicies { max: 99 }).unwrap()
+                serde_json::json!({
+                    "AddRule": {
+                        "src_id": src_id,
+                        "dst_id": dst_id,
+                        "proto": 6,
+                        "action": 1,
+                        "ports": null,
+                        "direction": 0
+                    }
+                })
             ),
         )
         .unwrap();
@@ -1337,6 +1434,11 @@ mod tests {
         let wal_before = fs::read(&wal_path).unwrap();
 
         let error = load_with_wal(&state_path).expect_err("mixed families must abort loading");
+        assert!(matches!(
+            &error,
+            WalLoadError::LegacyAclFamilyMigration { reason }
+                if reason == "legacy_acl_rule_mixed_family"
+        ));
         assert_eq!(error.reason(), "legacy_acl_rule_mixed_family");
         assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
         assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
@@ -1383,7 +1485,7 @@ mod tests {
         assert!(wal_contents.contains("wal_checkpoint"));
 
         // Snapshot should have all groups
-        let loaded = load_with_wal(&state_path);
+        let loaded = load_with_wal(&state_path).unwrap();
         assert!(loaded.groups.contains_key("web"));
         assert!(loaded.groups.contains_key("db"));
         assert!(loaded.groups.contains_key("cache"));
@@ -1415,7 +1517,7 @@ mod tests {
         writeln!(f, "{{corrupt json line}}").unwrap();
         writeln!(f, "{}", entry2).unwrap();
 
-        let loaded = load_with_wal(&state_path);
+        let loaded = load_with_wal(&state_path).unwrap();
         assert!(
             loaded.groups.contains_key("g1"),
             "entry before corrupt line applied"
@@ -1432,7 +1534,7 @@ mod tests {
     fn wal_empty_file_loads_default() {
         let state_path = temp_state_path();
         // No snapshot, no WAL
-        let loaded = load_with_wal(&state_path);
+        let loaded = load_with_wal(&state_path).unwrap();
         assert!(loaded.groups.is_empty());
         assert_eq!(loaded.next_group_id, 1);
 
@@ -1599,7 +1701,7 @@ mod tests {
         .unwrap();
         wal.shutdown().await;
 
-        let loaded = load_with_wal(&state_path);
+        let loaded = load_with_wal(&state_path).unwrap();
         assert!(loaded.groups.contains_key("web"));
         assert!(loaded.groups.contains_key("db"));
 
@@ -1629,7 +1731,7 @@ mod tests {
         assert_eq!(wal_contents.lines().count(), 1);
         assert!(wal_contents.contains("wal_checkpoint"));
 
-        let loaded = load_with_wal(&state_path);
+        let loaded = load_with_wal(&state_path).unwrap();
         assert!(loaded.groups.contains_key("web"));
 
         let _ = fs::remove_dir_all(&state_path);
@@ -1651,7 +1753,7 @@ mod tests {
         lines.push(wal_checkpoint_record(7, 1));
         wal_checkpoint_write_lines(&state_path, &lines);
 
-        let recovered = load_with_wal(&state_path);
+        let recovered = load_with_wal(&state_path).unwrap();
 
         wal_checkpoint_assert_allocator_parity(&checkpoint, &recovered);
         let _ = fs::remove_dir_all(&state_path);
@@ -1685,7 +1787,7 @@ mod tests {
         lines.push(serde_json::to_string(&tail).unwrap());
         wal_checkpoint_write_lines(&state_path, &lines);
 
-        let recovered = load_with_wal(&state_path);
+        let recovered = load_with_wal(&state_path).unwrap();
 
         wal_checkpoint_assert_allocator_parity(&expected, &recovered);
         let _ = fs::remove_dir_all(&state_path);
@@ -1711,7 +1813,7 @@ mod tests {
         lines.push(wal_checkpoint_record(8, 1));
         wal_checkpoint_write_lines(&state_path, &lines);
 
-        let recovered = load_with_wal(&state_path);
+        let recovered = load_with_wal(&state_path).unwrap();
 
         wal_checkpoint_assert_allocator_parity(&expected, &recovered);
         let _ = fs::remove_dir_all(&state_path);
@@ -1738,7 +1840,7 @@ mod tests {
             ],
         );
 
-        let _ = load_with_wal(&state_path);
+        let _ = load_with_wal(&state_path).unwrap();
 
         assert_eq!(last_wal_replay_failures(), 1);
         let _ = fs::remove_dir_all(&state_path);
@@ -1758,7 +1860,7 @@ mod tests {
         .unwrap();
         wal_checkpoint_write_lines(&state_path, &[wal_checkpoint_record(7, 2)]);
 
-        let _ = load_with_wal(&state_path);
+        let _ = load_with_wal(&state_path).unwrap();
 
         assert!(last_wal_replay_failures() > 0);
         assert!(WalWriter::open(&state_path).is_err());
@@ -1783,7 +1885,7 @@ mod tests {
         .unwrap();
         wal_checkpoint_write_lines(&state_path, &wal_checkpoint_entry_lines(&entries));
 
-        let recovered = load_with_wal(&state_path);
+        let recovered = load_with_wal(&state_path).unwrap();
 
         wal_checkpoint_assert_allocator_parity(&expected, &recovered);
         let _ = fs::remove_dir_all(&state_path);

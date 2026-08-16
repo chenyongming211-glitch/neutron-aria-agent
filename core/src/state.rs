@@ -1360,7 +1360,7 @@ mod tests {
         .expect_err("pre-rename failure must preserve compacted baseline");
 
         assert!(error.contains("forced crash with compacted WAL"));
-        let recovered = crate::wal::load_with_wal(&state_path);
+        let recovered = crate::wal::load_with_wal(&state_path).unwrap();
         assert!(recovered.groups.contains_key("src"));
         assert!(recovered.groups.contains_key("dst"));
         assert!(!recovered.groups.contains_key("uncommitted"));

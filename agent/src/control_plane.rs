@@ -4937,7 +4937,12 @@ impl ControlPlane {
             }
         };
 
-        // If already registered, compact before replacing
+        let mut state = aria_core::wal::load_with_wal(&state_path)
+            .map_err(|error| format!("failed to load state for {}: {}", name, error))?;
+        state = migrate_state_for_replay(&state_path, &state)?;
+
+        // Do not compact an existing instance until the replacement's durable
+        // ACL family projection has been fully validated.
         let replacing_existing = {
             let instances = self.instances.read().await;
             if let Some(existing) = instances.get(name) {
@@ -4948,9 +4953,6 @@ impl ControlPlane {
                 false
             }
         };
-
-        let mut state = aria_core::wal::load_with_wal(&state_path);
-        state = migrate_state_for_replay(&state_path, &state)?;
         let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
         if tap_id_assigned {
             let state_manager = aria_core::state::StateManager::new(&state_path);
@@ -8382,7 +8384,9 @@ impl ControlPlane {
                 }
 
                 let state_path = entry.path().to_string_lossy().to_string();
-                let state = aria_core::wal::load_with_wal(&state_path);
+                let state = aria_core::wal::load_with_wal(&state_path).map_err(|error| {
+                    format!("failed to load managed state {}: {}", entry_name, error)
+                })?;
                 if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
                     used.insert(state.tap_id);
                 }
@@ -8798,6 +8802,26 @@ mod tests {
             ),
             ManagedRuntimeActivation::PreserveVerifiedLive
         );
+    }
+
+    #[test]
+    fn managed_registration_loads_family_state_before_wal_or_runtime_use() {
+        let source = include_str!("control_plane.rs");
+        let prepare = source
+            .split("pub async fn prepare_managed_registration(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn commit_managed_registration(")
+            .next()
+            .unwrap();
+        let load = prepare.find("aria_core::wal::load_with_wal").unwrap();
+        let existing_compact = prepare.find("st.do_compact().await").unwrap();
+        let wal_open = prepare.find("WalClient::open").unwrap();
+        let runtime_write = prepare.find("write_tap_config").unwrap();
+
+        assert!(load < existing_compact);
+        assert!(load < wal_open);
+        assert!(load < runtime_write);
     }
 
     #[test]

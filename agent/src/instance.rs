@@ -1897,7 +1897,7 @@ impl FirewallInstance {
             return Err(e);
         }
 
-        self.ensure_fq_runtime();
+        self.ensure_fq_runtime()?;
 
         let health = self.tc_acl_link_health();
         info!(instance = %self.iface, tc_ingress = health.ingress, tc_egress = health.egress, xdp = health.xdp, edt_available = self.edt_available, "interface links attached from pinned runtime");
@@ -2121,7 +2121,7 @@ impl FirewallInstance {
         }
     }
 
-    fn ensure_fq_runtime(&mut self) {
+    fn ensure_fq_runtime(&mut self) -> Result<(), String> {
         let Some(state_path_str) = self.state_path.to_str() else {
             warn!(
                 instance = %self.iface,
@@ -2129,9 +2129,14 @@ impl FirewallInstance {
                 "non-UTF-8 state path; skipping persisted QoS shaping check"
             );
             self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
-            return;
+            return Ok(());
         };
-        let state = aria_core::wal::load_with_wal(state_path_str);
+        let state = aria_core::wal::load_with_wal(state_path_str).map_err(|error| {
+            format!(
+                "failed to load persisted state for {} QoS recovery: {}",
+                self.iface, error
+            )
+        })?;
         let requires_shaping = state.qos_rules.iter().any(|rule| rule.mode == 1);
 
         if requires_shaping {
@@ -2153,6 +2158,7 @@ impl FirewallInstance {
         } else {
             self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
         }
+        Ok(())
     }
 
     /// Attach XDP from the already pinned shared runtime without loading a new eBPF object.
