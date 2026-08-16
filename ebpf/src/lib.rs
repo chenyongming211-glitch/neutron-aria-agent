@@ -1043,7 +1043,7 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v4(info, p);
-        phase_policy_tc(ctx, info, p);
+        phase_policy_tc(ctx, info, p, IP_FAMILY_V4);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1075,7 +1075,7 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v6(info, p);
-        phase_policy_tc(ctx, info, p);
+        phase_policy_tc(ctx, info, p, IP_FAMILY_V6);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1189,7 +1189,7 @@ unsafe fn phase_ct_miss_tc_egress_v4(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v4(info, p);
-        phase_policy_tc(ctx, info, p);
+        phase_policy_tc(ctx, info, p, IP_FAMILY_V4);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1221,7 +1221,7 @@ unsafe fn phase_ct_miss_tc_egress_v6(
     );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v6(info, p);
-        phase_policy_tc(ctx, info, p);
+        phase_policy_tc(ctx, info, p, IP_FAMILY_V6);
         if p.action == TC_ACT_SHOT as u32 {
             return;
         }
@@ -1239,8 +1239,13 @@ unsafe fn phase_ct_miss_tc_egress_v6(
 
 /// Phase: Policy evaluation for TC.
 #[inline(always)]
-unsafe fn phase_policy_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    let result = policy::evaluate_policy(p, info.dst_port);
+unsafe fn phase_policy_tc(
+    ctx: &TcContext,
+    info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+    ip_family: u8,
+) {
+    let result = policy::evaluate_policy(p, info.dst_port, ip_family);
 
     if result == XDP_PASS {
         p.action = TC_ACT_OK as u32;

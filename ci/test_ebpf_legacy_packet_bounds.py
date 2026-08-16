@@ -157,9 +157,10 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             "family-qualified policy keys must not remain on the BPF stack",
         )
         self.assertIn(
-            "pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32",
+            "pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8) -> u32",
             self.policy_source,
         )
+        self.assertIn("p.ip_family != ip_family", self.policy_source)
         self.assertIn("p.matched_src_id = key.src_id;", self.policy_source)
         self.assertIn("p.matched_dst_id = key.dst_id;", self.policy_source)
         self.assertIn("p.matched_proto = key.proto;", self.policy_source)
@@ -172,8 +173,16 @@ class LegacyPacketBoundsTest(unittest.TestCase):
             )
         self.assertNotIn("let args = policy::PolicyArgs", self.lib_source)
         self.assertIn(
-            "let result = policy::evaluate_policy(p, info.dst_port);",
+            "let result = policy::evaluate_policy(p, info.dst_port, ip_family);",
             self.lib_source,
+        )
+        self.assertEqual(
+            self.lib_source.count("phase_policy_tc(ctx, info, p, IP_FAMILY_V4);"),
+            2,
+        )
+        self.assertEqual(
+            self.lib_source.count("phase_policy_tc(ctx, info, p, IP_FAMILY_V6);"),
+            2,
         )
 
 if __name__ == "__main__":

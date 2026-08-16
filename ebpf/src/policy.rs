@@ -24,12 +24,14 @@ pub fn acl_enabled(tap_id: u32) -> bool {
 /// Priority order (bitmask: bit0=src_wildcard, bit1=dst_wildcard, bit2=proto_wildcard):
 ///   0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111
 #[inline(always)]
-pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
+pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16, ip_family: u8) -> u32 {
     // Priority-ordered bitmask: which fields to wildcard (0=specific value, 1=wildcard to 0)
     // bit 0: src_id, bit 1: dst_id, bit 2: proto
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
-    if !policy_family_is_valid(p.ip_family) {
+    // The caller selects family only after its IPv4/IPv6 parser branch. Reject
+    // a stale or uninitialized pipeline context before any policy-map lookup.
+    if !policy_family_is_valid(ip_family) || p.ip_family != ip_family {
         return XDP_PASS;
     }
 
@@ -47,7 +49,7 @@ pub unsafe fn evaluate_policy(p: &mut PipelineCtx, dst_port: u16) -> u32 {
         (*key_ptr).proto = if (mask & 4) != 0 { 0 } else { p.proto };
         (*key_ptr).direction = p.direction;
         (*key_ptr).bank = p.matched_bank;
-        (*key_ptr).ip_family = p.ip_family;
+        (*key_ptr).ip_family = ip_family;
         let key = &*key_ptr;
         if let Some(policy) = POLICY_TABLE.get(key) {
             let (result, drop_reason) = apply_policy(p.tap_id, policy, dst_port);
