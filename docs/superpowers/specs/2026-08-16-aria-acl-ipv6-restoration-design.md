@@ -376,20 +376,21 @@ closure remains separate work.
 
 ### 9.2 Neutron transaction WAL
 
-The Neutron WAL stores committed managed-port state, snapshots, and pending
-snapshot/delete intents rather than `RuleInfo`. Before any runtime
-materialization:
+The Neutron WAL deliberately stores only `ManagedNeutronPort`, status,
+generation/hash metadata, and pending snapshot/delete identities. Neither
+committed `state.ports` nor `pending_intent.affected_ports` contains an ACL
+payload or `ethertype`; `managed_port_from_snapshot` reduces an inbound
+`NeutronPortSnapshot` to port identity, managed domains, and per-domain desired
+hashes before WAL persistence.
 
-- normalize committed snapshots;
-- normalize pending snapshot and delete intents;
-- treat missing historical `ethertype` as IPv4;
-- rebuild family-less owned selector names from the authoritative snapshot;
-  and
-- verify no planned runtime policy has family `0`.
-
-Pending intents are part of the migration boundary. Replaying only committed
-state and then accepting an old pending intent would reintroduce invalid
-family-zero semantics.
+Consequently there is no Neutron-WAL ACL family record to normalize, and this
+upgrade must not add a second durable ACL-rule copy there. Historical ACL
+rules are normalized in core state/local WAL as specified in section 9.1.
+After restart, Neutron WAL is used only to recover transaction authority and
+the last committed port set; ACL map materialization waits for a fresh
+authoritative snapshot. An old pending intent can be rolled back to the last
+applied generation, but cannot be treated as an ACL payload or replayed into
+family-qualified maps.
 
 ### 9.3 Migration order
 
@@ -398,11 +399,16 @@ snapshots:
 
 1. Read runtime and persistence schema metadata.
 2. Migrate core state and local WAL.
-3. Normalize/replay committed Neutron WAL state and every pending intent.
-4. Plan replacement of legacy family-less selector groups.
-5. Prove that all materializable policy records have family `4` or `6`.
-6. Rebuild the runtime maps under the new schema.
-7. Accept and apply a fresh authoritative Neutron snapshot.
+3. Replay Neutron WAL generation/port authority without materializing ACL
+   rules from it; resolve or block any pending transaction identity.
+4. Classify old pinned runtime state from explicit schema metadata and live
+   link inventory.
+5. Refuse automatic cleanup when old-schema live links exist; otherwise remove
+   only the resolved dormant Aria pin directory.
+6. Rebuild fresh runtime maps and prove every materializable policy record has
+   family `4` or `6`.
+7. Accept and atomically apply a fresh authoritative Neutron snapshot, which
+   also replaces legacy family-less selector groups.
 
 Migration is crash-restartable and idempotent. A failure leaves the gate off
 and reports a schema/migration reason; it must not partially attach enforcement.
@@ -559,8 +565,9 @@ positive cases include:
 - standalone `IPv4`, `IPv6`, and `any` behavior, with `any` expanding to two
   keys;
 - four-map preimage and rollback identity includes family;
-- historical core state, local WAL, committed Neutron WAL, and pending intents
-  migrate before runtime materialization;
+- historical core state and local WAL migrate before runtime materialization;
+  Neutron WAL remains a payload-free generation/port authority log and cannot
+  rematerialize ACL rules;
 - old and new capability hashes follow the defined rollout window;
 - counters v1/v2 decode, DB migration, family-qualified replacement, and CLI
   rendering; and
@@ -611,7 +618,7 @@ Implementation is divided into independently reviewable batches:
 | Batch | Deliverable |
 | --- | --- |
 | B0 | Freeze product/ABI/group/capability contracts, dependencies, gates, migration order, and exact RED tests. |
-| B1 | Add family to ABI, normalized persistence, local WAL, Neutron WAL/pending-intent migration, and runtime schema checks. |
+| B1 | Add family to ABI, normalized persistence and local WAL; preserve the payload-free Neutron WAL boundary and add runtime schema checks. |
 | B2 | Complete family-isolated eBPF/core policy, conntrack, drop, replay, preimage and layout behavior in the frozen ACL-only monolithic artifact; enforce the 480-byte exception. |
 | B3 | Implement the Rust dual-stack compiler, family-qualified group namespace, and per-family selector numbering. |
 | B4 | Enable strict Python API/DB/CLI dual-stack validation with the pinned `netaddr` range. |

@@ -43,7 +43,7 @@
 | 3 | Family-aware persisted `RuleInfo` and local WAL | 4, 5, 6 |
 | 4 | Family-isolated core/eBPF lookup, CT, drop, stats | 5, 6, 10 |
 | 5 | Dual-stack Rust compiler and selector namespace | 6, 9 |
-| 6 | Atomic apply, Neutron WAL normalization, runtime schema rebuild | 9, 10, 11, 12 |
+| 6 | Atomic apply, payload-free Neutron WAL boundary, runtime schema rebuild | 9, 10, 11, 12 |
 | 7 | Neutron write invariants, projection, and address-set family | 8, 9, 10, 11 |
 | 8 | REST/CLI dual-stack product surface | 11, 12 |
 | 9 | Python expand-contract compatibility and host enablement | 10, 11, 12 |
@@ -774,12 +774,11 @@ Commit `feat(acl): compile family-qualified IPv6 policies`, push, and require th
 
 ---
 
-### Task 6: Normalize Neutron WAL State and Rebuild Incompatible Runtime Schema Atomically
+### Task 6: Preserve the Neutron WAL Boundary and Rebuild Incompatible Runtime Schema Atomically
 
 **Files:**
 - Create: `agent/src/acl_runtime_schema.rs`
 - Modify: `agent/src/main.rs`
-- Modify: `agent/src/neutron_wal.rs`
 - Modify: `agent/src/neutron_api.rs`
 - Modify: `agent/src/tap_registry.rs`
 - Modify: `agent/src/control_plane.rs`
@@ -789,20 +788,22 @@ Commit `feat(acl): compile family-qualified IPv6 policies`, push, and require th
 
 **Interfaces:**
 - Consumes: Tasks 2–5 complete family-aware runtime plan.
-- Produces: ACL runtime metadata schema `3`, policy-key schema `2`, idempotent Neutron committed/pending intent normalization, safe dormant-pin rebuild, and `acl_runtime_schema_mismatch_live` refusal.
+- Produces: ACL runtime metadata schema `3`, policy-key schema `2`, an explicit
+  payload-free Neutron WAL boundary, safe dormant-pin rebuild, and
+  `acl_runtime_schema_mismatch_live` refusal.
 
 - [ ] **Step 1: Add RED migration and runtime adoption tests**
 
-Add these exact cases under existing `neutron_wal`,
-`managed_startup_recovery_`, and new `acl_runtime_schema_` filters:
+Add these exact cases under existing `managed_startup_recovery_` and new
+`acl_runtime_schema_` filters:
 
 | Test name | Setup | Expected result |
 | --- | --- | --- |
-| `neutron_wal_legacy_missing_ethertype_normalizes_committed_and_pending_to_ipv4` | committed port and pending snapshot each contain a rule with missing ethertype | both normalize to explicit `IPv4` before returned replay |
-| `neutron_wal_ipv6_intent_round_trips_explicit_family` | pending snapshot carries explicit `IPv6` | replay retains `IPv6` and passes recomputed intent hash |
 | `acl_runtime_schema_dormant_old_pins_require_rebuild` | metadata `2/1`, live link count `0` | `RebuildDormant` |
 | `acl_runtime_schema_live_old_links_refuse_cleanup` | metadata `2/1`, live link count `1` | `RefuseLive` with `acl_runtime_schema_mismatch_live` |
-| `acl_runtime_schema_migration_is_idempotent_after_crash_restart` | run normalization twice around an injected checkpoint boundary | byte-identical normalized state and no family-zero materialization |
+| `acl_runtime_schema_current_metadata_is_adopted` | metadata `3/2` with any live-link count | `Adopt` |
+| `acl_runtime_schema_metadata_publish_is_crash_restart_idempotent` | publish current metadata twice around a completed atomic rename | byte-identical metadata and `Adopt` after restart |
+| `managed_startup_recovery_neutron_wal_cannot_materialize_acl_payload` | replay committed/pending `ManagedNeutronPort` entries | recovery exposes identity/hash only and requires a fresh ACL snapshot |
 
 Push RED and retain the failing run evidence.
 
@@ -835,17 +836,15 @@ live_link_count)` returns
 `Adopt` only for `3/2`, `RebuildDormant` only when no live links exist, and
 otherwise `RefuseLive { reason: "acl_runtime_schema_mismatch_live" }`.
 
-- [ ] **Step 3: Normalize committed and pending Neutron WAL before materialization**
+- [ ] **Step 3: Preserve the payload-free Neutron WAL boundary**
 
-Add:
-
-```rust
-pub(crate) fn normalize_neutron_wal_acl_families(
-    replay: NeutronWalReplay,
-) -> Result<NeutronWalReplay, String>
-```
-
-Walk `state.ports[*].acl.rules` and `pending_intent.affected_ports[*].acl.rules`. Missing/empty historical `ethertype` becomes `IPv4`; explicit `IPv4`/`IPv6` is canonicalized; every other value fails. Recompute the existing status/intent integrity hashes and atomically checkpoint the normalized state before any call that attaches or writes maps.
+`NeutronWalState.ports` and `PendingNeutronIntent.affected_ports` remain
+`ManagedNeutronPort` collections. They store only port identity, interface,
+managed domains, desired hashes and transaction metadata; do not add ACL rules
+or `ethertype`. Startup may recover/rollback transaction identity from this
+WAL, but must request a fresh authoritative snapshot before materializing ACL
+rules into new-schema maps. Core state/local WAL migration from Task 3 remains
+the only historical rule-family migration.
 
 - [ ] **Step 4: Integrate safe upgrade ordering**
 
@@ -853,7 +852,7 @@ At managed startup enforce:
 
 ```text
 block transactions -> gate off -> verify quiesced -> detach links
--> normalize core state/local WAL -> normalize Neutron WAL/pending intent
+-> normalize core state/local WAL -> replay Neutron WAL authority only
 -> classify pins -> remove only dormant resolved Aria pin directory
 -> load fresh maps -> request full snapshot -> verify both banks
 -> attach -> gate on -> resume transactions
@@ -1334,7 +1333,8 @@ Enablement is approved only if the full mandatory matrix passes, exact tested ar
 - [ ] No `PolicyKey`, `CtValue`, `RuleInfo`, owned-policy key, selector ID, or v2 counter bucket can lose family.
 - [ ] `DropKey` alone accepts family zero, and display renders it as `non-ip/unknown`.
 - [ ] IPv4 wildcard deny does not affect IPv6 and IPv6 wildcard deny does not affect IPv4.
-- [ ] Legacy core state, local WAL, committed Neutron WAL, and pending intents normalize before runtime materialization.
+- [ ] Legacy core state and local WAL normalize before runtime materialization;
+  Neutron WAL remains payload-free and cannot rematerialize ACL rules.
 - [ ] Live old-schema links stop automatic cleanup with `acl_runtime_schema_mismatch_live`.
 - [ ] IPv4/IPv6 selector groups have separate names, IDs, lifetime, persistence, and display mapping.
 - [ ] Python accepts old/new capability hashes only during the documented rollout window.
