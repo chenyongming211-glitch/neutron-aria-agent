@@ -1613,6 +1613,88 @@ mod tests {
     }
 
     #[test]
+    fn wal_checkpoint_legacy_family_orphan_marker_is_ignored_and_retry_converges() {
+        let _guard = WAL_CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        let snapshot_path = format!("{}/state.json", state_path);
+        let wal_path = format!("{}/state.wal", state_path);
+        wal_checkpoint_write_lines(
+            &state_path,
+            &[serde_json::json!({
+                "AddRule": {
+                    "src_id": 0,
+                    "dst_id": 0,
+                    "proto": 6,
+                    "action": 1,
+                    "ports": "443",
+                    "direction": 0
+                }
+            })
+            .to_string()],
+        );
+        let snapshot_before = fs::read(&snapshot_path).unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+        let old_snapshot: FirewallState = serde_json::from_slice(&snapshot_before).unwrap();
+
+        let error = load_with_wal_with_compact_hook(&state_path, |phase| match phase {
+            FamilyMigrationCheckpointPhase::BeforeCheckpointMarker => Ok(()),
+            FamilyMigrationCheckpointPhase::AfterCheckpointMarkerBeforeSnapshotPublication => {
+                Err("injected failure after durable checkpoint marker".to_string())
+            }
+            FamilyMigrationCheckpointPhase::AfterSnapshotPublication => Ok(()),
+        })
+        .expect_err("state publication failure window must remain fatal");
+
+        assert!(matches!(
+            &error,
+            WalLoadError::LegacyAclFamilyCheckpoint { reason }
+                if reason.contains("injected failure after durable checkpoint marker")
+        ));
+        assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot_before);
+        let unchanged_snapshot: FirewallState =
+            serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+        assert_eq!(
+            unchanged_snapshot.wal_replay_cursor,
+            old_snapshot.wal_replay_cursor,
+            "the old snapshot cursor remains authoritative"
+        );
+
+        let wal_after_failure = fs::read(&wal_path).unwrap();
+        assert!(wal_after_failure.starts_with(&wal_before));
+        let appended = std::str::from_utf8(&wal_after_failure[wal_before.len()..]).unwrap();
+        let appended_lines = appended.lines().collect::<Vec<_>>();
+        assert_eq!(appended_lines.len(), 1, "only one orphan marker may append");
+        let orphan_checkpoint_id = match parse_persisted_wal_record(appended_lines[0]).unwrap() {
+            PersistedWalRecord::Checkpoint { wal_checkpoint } => wal_checkpoint.checkpoint_id,
+            PersistedWalRecord::Mutation(_) => panic!("expected orphan checkpoint marker"),
+        };
+        assert_ne!(
+            Some(orphan_checkpoint_id),
+            old_snapshot
+                .wal_replay_cursor
+                .supported_checkpoint_id()
+                .unwrap(),
+            "the appended marker must not match the old authoritative cursor"
+        );
+
+        let restarted = load_with_wal(&state_path)
+            .expect("restart must ignore the orphan marker and retry migration");
+        assert_any_rule_projection(&restarted, 1, "443");
+        assert!(restarted.rules.iter().all(|rule| rule.ip_family != 0));
+        assert!(restarted.wal_replay_cursor.checkpoint_id > orphan_checkpoint_id);
+        let converged_wal = fs::read_to_string(&wal_path).unwrap();
+        assert_eq!(converged_wal.lines().count(), 1);
+        assert!(converged_wal.contains(&format!(
+            "\"checkpoint_id\":{}",
+            restarted.wal_replay_cursor.checkpoint_id
+        )));
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
     fn wal_checkpoint_legacy_family_post_publication_failure_returns_committed_state() {
         let _guard = WAL_CHECKPOINT_TEST_LOCK
             .lock()
