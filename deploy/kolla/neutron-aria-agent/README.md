@@ -51,6 +51,18 @@ The installer copies container environment values into a root-only state
 directory and never prints them. Rollback creates a fresh container from the
 recorded previous image rather than reusing the candidate writable layer.
 
+## Container Health
+
+The image declares a strict Docker healthcheck against the shared Aria UDS
+`/readyz` endpoint. `healthy` requires HTTP 200. Recovery, `degraded`, `bypass`,
+blocked, and unknown states are `unhealthy`; a container without the UDS mount
+is therefore intentionally unhealthy even when its Python process is alive.
+
+An unhealthy Aria container does not mean that OVS forwarding is down. The
+probe is read-only and never restarts or modifies OVS, the Neutron OVS agent,
+or `aria-datapath`. RC install and check operations require `healthy`, while
+rollback remains compatible with historical images that lack health metadata.
+
 For a host-local smoke using the currently deployed OVS agent image as the base:
 
 ```bash

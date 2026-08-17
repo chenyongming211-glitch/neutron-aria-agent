@@ -6,6 +6,7 @@ USER root
 COPY openstack/neutron_aria /opt/neutron_aria
 COPY dist/kolla/python2-wheels/netaddr-0.7.19-py2.py3-none-any.whl /tmp/netaddr-0.7.19-py2.py3-none-any.whl
 COPY deploy/kolla/neutron-aria-agent/start-neutron-aria-agent.sh /usr/local/bin/start-neutron-aria-agent
+COPY deploy/kolla/neutron-aria-agent/healthcheck-neutron-aria-agent.sh /usr/local/bin/healthcheck-neutron-aria-agent
 
 RUN python3 -m pip install --disable-pip-version-check --no-deps --upgrade \
         --target /usr/lib/python2.7/site-packages \
@@ -14,7 +15,7 @@ RUN python3 -m pip install --disable-pip-version-check --no-deps --upgrade \
     cd /opt/neutron_aria && \
     rm -rf build dist neutron_aria.egg-info && \
     python setup.py install && \
-    chmod 0755 /usr/local/bin/start-neutron-aria-agent && \
+    chmod 0755 /usr/local/bin/start-neutron-aria-agent /usr/local/bin/healthcheck-neutron-aria-agent && \
     mkdir -p /var/lib/neutron-aria-agent/state && \
     chown -R neutron:neutron /var/lib/neutron-aria-agent && \
     python -c "import netaddr; assert netaddr.__version__ == '0.7.19'" && \
@@ -23,4 +24,7 @@ RUN python3 -m pip install --disable-pip-version-check --no-deps --upgrade \
 # Product shape: this container is a Neutron control-plane adapter, not the
 # datapath owner. It should stay non-privileged and talk to aria-datapath only
 # through /run/aria/aria-agent.sock.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck-neutron-aria-agent"]
+
 USER neutron

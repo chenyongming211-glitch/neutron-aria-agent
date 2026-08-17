@@ -31,6 +31,26 @@ container_running() {
     [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
 }
 
+candidate_image_has_healthcheck() {
+    [ -n "$(docker image inspect -f '{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}' "$1" 2>/dev/null || true)" ]
+}
+
+container_health_status() {
+    docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+        "$1" 2>/dev/null || true
+}
+
+wait_container_healthy() {
+    local status
+    for _ in $(seq 1 "${READY_TIMEOUT}"); do
+        status="$(container_health_status "${SERVICE_NAME}")"
+        [ "${status}" = "healthy" ] && return 0
+        sleep 1
+    done
+    docker inspect -f '{{json .State.Health}}' "${SERVICE_NAME}" >&2 || true
+    return 1
+}
+
 validate_name() {
     case "$1" in
         ''|*[!A-Za-z0-9_.-]*) die "invalid container name: $1" ;;
@@ -94,7 +114,8 @@ config = load_config("/etc/neutron-aria-agent/neutron-aria-agent.ini")
 assert HEARTBEAT_SCHEMA_VERSION == 2
 assert config.heartbeat_detail_mode == "summary_only"
 ' >/dev/null 2>&1; then
-            return 0
+            wait_container_healthy
+            return $?
         fi
         sleep 1
     done
@@ -189,6 +210,8 @@ install_candidate() {
     docker image inspect "${IMAGE_REF}" >/dev/null
     [ "$(docker image inspect -f '{{.Id}}' "${IMAGE_REF}")" = "${EXPECTED_IMAGE_ID}" ] ||
         die "candidate image ID mismatch"
+    candidate_image_has_healthcheck "${IMAGE_REF}" ||
+        die "candidate image does not declare a Docker healthcheck"
     validate_image_runtime
 
     umask 077

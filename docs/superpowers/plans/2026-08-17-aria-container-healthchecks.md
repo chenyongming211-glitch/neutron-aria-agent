@@ -17,10 +17,10 @@
 - Create: `deploy/kolla/aria-datapath/healthcheck-aria-datapath.sh`
 - Create: `deploy/kolla/neutron-aria-agent/healthcheck-neutron-aria-agent.sh`
 
-- [ ] Add tests that require both scripts, shell syntax validity, strict endpoint usage, the `neutron` datapath peer identity, and the exact Docker timing policy.
-- [ ] Run the test and record the expected failure before production files are complete.
-- [ ] Implement minimal side-effect-free probes with bounded `curl` calls and exact HTTP success semantics.
-- [ ] Run the contract test and shell syntax checks to green.
+- [x] Add tests that require both scripts, shell syntax validity, strict endpoint usage, the `neutron` datapath peer identity, and the exact Docker timing policy.
+- [x] Run the test and record the expected failure before production files are complete.
+- [x] Implement minimal side-effect-free probes with bounded `curl` calls and exact HTTP success semantics.
+- [x] Run the contract test and shell syntax checks to green.
 
 ### Task 2: Carry healthchecks through every image build and smoke path
 
@@ -31,10 +31,10 @@
 - Modify: `deploy/kolla/smoke/aria_datapath_container_smoke.sh`
 - Modify: `deploy/kolla/smoke/neutron_aria_container_smoke.sh`
 
-- [ ] Copy each probe into its image with mode `0755` and declare `30s/5s/60s/3` Docker health policy.
-- [ ] Update the generated datapath Dockerfiles so packaged and smoke images keep the same contract.
-- [ ] Make container smoke wait for Docker `healthy`, and emit health diagnostics on timeout.
-- [ ] Verify all changed shell scripts with `bash -n` and the contract test.
+- [x] Copy each probe into its image with mode `0755` and declare `30s/5s/60s/3` Docker health policy.
+- [x] Update the generated datapath Dockerfiles so packaged and smoke images keep the same contract.
+- [x] Make container smoke wait for Docker `healthy`, and emit health diagnostics on timeout.
+- [x] Verify all changed shell scripts with `bash -n` and the contract test.
 
 ### Task 3: Enforce health in RC install/check and document operator semantics
 
@@ -45,9 +45,9 @@
 - Modify: `deploy/kolla/neutron-aria-agent/README.md`
 - Modify: `.github/workflows/build.yml`
 
-- [ ] Reject candidate images that do not declare a Docker healthcheck.
-- [ ] Require the running candidate to reach Docker `healthy` during install and `check`.
-- [ ] Keep rollback compatible with older images that may not contain health metadata.
-- [ ] Document that `degraded`, `bypass`, recovery, and blocked states are unhealthy but do not imply OVS failure or trigger remediation.
-- [ ] Add the health contract test to GitHub Actions and run the available local Python/shell gates.
-- [ ] Review the scoped diff, commit only healthcheck files, and leave unrelated working-tree changes untouched.
+- [x] Reject candidate images that do not declare a Docker healthcheck.
+- [x] Require the running candidate to reach Docker `healthy` during install and `check`.
+- [x] Keep rollback compatible with older images that may not contain health metadata.
+- [x] Document that `degraded`, `bypass`, recovery, and blocked states are unhealthy but do not imply OVS failure or trigger remediation.
+- [x] Add the health contract test to GitHub Actions and run the available local Python/shell gates.
+- [x] Review the scoped diff, commit only healthcheck files, and leave unrelated working-tree changes untouched.

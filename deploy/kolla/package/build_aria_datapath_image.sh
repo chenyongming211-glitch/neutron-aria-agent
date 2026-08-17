@@ -81,6 +81,8 @@ cp "${EBPF_SO}" "${tmpdir}/libebpf_firewall.so"
 cp "${EBPF_PERF_SO}" "${tmpdir}/libebpf_firewall_perf.so"
 cp "${REPO_ROOT}/deploy/kolla/aria-datapath/start-aria-datapath.sh" \
     "${tmpdir}/start-aria-datapath"
+cp "${REPO_ROOT}/deploy/kolla/aria-datapath/healthcheck-aria-datapath.sh" \
+    "${tmpdir}/healthcheck-aria-datapath"
 
 cat > "${tmpdir}/Dockerfile" <<'EOF'
 ARG BASE_IMAGE
@@ -92,9 +94,14 @@ COPY aria-agent /usr/local/bin/aria-agent
 COPY libebpf_firewall.so /usr/local/lib/libebpf_firewall.so
 COPY libebpf_firewall_perf.so /usr/local/lib/libebpf_firewall_perf.so
 COPY start-aria-datapath /usr/local/bin/start-aria-datapath
+COPY healthcheck-aria-datapath /usr/local/bin/healthcheck-aria-datapath
 
-RUN chmod 0755 /usr/local/bin/aria-agent /usr/local/bin/start-aria-datapath && \
+RUN chmod 0755 /usr/local/bin/aria-agent /usr/local/bin/start-aria-datapath \
+        /usr/local/bin/healthcheck-aria-datapath && \
     chmod 0644 /usr/local/lib/libebpf_firewall.so /usr/local/lib/libebpf_firewall_perf.so
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck-aria-datapath"]
 
 USER root
 EOF
@@ -106,6 +113,7 @@ log "Validating image contains datapath artifacts"
 docker run --rm --entrypoint sh "${IMAGE_TAG}" -c '
     test -x /usr/local/bin/aria-agent &&
     test -x /usr/local/bin/start-aria-datapath &&
+    test -x /usr/local/bin/healthcheck-aria-datapath &&
     test -f /usr/local/lib/libebpf_firewall.so &&
     test -f /usr/local/lib/libebpf_firewall_perf.so &&
     /usr/local/bin/aria-agent --help >/dev/null

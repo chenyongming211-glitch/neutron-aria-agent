@@ -17,6 +17,8 @@ RUN_ARIA_DIR="${RUN_ARIA_DIR:-/run/aria}"
 PRIVILEGED="${PRIVILEGED:-false}"
 MOUNT_OVSDB="${MOUNT_OVSDB:-false}"
 MOUNT_LIB_MODULES="${MOUNT_LIB_MODULES:-false}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-210}"
+EXPECTED_DOCKER_HEALTH="${EXPECTED_DOCKER_HEALTH:-}"
 
 echo "Building service image: ${IMAGE}"
 
@@ -90,7 +92,28 @@ fi
 
 docker run "${docker_run_args[@]}" "${IMAGE}"
 
-sleep "${SMOKE_WAIT_SECONDS:-8}"
+if [ -z "${EXPECTED_DOCKER_HEALTH}" ]; then
+    if [ "${MOUNT_RUN_ARIA}" = "true" ]; then
+        EXPECTED_DOCKER_HEALTH=healthy
+    else
+        EXPECTED_DOCKER_HEALTH=unhealthy
+    fi
+fi
+
+for _ in $(seq 1 "${HEALTH_TIMEOUT}"); do
+    actual_health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${SERVICE_NAME}" 2>/dev/null || true)"
+    if [ "${actual_health}" = "${EXPECTED_DOCKER_HEALTH}" ]; then
+        break
+    fi
+    sleep 1
+done
+
+[ "${actual_health:-}" = "${EXPECTED_DOCKER_HEALTH}" ] || {
+    docker inspect -f '{{json .State.Health}}' "${SERVICE_NAME}" >&2 || true
+    docker logs --tail 80 "${SERVICE_NAME}" >&2 || true
+    echo "expected Docker health=${EXPECTED_DOCKER_HEALTH}, got ${actual_health:-missing}" >&2
+    exit 1
+}
 
 echo "Container status:"
 docker ps --filter "name=${SERVICE_NAME}" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'

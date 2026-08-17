@@ -35,6 +35,19 @@ ovs_bridge = "br-int"
 With `auto_attach=false`, existing `tap*` interfaces remain untouched until
 `neutron-aria-agent` submits an explicit snapshot.
 
+## Container Health
+
+The image declares a strict Docker healthcheck. `healthy` means the datapath
+TCP liveness endpoint is reachable and the Neutron UDS `/readyz` endpoint
+returns HTTP 200 when called with the real `neutron` peer identity. Recovery,
+`degraded`, `bypass`, blocked, and unknown states are `unhealthy`.
+
+An unhealthy Aria container does not mean that OVS forwarding is down. The
+probe is read-only: it does not restart the container and never restarts or
+modifies OVS or the Neutron OVS agent. Docker retries every 30 seconds after a
+60-second startup grace period, and a later strict-ready result automatically
+returns the existing container to `healthy`.
+
 ## Required Mounts
 
 ```text

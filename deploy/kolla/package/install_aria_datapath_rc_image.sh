@@ -87,6 +87,26 @@ container_running() {
     [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
 }
 
+candidate_image_has_healthcheck() {
+    [ -n "$(docker image inspect -f '{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}' "$1" 2>/dev/null || true)" ]
+}
+
+container_health_status() {
+    docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+        "$1" 2>/dev/null || true
+}
+
+wait_container_healthy() {
+    local status
+    for _ in $(seq 1 "${READY_TIMEOUT}"); do
+        status="$(container_health_status "${SERVICE_NAME}")"
+        [ "${status}" = "healthy" ] && return 0
+        sleep 1
+    done
+    docker inspect -f '{{json .State.Health}}' "${SERVICE_NAME}" >&2 || true
+    return 1
+}
+
 image_file_hash() {
     docker run --rm --entrypoint sha256sum "${IMAGE_REF}" "$1" | awk '{print $1}'
 }
@@ -136,6 +156,8 @@ verify_expected_files_in_image() {
 
 verify_running_candidate() {
     local actual_image_id actual
+    candidate_image_has_healthcheck "${IMAGE_REF}" ||
+        die "candidate image does not declare a Docker healthcheck"
     container_running "${SERVICE_NAME}" || die "${SERVICE_NAME} is not running"
     actual_image_id="$(docker inspect -f '{{.Image}}' "${SERVICE_NAME}")"
     [ "${actual_image_id}" = "${EXPECTED_IMAGE_ID}" ] || die "running image ID mismatch"
@@ -146,6 +168,7 @@ verify_running_candidate() {
     actual="$(container_file_hash /usr/local/lib/libebpf_firewall_perf.so)"
     [ "${actual}" = "${EXPECTED_EBPF_PERF_SHA256}" ] || die "running eBPF perf hash mismatch"
     wait_ready
+    wait_container_healthy || die "aria-datapath Docker health did not become healthy"
     check_ovs_identity
 }
 
@@ -270,6 +293,8 @@ install_candidate() {
     docker image inspect "${IMAGE_REF}" >/dev/null
     [ "$(docker image inspect -f '{{.Id}}' "${IMAGE_REF}")" = "${EXPECTED_IMAGE_ID}" ] ||
         die "loaded image ID mismatch"
+    candidate_image_has_healthcheck "${IMAGE_REF}" ||
+        die "candidate image does not declare a Docker healthcheck"
     verify_expected_files_in_image
     record_ovs_identity
     if [ -z "${DATAPATH_STATE_SOURCE}" ]; then

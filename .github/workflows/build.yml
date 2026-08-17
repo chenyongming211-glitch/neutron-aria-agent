@@ -99,6 +99,7 @@ jobs:
           python3 -m unittest ci.test_fragment_drop_trace_refresh
           python3 -m unittest ci.test_ebpf_stack_budget
           python3 -m unittest ci.test_legacy_kernel_canary_contract
+          python3 -m unittest ci.test_kolla_container_healthchecks
           python3 ci/check_rust_warning_hygiene.py
           bash ci/check_release_reproducibility.sh
           python3 ci/test_neutron_aria_acl_nonce_echo.py -v

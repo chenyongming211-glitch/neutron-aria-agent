@@ -24,6 +24,7 @@ HOST_PID="${HOST_PID:-true}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
 UDS_READY_RETRIES="${UDS_READY_RETRIES:-20}"
 UDS_READY_INTERVAL="${UDS_READY_INTERVAL:-1}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-true}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 FAULT_INJECTION_ENABLED="${FAULT_INJECTION_ENABLED:-}"
@@ -143,6 +144,8 @@ build_image() {
     cp "${EBPF_PERF_SO}" "${tmpdir}/libebpf_firewall_perf.so"
     cp "${REPO_ROOT}/deploy/kolla/aria-datapath/start-aria-datapath.sh" \
         "${tmpdir}/start-aria-datapath"
+    cp "${REPO_ROOT}/deploy/kolla/aria-datapath/healthcheck-aria-datapath.sh" \
+        "${tmpdir}/healthcheck-aria-datapath"
 
     cat >"${tmpdir}/Dockerfile" <<'EOF'
 ARG BASE_IMAGE
@@ -154,9 +157,14 @@ COPY aria-agent /usr/local/bin/aria-agent
 COPY libebpf_firewall.so /usr/local/lib/libebpf_firewall.so
 COPY libebpf_firewall_perf.so /usr/local/lib/libebpf_firewall_perf.so
 COPY start-aria-datapath /usr/local/bin/start-aria-datapath
+COPY healthcheck-aria-datapath /usr/local/bin/healthcheck-aria-datapath
 
-RUN chmod 0755 /usr/local/bin/aria-agent /usr/local/bin/start-aria-datapath && \
+RUN chmod 0755 /usr/local/bin/aria-agent /usr/local/bin/start-aria-datapath \
+        /usr/local/bin/healthcheck-aria-datapath && \
     chmod 0644 /usr/local/lib/libebpf_firewall.so /usr/local/lib/libebpf_firewall_perf.so
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck-aria-datapath"]
 
 USER root
 EOF
@@ -260,6 +268,18 @@ wait_for_socket() {
     docker ps --filter "name=${SERVICE_NAME}" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' >&2 || true
     docker logs --tail 80 "${SERVICE_NAME}" >&2 || true
     die "UDS socket did not appear: ${SOCKET_PATH}"
+}
+
+wait_for_container_health() {
+    local status
+    for _ in $(seq 1 "${HEALTH_TIMEOUT}"); do
+        status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${SERVICE_NAME}" 2>/dev/null || true)"
+        [ "${status}" = "healthy" ] && return 0
+        sleep 1
+    done
+    docker inspect -f '{{json .State.Health}}' "${SERVICE_NAME}" >&2 || true
+    docker logs --tail 80 "${SERVICE_NAME}" >&2 || true
+    die "${SERVICE_NAME} did not become Docker healthy"
 }
 
 assert_container_boundary() {
@@ -424,6 +444,7 @@ start_container
 wait_for_socket
 assert_container_boundary
 check_uds_contract
+wait_for_container_health
 
 docker ps --filter "name=${SERVICE_NAME}" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 docker exec "${SERVICE_NAME}" sh -c 'tail -n 40 /var/log/kolla/aria-datapath/aria-datapath.log' || true
