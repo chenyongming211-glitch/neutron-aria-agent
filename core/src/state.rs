@@ -38,7 +38,7 @@ pub struct RuleInfo {
     pub ip_family: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LegacyAclMigrationAuthority {
     ManagedLegacyIpv4,
     StandaloneInfer,
