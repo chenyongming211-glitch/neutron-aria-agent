@@ -1,10 +1,11 @@
 use crate::common::{
     fragment_authority_drop_reason, fragment_context_flags_for_l4, fragment_context_l4_proto,
-    fragment_first_observation_metric, fragment_install_result, fragment_metric_for_drop_reason,
-    fragment_metric_index, fragment_resolve_decision, fragment_resolved_l4_fields,
-    fragment_tracking_required, FragmentConfig, FragmentContextKey4, FragmentContextKey6,
-    FragmentContextValue, FragmentInstallDecision, FragmentKind, FragmentResolveInput,
-    PipelineCtx, DROP_FRAGMENT_CONFIG_MISSING, DROP_FRAGMENT_CONTEXT_INVALID,
+    fragment_authority_tracking_required, fragment_first_observation_metric,
+    fragment_install_result, fragment_metric_for_drop_reason, fragment_metric_index,
+    fragment_resolve_decision, fragment_resolved_l4_fields, FragmentConfig,
+    FragmentContextKey4, FragmentContextKey6, FragmentContextValue, FragmentInstallDecision,
+    FragmentKind, FragmentResolveInput, PipelineCtx, DROP_FRAGMENT_CONFIG_MISSING,
+    DROP_FRAGMENT_CONTEXT_INVALID,
     DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_EPOCH_MISSING, DROP_FRAGMENT_EXPIRY_OVERFLOW,
     FRAGMENT_CONTEXT_VERSION, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
     FRAGMENT_METRIC_EXPIRY_OVERFLOW, FRAGMENT_METRIC_INVALID_L4,
@@ -17,6 +18,21 @@ use crate::parser::PacketInfo;
 use aria_ebpf_abi::FragmentEpochValue;
 
 const FRAGMENT_CONFIG_KEY: u32 = 0;
+
+#[inline(always)]
+fn packet_fragment_authority_required(
+    info: &PacketInfo,
+    p: &PipelineCtx,
+    is_ipv6: bool,
+) -> bool {
+    fragment_authority_tracking_required(
+        info.fragment_kind,
+        info.fragment_proto,
+        is_ipv6,
+        (p.flags & crate::common::FLAG_ACL_ON) != 0,
+        crate::runtime::conntrack_enabled(p.tap_id),
+    )
+}
 
 #[repr(u8)]
 pub enum ResolveOutcome {
@@ -111,7 +127,7 @@ unsafe fn resolve_v6_key(info: &PacketInfo, p: &PipelineCtx) -> FragmentContextK
 #[inline(never)]
 pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveOutcome {
     if info.fragment_kind != FragmentKind::NonInitial as u8
-        || !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false)
+        || !packet_fragment_authority_required(info, p, false)
     {
         return ResolveOutcome::NotRequired;
     }
@@ -184,7 +200,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
 #[inline(never)]
 pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveOutcome {
     if info.fragment_kind != FragmentKind::NonInitial as u8
-        || !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true)
+        || !packet_fragment_authority_required(info, p, true)
     {
         return ResolveOutcome::NotRequired;
     }
@@ -287,7 +303,7 @@ pub unsafe fn install_allowed_v4(
         Some(flags) => flags,
         None => return FragmentInstallDecision::Pass,
     };
-    if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false) {
+    if !packet_fragment_authority_required(info, p, false) {
         return FragmentInstallDecision::Pass;
     }
     let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY) {
@@ -351,7 +367,7 @@ pub unsafe fn install_allowed_v6(
         Some(flags) => flags,
         None => return FragmentInstallDecision::Pass,
     };
-    if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true) {
+    if !packet_fragment_authority_required(info, p, true) {
         return FragmentInstallDecision::Pass;
     }
     let config = match FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY) {

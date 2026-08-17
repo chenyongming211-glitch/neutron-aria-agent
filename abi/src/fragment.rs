@@ -253,6 +253,18 @@ pub fn fragment_tracking_required(fragment_kind: u8, fragment_proto: u8, is_ipv6
 }
 
 #[inline(always)]
+pub fn fragment_authority_tracking_required(
+    fragment_kind: u8,
+    fragment_proto: u8,
+    is_ipv6: bool,
+    acl_enabled: bool,
+    conntrack_enabled: bool,
+) -> bool {
+    (acl_enabled || conntrack_enabled)
+        && fragment_tracking_required(fragment_kind, fragment_proto, is_ipv6)
+}
+
+#[inline(always)]
 pub const fn fragment_first_observation_metric(fragment_kind: u8, effective_proto: u8) -> u8 {
     if fragment_kind == FragmentKind::First as u8
         && (effective_proto == IPPROTO_TCP || effective_proto == IPPROTO_UDP)
