@@ -51,6 +51,13 @@ if docker exec "${SERVICE_NAME}" sh -c \
     exit 1
 fi
 
+docker exec "${SERVICE_NAME}" sh -c '
+    printf "%s\n" "[agent" "host = broken" > /tmp/neutron-aria-malformed.ini
+    printf "%s\n" "[agent]" "host = unreadable" > /tmp/neutron-aria-unreadable.ini
+    chmod 000 /tmp/neutron-aria-unreadable.ini
+    : > /tmp/neutron-aria-empty.ini
+'
+
 SERVICE_NAME="${SERVICE_NAME}" \
 EGG_PATH="${EGG_PATH}" \
 EGG_NAME="${EGG_NAME}" \
@@ -66,10 +73,20 @@ from __future__ import print_function
 import json
 
 from neutron_aria.agent.acl_source import NeutronAclSource
+from neutron_aria.agent.config import ConfigError
+from neutron_aria.agent.config import load_config
 from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalClient
 from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
+
+
+def assert_config_rejected(path, reason):
+    try:
+        load_config(path)
+    except ConfigError:
+        return
+    raise AssertionError("%s config was accepted: %s" % (reason, path))
 
 
 class FakeCorePlugin(object):
@@ -109,11 +126,27 @@ runtime_status = AgentRuntimeStatus("clean-python27")
 runtime_status.hydrate_durable_history(history)
 assert runtime_status.last_feature_ready_generation_by_domain == {"acl": 42}
 
+assert_config_rejected("/tmp/neutron-aria-missing.ini", "missing")
+assert_config_rejected("/tmp/neutron-aria-unreadable.ini", "unreadable")
+assert_config_rejected("/tmp/neutron-aria-malformed.ini", "malformed")
+assert load_config("/tmp/neutron-aria-empty.ini").full_resync_enabled is False
+
 print("clean_agent_imports=ok")
 print("clean_python27_port_projection=ok")
 print("clean_python27_unicode_domain_history=ok")
+print("clean_python27_explicit_config_fail_closed=ok")
 PY
 docker exec -u neutron "${SERVICE_NAME}" neutron-aria-agent --help >/dev/null
+if docker exec -u neutron "${SERVICE_NAME}" neutron-aria-agent \
+    -c /tmp/neutron-aria-missing.ini --report-once >/dev/null 2>&1; then
+    echo "daemon accepted a missing explicit config" >&2
+    exit 1
+fi
+if docker exec -u neutron "${SERVICE_NAME}" neutron-aria-agent \
+    -c /tmp/neutron-aria-missing.ini --once >/dev/null 2>&1; then
+    echo "--once accepted a missing explicit config" >&2
+    exit 1
+fi
 
 SERVICE_NAME="${SERVICE_NAME}" \
 EGG_NAME="${EGG_NAME}" \
