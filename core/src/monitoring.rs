@@ -431,10 +431,7 @@ fn validate_rule_stats_policy_family(ip_family: u8) -> Result<(), String> {
     if policy_family_is_valid(ip_family) {
         Ok(())
     } else {
-        Err(format!(
-            "invalid_rule_stats_ip_family: {}",
-            ip_family
-        ))
+        Err(format!("invalid_rule_stats_ip_family: {}", ip_family))
     }
 }
 
