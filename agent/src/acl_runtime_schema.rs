@@ -371,6 +371,8 @@ pub(crate) fn prepare_acl_runtime_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria_core::common::IP_FAMILY_V4;
+    use aria_core::state::FirewallState;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_state_path(name: &str) -> std::path::PathBuf {
@@ -384,6 +386,28 @@ mod tests {
             std::process::id(),
             nanos
         ))
+    }
+
+    fn old_runtime_metadata() -> AclRuntimeMetadata {
+        AclRuntimeMetadata {
+            runtime_schema: 2,
+            acl_policy_key_schema: 1,
+        }
+    }
+
+    fn write_legacy_managed_state(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        let mut state = FirewallState::default();
+        state
+            .apply_add_rule(0, 0, 6, 0, Some("443"), 0, IP_FAMILY_V4)
+            .unwrap();
+        state.rules[0].ip_family = 0;
+        std::fs::write(
+            path.join("state.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(path.join("state.wal"), b"").unwrap();
     }
 
     #[test]
@@ -631,6 +655,131 @@ mod tests {
         assert_eq!(error, "acl_runtime_schema_mismatch_live");
         assert!(pin_path.join("tap0_tc_ingress_link").exists());
         assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(old));
+
+        std::fs::remove_dir_all(state_path).unwrap();
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn acl_runtime_schema_family_migration_failure_precedes_pin_cleanup_and_publication() {
+        let state_path = temp_state_path("migration-failure-state");
+        let pin_path = temp_state_path("migration-failure-pins");
+        let iface_state_path = state_path.join("tap-migration-failure");
+        write_legacy_managed_state(&iface_state_path);
+        std::fs::write(iface_state_path.join("state.wal"), b"not-json\n").unwrap();
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(pin_path.join("old-map"), b"legacy").unwrap();
+        let old = old_runtime_metadata();
+        publish_acl_runtime_metadata(&state_path, &old).unwrap();
+
+        let error = prepare_acl_runtime_schema(
+            &state_path,
+            &pin_path,
+            ManagedRuntimeActivity::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("migrate managed ACL state tap-migration-failure"));
+        assert!(pin_path.join("old-map").exists());
+        assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(old));
+
+        std::fs::remove_dir_all(state_path).unwrap();
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn acl_runtime_schema_crash_after_family_migration_retries_without_rewrite() {
+        let state_path = temp_state_path("post-migration-crash-state");
+        let pin_path = temp_state_path("post-migration-crash-pins");
+        let iface_state_path = state_path.join("tap-post-migration-crash");
+        write_legacy_managed_state(&iface_state_path);
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(pin_path.join("old-map"), b"legacy").unwrap();
+        let old = old_runtime_metadata();
+        publish_acl_runtime_metadata(&state_path, &old).unwrap();
+
+        let error = prepare_acl_runtime_schema_with_hook(
+            &state_path,
+            &pin_path,
+            ManagedRuntimeActivity::default(),
+            |phase| match phase {
+                AclRuntimeSchemaPreparationPhase::AfterDurableFamilyMigration => {
+                    Err("injected crash after durable family migration".to_string())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "injected crash after durable family migration");
+        assert!(pin_path.join("old-map").exists());
+        assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(old));
+        let migrated_snapshot = std::fs::read(iface_state_path.join("state.json")).unwrap();
+        let migrated_wal = std::fs::read(iface_state_path.join("state.wal")).unwrap();
+        let migrated: FirewallState = serde_json::from_slice(&migrated_snapshot).unwrap();
+        assert_eq!(migrated.rules.len(), 1);
+        assert_eq!(migrated.rules[0].ip_family, IP_FAMILY_V4);
+
+        assert_eq!(
+            prepare_acl_runtime_schema(
+                &state_path,
+                &pin_path,
+                ManagedRuntimeActivity::default(),
+            )
+            .unwrap(),
+            AclRuntimeSchemaPreparation::RebuiltDormant
+        );
+        assert!(!pin_path.exists());
+        assert_eq!(
+            load_acl_runtime_metadata(&state_path).unwrap(),
+            Some(current_acl_runtime_metadata())
+        );
+        assert_eq!(
+            std::fs::read(iface_state_path.join("state.json")).unwrap(),
+            migrated_snapshot
+        );
+        assert_eq!(
+            std::fs::read(iface_state_path.join("state.wal")).unwrap(),
+            migrated_wal
+        );
+
+        std::fs::remove_dir_all(state_path).unwrap();
+    }
+
+    #[test]
+    fn acl_runtime_schema_future_metadata_refuses_before_family_migration() {
+        let state_path = temp_state_path("future-before-migration-state");
+        let pin_path = temp_state_path("future-before-migration-pins");
+        let iface_state_path = state_path.join("tap-future-schema");
+        write_legacy_managed_state(&iface_state_path);
+        std::fs::create_dir_all(&pin_path).unwrap();
+        std::fs::write(pin_path.join("future-map"), b"future").unwrap();
+        let future = AclRuntimeMetadata {
+            runtime_schema: ACL_RUNTIME_SCHEMA_VERSION + 1,
+            acl_policy_key_schema: ACL_POLICY_KEY_SCHEMA_VERSION,
+        };
+        publish_acl_runtime_metadata(&state_path, &future).unwrap();
+        let snapshot_before = std::fs::read(iface_state_path.join("state.json")).unwrap();
+        let wal_before = std::fs::read(iface_state_path.join("state.wal")).unwrap();
+
+        assert_eq!(
+            prepare_acl_runtime_schema(
+                &state_path,
+                &pin_path,
+                ManagedRuntimeActivity::default(),
+            )
+            .unwrap_err(),
+            "acl_runtime_schema_future"
+        );
+        assert!(pin_path.join("future-map").exists());
+        assert_eq!(load_acl_runtime_metadata(&state_path).unwrap(), Some(future));
+        assert_eq!(
+            std::fs::read(iface_state_path.join("state.json")).unwrap(),
+            snapshot_before
+        );
+        assert_eq!(
+            std::fs::read(iface_state_path.join("state.wal")).unwrap(),
+            wal_before
+        );
 
         std::fs::remove_dir_all(state_path).unwrap();
         std::fs::remove_dir_all(pin_path).unwrap();
