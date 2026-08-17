@@ -327,13 +327,140 @@ pub(crate) fn count_managed_link_pins(shared_pin_path: &Path) -> Result<usize, S
     Ok(count)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AclRuntimeSchemaPreparationPhase {
+    AfterDurableFamilyMigration,
+}
+
+fn managed_state_directories(base_state_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut directories = Vec::new();
+    let entries = match fs::read_dir(base_state_path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(directories),
+        Err(error) => {
+            return Err(format!(
+                "read managed state root {}: {}",
+                base_state_path.display(),
+                error
+            ));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read managed state entry {}: {}",
+                base_state_path.display(),
+                error
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "inspect managed state entry {}: {}",
+                entry.path().display(),
+                error
+            )
+        })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let state_path = entry.path();
+        if entry.file_name() == "system" {
+            // The system-wide standalone state has its own authority and is
+            // migrated by SystemManager/KernelDropManager, never by the
+            // Neutron-managed runtime-schema transaction.
+            continue;
+        }
+        let mut contains_state = false;
+        for file_name in ["state.json", "state.wal"] {
+            let file_path = state_path.join(file_name);
+            match fs::symlink_metadata(&file_path) {
+                Ok(metadata) if metadata.file_type().is_file() => contains_state = true,
+                Ok(_) => {
+                    return Err(format!(
+                        "managed state path is not a regular file: {}",
+                        file_path.display()
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "inspect managed state path {}: {}",
+                        file_path.display(),
+                        error
+                    ));
+                }
+            }
+        }
+        if contains_state {
+            directories.push(state_path);
+        }
+    }
+    directories.sort();
+    Ok(directories)
+}
+
+fn durably_migrate_managed_acl_states(base_state_path: &Path) -> Result<(), String> {
+    for state_path in managed_state_directories(base_state_path)? {
+        let iface = state_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "managed ACL state path has no UTF-8 interface name: {}",
+                    state_path.display()
+                )
+            })?;
+        let state_path_str = state_path.to_str().ok_or_else(|| {
+            format!(
+                "managed ACL state path is not UTF-8: {}",
+                state_path.display()
+            )
+        })?;
+        aria_core::wal::load_with_wal_for_authority(
+            state_path_str,
+            aria_core::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
+        )
+        .map_err(|error| format!("migrate managed ACL state {}: {}", iface, error))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_acl_runtime_schema(
     base_state_path: &Path,
     shared_pin_path: &Path,
     activity: ManagedRuntimeActivity,
 ) -> Result<AclRuntimeSchemaPreparation, String> {
+    prepare_acl_runtime_schema_with_hook(base_state_path, shared_pin_path, activity, |_| Ok(()))
+}
+
+fn prepare_acl_runtime_schema_with_hook<F>(
+    base_state_path: &Path,
+    shared_pin_path: &Path,
+    activity: ManagedRuntimeActivity,
+    mut hook: F,
+) -> Result<AclRuntimeSchemaPreparation, String>
+where
+    F: FnMut(AclRuntimeSchemaPreparationPhase) -> Result<(), String>,
+{
     let metadata = load_acl_runtime_metadata(base_state_path)?;
-    match classify_acl_runtime_schema(metadata.as_ref(), activity) {
+    let disposition = classify_acl_runtime_schema(metadata.as_ref(), activity);
+    if matches!(
+        &disposition,
+        AclRuntimeSchemaDisposition::RefuseLive { reason }
+            if reason == "acl_runtime_schema_future"
+    ) {
+        return Err("acl_runtime_schema_future".to_string());
+    }
+
+    // A known runtime schema may be rebuilt or adopted only after every
+    // per-interface core snapshot and local WAL has reached durable family
+    // form. Each checkpoint is idempotent, so a crash partway through this
+    // loop resumes without publishing a premature runtime schema.
+    durably_migrate_managed_acl_states(base_state_path)?;
+    hook(AclRuntimeSchemaPreparationPhase::AfterDurableFamilyMigration)?;
+
+    match disposition {
         AclRuntimeSchemaDisposition::Adopt => Ok(AclRuntimeSchemaPreparation::Adopted),
         AclRuntimeSchemaDisposition::RefuseLive { reason } => Err(reason),
         AclRuntimeSchemaDisposition::RebuildDormant => {
