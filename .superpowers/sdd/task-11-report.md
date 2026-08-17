@@ -9,6 +9,14 @@ authenticated URLs with `gh run view <run-id> --json url --jq .url`. OpenStack
 and EL 4.18 field validation was not available and remains
 strictly `deferred/pending`; this report makes no field PASS claim.
 
+**Superseded review boundary (2026-08-17):** the exact-head delivery evidence
+below remains valid, but the statement that no Critical, Important, or Minor
+findings remained is no longer the current source-review verdict. The later
+audit is recorded under `REVIEW-ACL-116..123` and `REVIEW-TXN-039` in
+`docs/openstack-neutron-aria-details/12-review-bug-backlog.md`. It also records
+the standalone family gap as fixed and keeps product decisions, defensive debt,
+and field evidence separate from open implementation defects.
+
 ## Commits
 
 - `8f70ab8` — RED CI-discovery and smoke contracts.
@@ -134,10 +142,12 @@ wrapper and three mutation tests reject an unsafe CT-hit guard, context-install,
 and miss-branch mutations. It is not represented as a traffic test. No eBPF hot
 path was changed for Task 11.
 
-Final broad review is **APPROVED** at `87965bd`: no Critical, Important, or
-Minor findings remain. The final transition contract verifies cleanup precedes
-all four family rules, the two family priorities are distinct per direction,
-and full resync follows creation.
+The Task 11 broad review was **APPROVED** at `87965bd` for the planned delivery
+matrix. A later 2026-08-17 audit supersedes its former claim that no findings
+remained; see the backlog rows linked in the Status correction above. The final
+transition contract still verifies cleanup precedes all four family rules, the
+two family priorities are distinct per direction, and full resync follows
+creation.
 
 ## Field-evidence boundary
 

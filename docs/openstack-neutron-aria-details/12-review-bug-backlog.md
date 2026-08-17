@@ -36,6 +36,13 @@ is complete. Product-contract clarification then closed `REVIEW-ACL-103` as
 tap, while physical/provider trunks remain outside ACL/CT authority. The pass
 therefore has thirteen fixed rows and one closed-not-supported row, with no
 ordinary open row.
+A 2026-08-17 post-delivery IPv6 ACL review then re-verified the 64-commit
+`1b811e0..c768ed9b` range against current `main`. It recorded eight new
+`REVIEW-ACL-*` rows plus `REVIEW-TXN-039`, two explicit product-contract risks,
+three engineering-debt rows, one reused Clippy debt, one rejected stale claim,
+and an exact-head fixed row for the subsequently delivered standalone family
+API. The dated review correction below and the Register are authoritative;
+the earlier Task 11 broad-review statement is superseded.
 
 ## 2026-08-11 ACL-055 Field Closure
 
@@ -473,6 +480,11 @@ Existing bug/risk IDs reused instead of duplicated:
 | RISK-CI-001 | medium | workflow supply chain | fixed | Every external workflow `uses:` reference is now pinned to a reviewed lowercase 40-character commit SHA. Stable and nightly toolchain selection remains explicit, all five upload executions are fixed to the upstream `v4.6.2` commit, and a Cargo-free mutation-tested validator prevents mutable tags, branches, short/uppercase SHAs, missing revisions, and unsupported Docker identities from re-entering any tracked workflow. | RED `dc1483e` / Build [31888740382](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31888740382) failed on exactly the eight known mutable refs. GREEN `5be412b` / exact-head Build [31888861469](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31888861469) passed fast/database/install contracts, selected Rust behavior, warning-denied Rust/eBPF/static builds, and the 448-byte stack gate. Workflow permissions, triggers, artifact/release semantics, and publication conditions are unchanged. Dependabot cannot be honestly activated from this non-default delivery branch; reviewed manual refresh remains the interim policy and default-branch automation remains a governance follow-up. |
 | DEBT-RELEASE-001 | medium | release metadata and licensing | fixed | Root `VERSION` is the product release authority, the MIT `LICENSE` and changelog are present, placeholder author metadata is removed, and CI now verifies release manifests, checksums, support bounds, reproducibility, and tag/version agreement. Rust and Python remain separately reported `0.1.0` component compatibility versions by design. | Closed by P6-1 RC delivery governance. Formal tag and registry promotion now depend on the remaining P6 preflight and explicit release authorization, not a retired compute. |
 | DEBT-REPO-001 | medium | repository and evidence hygiene | open | The repository tracks generated HTML/ZIP output, a roughly 4.6 MiB latest-build binary archive, and extensive field evidence containing environment hostnames and internal addresses. The current shared Git object store is roughly 211 MiB. This is repository/disclosure debt, not a runtime bug. | Move generated binaries and presentation bundles to CI artifacts/releases, retain only durable evidence summaries where possible, define evidence retention/redaction rules, and reuse `REVIEW-ACL-011` for public identifier scrubbing. |
+| RISK-ACL-001 | medium | dual-stack priority namespace | decision required | Enabled rule uniqueness and effective indexing use `(policy, direction, priority)` without ethertype. IPv4 and IPv6 rules therefore cannot reuse one priority, but priority remains metadata rather than datapath arbitration. This is a product-model choice, not a demonstrated forwarding bug. | Decide and document either one policy-global priority namespace or family-qualified uniqueness. If family-qualified, migrate the DB constraint and update all repository/effective-index variants atomically. |
+| RISK-ACL-002 | low | CIDR input symmetry | decision required | Bare IPv6 input is normalized as `/128` while bare IPv4 is rejected for lacking a prefix. The behavior is asymmetric, but the current contract does not say whether bare host input is accepted. | Choose one symmetric API contract: require an explicit prefix for both families, or accept and canonicalize host addresses for both. Then update validation, CLI help, repositories, and tests together. |
+| DEBT-ACL-002 | low | IPv6 capability reason taxonomy | open | Capability rejection is operator-visible through `last_error` and logs, but machine status uses generic `local_api_contract_error` rather than a stable `acl_ipv6_capability_unavailable` reason. | Add a stable reason without allowing the capability failure to block ordinary IPv4 status, heartbeat, or ACL writes outside the rejected IPv6 snapshot. |
+| DEBT-ACL-003 | low | address-set family recomputation | open | `prepare_address_set` recomputes `address_set_ethertype(final_values["members"])` once for every referencing rule although the final member set is invariant for the operation. | Compute the final address-set family once before the loop and reuse it without changing validation order or exception semantics. |
+| DEBT-CI-007 | low | counter migration downgrade coverage | open | The counter-family Alembic revision implements both upgrade and downgrade, but tests cover upgrade/idempotency only and do not prove an upgrade→downgrade→upgrade round trip. | Add schema and preserved-row round-trip tests for supported backends; do not claim a production migration defect unless the executable test exposes one. |
 
 ## 2026-08-13 Full-Code Bug-Hunt Review
 
@@ -556,9 +568,80 @@ Corrections applied to the register:
   index conflict, or incorrect enforcement.
 - Delivery Status P1 count corrected from seven to six.
 
+## 2026-08-17 IPv6 ACL Post-Delivery Review Correction
+
+This pass re-read the family migration, managed activation, attach rollback,
+runtime-schema, shadow-bank staging, standalone API, counter decoding, Python
+write invariants, migration tests, and exact-head hosted CI. No local Cargo
+command was run. The review deliberately separates reproduced implementation
+defects from defensive debt, product decisions, field-evidence gaps, and stale
+claims.
+
+Registered review rows:
+
+- `REVIEW-ACL-116`: legacy family-zero migration has no managed/standalone
+  authority context. An all-wildcard record expands to IPv4+IPv6 even though
+  the managed legacy contract is IPv4-only. Managed startup currently keeps
+  the gate off until an exclusive fresh snapshot replaces old rules, so the
+  originally claimed immediate Critical IPv6 deny is not proven; the durable
+  migration contract is still wrong and must be repaired.
+- `REVIEW-ACL-117`: pinned-runtime attach commits live links before
+  `ensure_fq_runtime()`; a later persisted-state load error escapes without the
+  rollback receipt returned to the registry.
+- `REVIEW-ACL-118`: `RULE_STATS` decoding accepts family zero as a valid row.
+- `REVIEW-TXN-039`: startup prepares/deletes dormant ACL pins and publishes
+  current runtime-schema metadata before per-interface core-state/local-WAL
+  migration, contrary to the approved migration commit order.
+- `REVIEW-ACL-119`: a dormant future runtime schema is rebuilt as if it were
+  an old schema instead of being refused.
+- `REVIEW-ACL-120`: shadow-bank staging silently omits invalid-family rules.
+  Supported writers already reject those values, so this is recorded as
+  defensive API debt rather than a demonstrated public-path failure.
+- `REVIEW-ACL-121`: the reviewed-range standalone API hard-coded IPv4. This
+  was subsequently fixed by the family-aware standalone publication series
+  and is recorded fixed against exact-head hosted CI rather than reopened.
+- `REVIEW-ACL-122`: malformed string counter version `"2"` is correctly
+  rejected by the integer wire contract but misclassified as an invalid v1
+  payload instead of an invalid version/v2 payload.
+- `REVIEW-ACL-123`: replay/inventory construct `PolicyKey` without a local
+  family assertion. Existing mutation and load boundaries make this
+  unreachable through supported input, so it is defensive API debt.
+
+Tracked non-bug boundaries:
+
+- `RISK-ACL-001`: whether enabled IPv4 and IPv6 rules may reuse the same
+  `(direction, priority)` remains a product contract decision. Current DB and
+  effective-index behavior intentionally use one policy-global priority
+  namespace; no datapath arbitration depends on priority.
+- `RISK-ACL-002`: bare IPv6 input is normalized to `/128` while bare IPv4 is
+  rejected. The asymmetry is real, but changing it requires choosing whether
+  both families require explicit prefixes or both accept host addresses.
+- `DEBT-ACL-002`: operator logs and `last_error` expose the IPv6 capability
+  failure, but there is no stable machine-readable
+  `acl_ipv6_capability_unavailable` reason.
+- `DEBT-ACL-003`: `prepare_address_set` recomputes one final member-family
+  result for every referencing rule.
+- `DEBT-CI-007`: the counter-family Alembic migration has upgrade and downgrade
+  implementations but no upgrade/downgrade round-trip test.
+- The Clippy observation reuses `DEBT-CI-006`; it is not a compiler-warning
+  failure and did not justify a duplicate IPv6 bug ID.
+- The family-qualified selector change invalidates exact-head reuse of the old
+  `REVIEW-ACL-046` field artifact. The old IPv4 result remains historical
+  evidence; dual-stack exact/more-specific interference and pollution repair
+  must be rerun on the new artifact.
+
+Rejected or narrowed claims:
+
+- The claimed `__neutron_acl` prefix typo is stale: current spec, plan, and
+  implementation use `neutron:<port-id>:`.
+- Missing a dedicated IPv6-capability reason does not make the failure wholly
+  invisible: the exception is retained in `last_error` and logs.
+- A string counter schema version is malformed input, not a compatibility form
+  that the decoder must accept.
+
 ## REVIEW Item Register
 
-This register retains all 142 stable `REVIEW-*` IDs. Use the `Status` column,
+This register retains all 151 stable `REVIEW-*` IDs. Use the `Status` column,
 not the ID prefix, to decide whether an item is an active defect, fixed,
 verification-only, risk-classified, or closed.
 
@@ -611,7 +694,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-043 | P3 | priority=0 rejected as missing | fixed | `_require()` uses falsy `not obj.get(field)`, so rule `priority=0` fails validation while effective compile accepts 0. | Use explicit missing checks for numeric fields; add create/update unit tests for priority 0. |
 | REVIEW-ACL-044 | P2 | Metadata-only ACL flips bank without WAL | fixed | Historical finding: metadata-only ACL changes could enter publication even when the compiled group/policy projection was unchanged. Commit `4160f73` computes `semantic_changed` from concrete policy, group-CIDR, group-delete, and released-bitmap deltas; a clean projection with no semantic delta returns `ManagedAclPublicationDecision::Noop` before shadow staging, persistence, fragment epoch advance, or bank switch. Metadata revision still invalidates the outer translation/reconcile cache but cannot publish an unchanged bank. | Fixed by RED contract `d4ce7e8` and production `4160f73`. Rust behaviors `managed_projection_repair_clean_equal_reconcile_is_noop` and `neutron_acl_validation_cache_is_content_safe_and_port_specific` cover the inner no-publication and outer metadata-reconcile boundaries. Manually dispatched exact-head Build [30610771022](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30610771022) at `98034c1` passed `fast-contracts`, `rust-behavior`, and warning-denied `rust-build`. No privileged field evidence applies. |
 | REVIEW-ACL-045 | P2 | Orphan reconcile skips map scrub | fixed | Commit `8242c1b` derives orphan identity from link pins and persisted live-iface markers, subtracts committed siblings, serializes cleanup, scrubs both ACL banks and every tap-scoped runtime family, and releases the retry marker last. Target-kernel RED then found that legacy TC filters are kernel-owned and have no link pin. Commit `b18dd3c` runs the full ownership-verified detach path before map scrub, covering legacy TC without deleting shared map state. Any required failure remains blocked and retains stable identity plus the retry marker for startup retry. | Hosted Build `31154605848` passed the maintained Rust, eBPF, package, and static gates. An isolated target-kernel fixture audited 29 available map families: orphan entries changed 13 to 0, all 13 sibling entries remained, an injected map failure retained the retry marker, and retry completed after repair. Orphan ingress/egress legacy TC filters were absent while sibling filters remained. Private taps and a private bridge were used; production OVS and `br-int` were not mutated. Distinct from `REVIEW-ACL-035`. |
-| REVIEW-ACL-046 | P1 | Cross-domain ACL selector isolation | fixed; managed Neutron field-verified on two available computes | Reopened 2026-07-15 with a complete enforcement path. The repair derives ACL maps from final direction-specific rule references, uses a conflict-aware general projection, gates ownership/skip on projection health, and repairs legacy pollution through bank publication plus strict CT invalidation while preserving standalone direct publication for `REVIEW-ACL-057`. The transaction implementation is `49081c6`. Pre-field wiring/hardening commits `d1aa523..ad30cad` cover managed detach ordering, purge-failure atomicity, strict-flush rollback, and successful retry detach; independent final review approved the wiring. Exact-head GitHub Actions run [29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181) at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`. | A privileged legacy-kernel standalone tap fixture passed on 2026-08-06. On 2026-08-11, real Neutron `aria_acl` policy/rule/binding projection passed exact-CIDR isolation, more-specific-CIDR isolation, injected legacy pollution repair, strict CT invalidation, restart recovery, cleanup, and independent OVS safety checks on both available compute nodes. See `docs/evidence/openstack-n05-lite/20260811-acl046-managed-selector-isolation/summary.md`. The unavailable third compute remains a wider P5 environment constraint, not an ACL-046 semantic gap. |
+| REVIEW-ACL-046 | P1 | Cross-domain ACL selector isolation | source fixed; prior IPv4 field evidence retained; exact-head dual-stack revalidation pending | Reopened 2026-07-15 with a complete enforcement path. The repair derives ACL maps from final direction-specific rule references, uses a conflict-aware general projection, gates ownership/skip on projection health, and repairs legacy pollution through bank publication plus strict CT invalidation while preserving standalone direct publication for `REVIEW-ACL-057`. The transaction implementation is `49081c6`. Pre-field wiring/hardening commits `d1aa523..ad30cad` cover managed detach ordering, purge-failure atomicity, strict-flush rollback, and successful retry detach; independent final review approved the wiring. Exact-head GitHub Actions run [29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181) at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`. | A privileged legacy-kernel standalone tap fixture passed on 2026-08-06. On 2026-08-11, real Neutron IPv4 projection passed exact-CIDR isolation, more-specific-CIDR isolation, injected legacy pollution repair, strict CT invalidation, restart recovery, cleanup, and independent OVS safety checks on both available computes. The later IPv6 delivery changed selector naming and the linked artifact, so that historical result is not exact-head dual-stack proof. Rerun the same interference/pollution matrix for IPv4 and IPv6 on the current artifact; keep it `deferred/pending` until a target environment is available. |
 | REVIEW-ACL-047 | P2 | Translator ignores rule priority | fixed | Numeric priority remains northbound metadata and is not added to eBPF `PolicyKey`. Python preflight and Rust direct-UDS validation now reject priority-dependent CIDR/specificity overlaps with stable reasons; canonical-equivalent CIDR groups are reused. A classified direct-UDS rejection reports real `degraded/bypass` only after the empty owned-ACL transaction succeeds. | Fixed with Python and Rust overlap/canonicalization/outcome regression tests, persistent Stage 1/2 static guards, and the documented priority-independent acceptance boundary. QoS/Mirror are unchanged. Distinct from `REVIEW-ACL-009`. |
 | REVIEW-TXN-027 | P2 | Delete detach succeeds / WAL commit fails | fixed | Commit `efb113c` makes post-detach publication delete-specific and forward-only. An after-detach fault or `DeleteCommit` failure now reports `detached:false`, retains the last committed port in live authority, exposes a hashless operator-blocked delete identity, and leaves the exact unmatched `DeleteIntent` durable. Startup recovery performs idempotent attach/scrub/detach and removes the port only after a durable `DeleteCommit`; failed runtime recovery or recovery commit preserves the intent for retry instead of clearing it with snapshot rollback. | RED `7bfb88f` / Build [30612312902](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612312902) proved the missing boundaries. Exact-head `f8b72b8` / Build [30612826096](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612826096) passed the five delete-forward behaviors, `fast-contracts`, and warning-denied Rust/eBPF build. No WAL schema, UDS API, or snapshot rollback contract changed. Distinct from `REVIEW-ACL-023`. |
 | REVIEW-ACL-048 | P1 | Status projection overwrites bypass→enforce | fixed | `_port_statuses_from_status` replaces UDS `effective_action` values of `bypass` (and empty) with snapshot metadata defaulting to `enforce` when `acl_enabled` is true. Northbound `aria_acl_port_statuses` can report enforce while datapath bypassed. | Never overwrite a concrete UDS runtime `effective_action`/`status`; treat UDS as runtime truth. Add unit tests for UDS bypass + snapshot enforce. |
@@ -706,6 +789,15 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-114 | P3 | Counter latest-snapshot persistence is inconsistent across repositories | fixed; field evidence pending | Clean no-sample reports now replace detail rows with an empty set, while explicit `counters_error` retains the last good summary and details. The stdlib SQLite repository has counter table/method parity, tagged datetime JSON round trips, merge-on-status-update behavior, cascade cleanup and the same deterministic natural ordering used by memory and SQLAlchemy repositories. | RED `f2779d5` / Build [31880002282](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31880002282) failed stale-row cleanup and SQLite parity. GREEN `d6cb17a` / Build [31880412479](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31880412479) passed 695 Python tests locally (18 skipped), fast contracts and database contracts. Production database observation remains field pending. |
 | REVIEW-ACL-115 | P3 | Counter CLI exposes raw optional fields and erases unknown reason identity | fixed; field evidence pending | The status-show command always removes raw detail/group-map implementation fields. `--counters` alone renders normalized rows; known reason names remain stable and unknown values retain their numeric identity as `UNKNOWN(<id>)`. | RED `f2779d5` exposed both CLI regressions. GREEN `d6cb17a` passed all 17 CLI tests locally and Build [31880412479](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31880412479) fast contracts. Live operator rendering remains field pending. |
 | REVIEW-TXN-038 | P3, conditional | Python SnapshotStateStore._write lacks directory fsync after rename | fixed | `_write` (`agent/state.py:805-830`) did file fsync + `os.replace` but never fsynced the parent directory, so the durable pending-snapshot identity could regress to the previous content across a power loss in the rename window. `_write` now opens the state directory read-only (`O_DIRECTORY` where available) and fsyncs it after the rename, best-effort on platforms without directory fsync support (macOS). The power-loss window itself remains deferred evidence; the behavior contract is the file-then-directory fsync order. | RED `95b8538` / Build [31853722516](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31853722516) failed the missing directory-fsync contract in fast-contracts. GREEN `3e0bf92` / exact-head Build [31853908451](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31853908451) passed it plus the full fast-contracts lane. No privileged field evidence applies. |
+| REVIEW-ACL-116 | P1 | Legacy family-zero migration lacks authority context | open | `migrate_legacy_rule_families` receives only a rule and group table. An all-wildcard family-zero record therefore expands to IPv4+IPv6 for both standalone and managed state, contradicting the managed legacy IPv4-only contract. Managed activation currently keeps ACL off until an exclusive fresh snapshot replaces old rules, so an immediate Critical forwarding consequence is not claimed. | Introduce an explicit, typed migration authority such as managed-legacy-IPv4 versus standalone-infer; thread it through state and WAL load without silently defaulting ambiguous callers. RED must cover managed wildcard→IPv4, standalone wildcard→both, concrete CIDR inference, WAL replay, and checkpoint idempotency. |
+| REVIEW-ACL-117 | P2 | Post-attach FQ recovery failure escapes without link rollback | open | `attach_links_from_pinned_runtime` activates persisted live state and then calls `ensure_fq_runtime()?`. A persisted-state load failure returns after TC/XDP attachment but before `AttachedLinks` reaches the registry, so the registry error path cannot invoke the existing link rollback receipt. Deterministic ACL migration failures are usually caught in prepare, which lowers reachability but does not remove the structural gap. | Keep QoS/FQ recovery outside the ACL attach commit result, move every fallible prerequisite before attachment, or return an error carrying the complete rollback receipt. Prove no live link/pin cleanup mismatch for every post-attach failure. Do not expand QoS datapath semantics. |
+| REVIEW-ACL-118 | P3 | RULE_STATS accepts family-zero rows | open | `get_rule_stats` filters by tap and packet count but accepts `PolicyKey.ip_family=0`; corrupt or stale rows can therefore appear as valid ACL counters even though family zero is forbidden for policy identity. | Reject non-4/6 policy families at the counter decode boundary and report a counters-only typed error, preserving ordinary status/ACL write isolation. Add v4/v6 acceptance and family-zero rejection tests. |
+| REVIEW-TXN-039 | P2 | Runtime schema publication precedes durable family migration | open | Startup calls `prepare_acl_runtime_schema` before per-interface `load_with_wal`/core-state migration. Dormant pins can be deleted and schema-3 metadata published even if the later durable family migration fails, contrary to the approved migrate-then-classify sequence. | Make durable state/local-WAL migration the prerequisite commit before dormant pin cleanup or current-schema publication. RED must cover failures before cleanup, after migration, and crash-retry idempotency; live old-schema links must remain refused. |
+| REVIEW-ACL-119 | P2 | Dormant future runtime schema is destructively rebuilt | open | `classify_acl_runtime_schema` maps every non-current dormant metadata value to `RebuildDormant`, including versions newer than the running binary. A rollback binary can therefore remove a future runtime instead of refusing it. | Distinguish missing/known-old metadata from future versions. Rebuild only supported old or absent dormant schemas; refuse every future schema whether dormant or live. Add symmetric forward/rollback classification tests. |
+| REVIEW-ACL-120 | P3 | Shadow staging silently omits invalid-family rules | reclassified: defensive API debt | `stage_acl_shadow_bank` stages only family 4 and 6 rules and does not reject a residual family-zero/invalid record. Supported mutation and load boundaries already reject such values, so no public-path partial publication is demonstrated. | Add one explicit final-state family validation before any scrub or staging. Preserve current public error semantics and prove invalid input causes no bank/general-map/persistence mutation. |
+| REVIEW-ACL-121 | P2 | Standalone live policy API hard-coded IPv4 | fixed | At `c768ed9b`, standalone upsert/delete always used family 4, contradicting the IPv4/IPv6/any contract. The later series exposes explicit ethertype, expands `any` atomically to both families, prevalidates complete delete keys, returns family-qualified output, and removes obsolete standalone paths. | Fixed by `421aa02`, review hardening `4532e69..2a48685`, and final managed transition `87965bd`. Exact-head `5253afe` Build [31960398823](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/31960398823) passed all hosted jobs. Target OpenStack/EL 4.18 traffic remains `deferred/pending` and is not implied by hosted GREEN. |
+| REVIEW-ACL-122 | P3 | Counter schema type error is attributed to v1 | open | `_counter_decoder` selects v2 only for integer `2`; a malformed string `"2"` falls through to the v1 decoder and reports `invalid_counters_v1`. The strict integer wire contract is correct, but the diagnostic identifies the wrong contract. | Validate the version type/value before decoder selection and emit a stable invalid-version reason. Do not accept string versions or weaken strict v1/v2 field validation. |
+| REVIEW-ACL-123 | P3 | Replay/inventory PolicyKey construction lacks local family assertion | reclassified: defensive API debt | Replay and inventory construct family-qualified `PolicyKey` values without a local 4/6 assertion. Public mutation, state migration, and WAL load already reject invalid nonzero families, so the claimed invalid-key path is not reproduced through supported input. | Add inexpensive family validation at the projection boundary and tests proving malformed internal fixtures fail before map mutation; do not duplicate migration policy there. |
 
 ### 2026-08-14 ACL-Only Execution Boundary
 

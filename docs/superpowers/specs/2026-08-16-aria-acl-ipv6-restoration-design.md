@@ -9,6 +9,15 @@ defined by
 `2026-08-16-ipv6-acl-legacy-kernel-temporary-stack-exception.md`. Target-kernel
 and OpenStack field evidence remain `deferred/pending`.
 
+**Post-delivery review note (2026-08-17):** a later source audit superseded the
+Task 11 statement that no findings remained. It recorded open migration,
+attach-rollback, runtime-schema, staging, counter-validation, and diagnostic
+items as `REVIEW-ACL-116..123` plus `REVIEW-TXN-039` in the authoritative
+review backlog. The standalone family API gap found in the reviewed range is
+already fixed as `REVIEW-ACL-121`; the remaining rows are not closed by the
+Task 11 hosted GREEN evidence. Production IPv6 remains default-off and field
+evidence remains pending.
+
 **Scope:** restore complete IPv6 support to the existing Neutron-managed and
 standalone Aria ACL product while preserving failure boundaries, Python 2.7
 compatibility, and default-off production enablement discipline. The current
@@ -674,8 +683,9 @@ install, DB contracts, Rust behavior, and
 warning-denied Rust build). Its `rust-build` job also assembled the Kolla bundle,
 release archive, manifest, and checksums; the separate artifact-publishing
 `release` job was correctly skipped by its publish condition. Same-head push
-`31959913784` is also GREEN. Final broad review approved this head with no
-Critical, Important, or Minor findings. Fixed CI
+`31959913784` is also GREEN. The Task 11 review approved the planned delivery
+matrix at that head; the later 2026-08-17 findings listed above supersede its
+former no-findings conclusion. Fixed CI
 discovers non-zero `acl_family_`, `acl_ipv6_`, `neutron_acl_ipv6_`, and
 `acl_runtime_schema_` Rust filters plus the high-value Python family,
 migration, and counters behaviors. Smoke entrypoints expose case names and
