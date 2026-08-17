@@ -224,4 +224,19 @@ mod tests {
         let error = scrub_ct_tables_strict(runtime).expect_err("missing CT pins must fail");
         assert!(error.contains("open CT_TABLE_V4"), "{error}");
     }
+
+    #[test]
+    fn map_authority_ct_list_treats_missing_pins_as_empty() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let pin_path = std::env::temp_dir()
+            .join(format!("aria-missing-ct-list-{}-{}", std::process::id(), nonce));
+        let pin_path = pin_path.to_string_lossy().to_string();
+
+        assert!(ct_list(TapMapRuntime::new(&pin_path, 4242))
+            .expect("missing optional CT pins are an empty query result")
+            .is_empty());
+    }
 }

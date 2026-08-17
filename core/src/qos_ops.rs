@@ -279,6 +279,24 @@ pub fn parse_burst(burst_str: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn map_authority_qos_read_fault_preserves_the_current_enable_flag() {
+        let sync_calls = Cell::new(0usize);
+        let error = sync_qos_after_delete_with(
+            true,
+            || Err("open QOS_CONFIG: permission denied".to_string()),
+            |_| {
+                sync_calls.set(sync_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "open QOS_CONFIG: permission denied");
+        assert_eq!(sync_calls.get(), 0);
+    }
 
     #[test]
     fn parse_rate_supports_common_units() {

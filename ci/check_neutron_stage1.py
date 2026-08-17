@@ -95,6 +95,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-core", "scrub_iteration_"],
     ["test", "--locked", "-p", "aria-core", "ct_contract_stats_iteration_"],
     ["test", "--locked", "-p", "aria-core", "port_counters_"],
+    ["test", "--locked", "-p", "aria-core", "map_authority_"],
     ["test", "--locked", "-p", "aria-agent", "tap_runtimes_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_status_counters_"],
     ["test", "--locked", "-p", "aria-core", "wal_inventory_"],
