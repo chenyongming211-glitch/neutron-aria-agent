@@ -68,6 +68,14 @@ pub(crate) fn classify_acl_runtime_schema(
     if metadata == Some(&current_acl_runtime_metadata()) {
         return AclRuntimeSchemaDisposition::Adopt;
     }
+    if metadata.is_some_and(|metadata| {
+        metadata.runtime_schema > ACL_RUNTIME_SCHEMA_VERSION
+            || metadata.acl_policy_key_schema > ACL_POLICY_KEY_SCHEMA_VERSION
+    }) {
+        return AclRuntimeSchemaDisposition::RefuseLive {
+            reason: "acl_runtime_schema_future".to_string(),
+        };
+    }
     if !activity.may_be_live() {
         AclRuntimeSchemaDisposition::RebuildDormant
     } else {
@@ -413,6 +421,38 @@ mod tests {
                 reason: "acl_runtime_schema_mismatch_live".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn acl_runtime_schema_future_metadata_is_always_refused() {
+        let future_versions = [
+            AclRuntimeMetadata {
+                runtime_schema: ACL_RUNTIME_SCHEMA_VERSION + 1,
+                acl_policy_key_schema: ACL_POLICY_KEY_SCHEMA_VERSION,
+            },
+            AclRuntimeMetadata {
+                runtime_schema: ACL_RUNTIME_SCHEMA_VERSION,
+                acl_policy_key_schema: ACL_POLICY_KEY_SCHEMA_VERSION + 1,
+            },
+        ];
+        let activities = [
+            ManagedRuntimeActivity::default(),
+            ManagedRuntimeActivity {
+                link_pin_count: 1,
+                persisted_iface_count: 1,
+            },
+        ];
+
+        for metadata in future_versions {
+            for activity in activities {
+                assert_eq!(
+                    classify_acl_runtime_schema(Some(&metadata), activity),
+                    AclRuntimeSchemaDisposition::RefuseLive {
+                        reason: "acl_runtime_schema_future".to_string(),
+                    }
+                );
+            }
+        }
     }
 
     #[test]
