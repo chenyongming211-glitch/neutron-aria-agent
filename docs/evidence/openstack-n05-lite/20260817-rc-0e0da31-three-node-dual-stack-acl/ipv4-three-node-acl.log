@@ -1,19 +1,19 @@
 === c2 IPv4 baseline ===
-PING 10.58.159.87 (10.58.159.87) 56(84) bytes of data.
-64 bytes from 10.58.159.87: icmp_seq=1 ttl=64 time=0.620 ms
-64 bytes from 10.58.159.87: icmp_seq=2 ttl=64 time=0.232 ms
-64 bytes from 10.58.159.87: icmp_seq=3 ttl=64 time=0.243 ms
+PING 192.0.2.87 (192.0.2.87) 56(84) bytes of data.
+64 bytes from 192.0.2.87: icmp_seq=1 ttl=64 time=0.620 ms
+64 bytes from 192.0.2.87: icmp_seq=2 ttl=64 time=0.232 ms
+64 bytes from 192.0.2.87: icmp_seq=3 ttl=64 time=0.243 ms
 
---- 10.58.159.87 ping statistics ---
+--- 192.0.2.87 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2050ms
 rtt min/avg/max/mdev = 0.232/0.365/0.620/0.180 ms
 c2-baseline-tcp
 c2-baseline-udp
 state=ready generation=5614 latency_ms=4446
 === c2 all three enforced ===
-PING 10.58.159.87 (10.58.159.87) 56(84) bytes of data.
+PING 192.0.2.87 (192.0.2.87) 56(84) bytes of data.
 
---- 10.58.159.87 ping statistics ---
+--- 192.0.2.87 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2028ms
 
 Process exited with status 1
@@ -22,9 +22,9 @@ Process exited with status 1
 === c2 rule update ===
 state=ready generation=5615 latency_ms=3741
 c2-rule-disabled-tcp
-PING 10.58.159.87 (10.58.159.87) 56(84) bytes of data.
+PING 192.0.2.87 (192.0.2.87) 56(84) bytes of data.
 
---- 10.58.159.87 ping statistics ---
+--- 192.0.2.87 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2042ms
 
 Process exited with status 1
@@ -33,52 +33,52 @@ state=ready generation=5616 latency_ms=4946
 Process exited with status 1
 === c2 policy disable/enable ===
 state=degraded generation=5617 latency_ms=2733
-PING 10.58.159.87 (10.58.159.87) 56(84) bytes of data.
-64 bytes from 10.58.159.87: icmp_seq=1 ttl=64 time=0.310 ms
-64 bytes from 10.58.159.87: icmp_seq=2 ttl=64 time=0.253 ms
-64 bytes from 10.58.159.87: icmp_seq=3 ttl=64 time=0.292 ms
+PING 192.0.2.87 (192.0.2.87) 56(84) bytes of data.
+64 bytes from 192.0.2.87: icmp_seq=1 ttl=64 time=0.310 ms
+64 bytes from 192.0.2.87: icmp_seq=2 ttl=64 time=0.253 ms
+64 bytes from 192.0.2.87: icmp_seq=3 ttl=64 time=0.292 ms
 
---- 10.58.159.87 ping statistics ---
+--- 192.0.2.87 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2047ms
 rtt min/avg/max/mdev = 0.253/0.285/0.310/0.023 ms
 c2-policy-disabled-tcp
 c2-policy-disabled-udp
 state=ready generation=5618 latency_ms=4137
-PING 10.58.159.87 (10.58.159.87) 56(84) bytes of data.
+PING 192.0.2.87 (192.0.2.87) 56(84) bytes of data.
 
---- 10.58.159.87 ping statistics ---
+--- 192.0.2.87 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2038ms
 
 Process exited with status 1
 === c2 binding disable rollback ===
 state=not_requested generation=5619 latency_ms=3649
-PING 10.58.159.87 (10.58.159.87) 56(84) bytes of data.
-64 bytes from 10.58.159.87: icmp_seq=1 ttl=64 time=0.753 ms
-64 bytes from 10.58.159.87: icmp_seq=2 ttl=64 time=0.244 ms
-64 bytes from 10.58.159.87: icmp_seq=3 ttl=64 time=0.263 ms
+PING 192.0.2.87 (192.0.2.87) 56(84) bytes of data.
+64 bytes from 192.0.2.87: icmp_seq=1 ttl=64 time=0.753 ms
+64 bytes from 192.0.2.87: icmp_seq=2 ttl=64 time=0.244 ms
+64 bytes from 192.0.2.87: icmp_seq=3 ttl=64 time=0.263 ms
 
---- 10.58.159.87 ping statistics ---
+--- 192.0.2.87 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2028ms
 rtt min/avg/max/mdev = 0.244/0.420/0.753/0.235 ms
 c2-rollback-tcp
 c2-rollback-udp
 c2 IPv4 lifecycle=pass
 === c3 IPv4 baseline ===
-PING 10.58.159.89 (10.58.159.89) 56(84) bytes of data.
-64 bytes from 10.58.159.89: icmp_seq=1 ttl=64 time=0.798 ms
-64 bytes from 10.58.159.89: icmp_seq=2 ttl=64 time=0.228 ms
-64 bytes from 10.58.159.89: icmp_seq=3 ttl=64 time=0.236 ms
+PING 192.0.2.89 (192.0.2.89) 56(84) bytes of data.
+64 bytes from 192.0.2.89: icmp_seq=1 ttl=64 time=0.798 ms
+64 bytes from 192.0.2.89: icmp_seq=2 ttl=64 time=0.228 ms
+64 bytes from 192.0.2.89: icmp_seq=3 ttl=64 time=0.236 ms
 
---- 10.58.159.89 ping statistics ---
+--- 192.0.2.89 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2031ms
 rtt min/avg/max/mdev = 0.228/0.420/0.798/0.266 ms
 c3-baseline-tcp
 c3-baseline-udp
 state=ready generation=7515 latency_ms=2922
 === c3 all three enforced ===
-PING 10.58.159.89 (10.58.159.89) 56(84) bytes of data.
+PING 192.0.2.89 (192.0.2.89) 56(84) bytes of data.
 
---- 10.58.159.89 ping statistics ---
+--- 192.0.2.89 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2048ms
 
 Process exited with status 1
@@ -87,9 +87,9 @@ Process exited with status 1
 === c3 rule update ===
 state=ready generation=7516 latency_ms=3691
 c3-rule-disabled-tcp
-PING 10.58.159.89 (10.58.159.89) 56(84) bytes of data.
+PING 192.0.2.89 (192.0.2.89) 56(84) bytes of data.
 
---- 10.58.159.89 ping statistics ---
+--- 192.0.2.89 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2050ms
 
 Process exited with status 1
@@ -98,52 +98,52 @@ state=ready generation=7517 latency_ms=4154
 Process exited with status 1
 === c3 policy disable/enable ===
 state=degraded generation=7518 latency_ms=3125
-PING 10.58.159.89 (10.58.159.89) 56(84) bytes of data.
-64 bytes from 10.58.159.89: icmp_seq=1 ttl=64 time=0.587 ms
-64 bytes from 10.58.159.89: icmp_seq=2 ttl=64 time=0.250 ms
-64 bytes from 10.58.159.89: icmp_seq=3 ttl=64 time=0.268 ms
+PING 192.0.2.89 (192.0.2.89) 56(84) bytes of data.
+64 bytes from 192.0.2.89: icmp_seq=1 ttl=64 time=0.587 ms
+64 bytes from 192.0.2.89: icmp_seq=2 ttl=64 time=0.250 ms
+64 bytes from 192.0.2.89: icmp_seq=3 ttl=64 time=0.268 ms
 
---- 10.58.159.89 ping statistics ---
+--- 192.0.2.89 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2028ms
 rtt min/avg/max/mdev = 0.250/0.368/0.587/0.154 ms
 c3-policy-disabled-tcp
 c3-policy-disabled-udp
 state=ready generation=7519 latency_ms=3504
-PING 10.58.159.89 (10.58.159.89) 56(84) bytes of data.
+PING 192.0.2.89 (192.0.2.89) 56(84) bytes of data.
 
---- 10.58.159.89 ping statistics ---
+--- 192.0.2.89 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2040ms
 
 Process exited with status 1
 === c3 binding disable rollback ===
 state=not_requested generation=7520 latency_ms=3055
-PING 10.58.159.89 (10.58.159.89) 56(84) bytes of data.
-64 bytes from 10.58.159.89: icmp_seq=1 ttl=64 time=0.655 ms
-64 bytes from 10.58.159.89: icmp_seq=2 ttl=64 time=0.330 ms
-64 bytes from 10.58.159.89: icmp_seq=3 ttl=64 time=0.273 ms
+PING 192.0.2.89 (192.0.2.89) 56(84) bytes of data.
+64 bytes from 192.0.2.89: icmp_seq=1 ttl=64 time=0.655 ms
+64 bytes from 192.0.2.89: icmp_seq=2 ttl=64 time=0.330 ms
+64 bytes from 192.0.2.89: icmp_seq=3 ttl=64 time=0.273 ms
 
---- 10.58.159.89 ping statistics ---
+--- 192.0.2.89 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2031ms
 rtt min/avg/max/mdev = 0.273/0.419/0.655/0.168 ms
 c3-rollback-tcp
 c3-rollback-udp
 c3 IPv4 lifecycle=pass
 === c4 IPv4 baseline ===
-PING 10.58.159.91 (10.58.159.91) 56(84) bytes of data.
-64 bytes from 10.58.159.91: icmp_seq=1 ttl=64 time=0.785 ms
-64 bytes from 10.58.159.91: icmp_seq=2 ttl=64 time=0.270 ms
-64 bytes from 10.58.159.91: icmp_seq=3 ttl=64 time=0.301 ms
+PING 192.0.2.91 (192.0.2.91) 56(84) bytes of data.
+64 bytes from 192.0.2.91: icmp_seq=1 ttl=64 time=0.785 ms
+64 bytes from 192.0.2.91: icmp_seq=2 ttl=64 time=0.270 ms
+64 bytes from 192.0.2.91: icmp_seq=3 ttl=64 time=0.301 ms
 
---- 10.58.159.91 ping statistics ---
+--- 192.0.2.91 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2028ms
 rtt min/avg/max/mdev = 0.270/0.452/0.785/0.235 ms
 c4-baseline-tcp
 c4-baseline-udp
 state=ready generation=4857 latency_ms=4632
 === c4 all three enforced ===
-PING 10.58.159.91 (10.58.159.91) 56(84) bytes of data.
+PING 192.0.2.91 (192.0.2.91) 56(84) bytes of data.
 
---- 10.58.159.91 ping statistics ---
+--- 192.0.2.91 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2047ms
 
 Process exited with status 1
@@ -152,9 +152,9 @@ Process exited with status 1
 === c4 rule update ===
 state=ready generation=4858 latency_ms=3007
 c4-rule-disabled-tcp
-PING 10.58.159.91 (10.58.159.91) 56(84) bytes of data.
+PING 192.0.2.91 (192.0.2.91) 56(84) bytes of data.
 
---- 10.58.159.91 ping statistics ---
+--- 192.0.2.91 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2043ms
 
 Process exited with status 1
@@ -163,31 +163,31 @@ state=ready generation=4859 latency_ms=4005
 Process exited with status 1
 === c4 policy disable/enable ===
 state=degraded generation=4860 latency_ms=3621
-PING 10.58.159.91 (10.58.159.91) 56(84) bytes of data.
-64 bytes from 10.58.159.91: icmp_seq=1 ttl=64 time=0.355 ms
-64 bytes from 10.58.159.91: icmp_seq=2 ttl=64 time=0.281 ms
-64 bytes from 10.58.159.91: icmp_seq=3 ttl=64 time=0.289 ms
+PING 192.0.2.91 (192.0.2.91) 56(84) bytes of data.
+64 bytes from 192.0.2.91: icmp_seq=1 ttl=64 time=0.355 ms
+64 bytes from 192.0.2.91: icmp_seq=2 ttl=64 time=0.281 ms
+64 bytes from 192.0.2.91: icmp_seq=3 ttl=64 time=0.289 ms
 
---- 10.58.159.91 ping statistics ---
+--- 192.0.2.91 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2026ms
 rtt min/avg/max/mdev = 0.281/0.308/0.355/0.033 ms
 c4-policy-disabled-tcp
 c4-policy-disabled-udp
 state=ready generation=4861 latency_ms=2962
-PING 10.58.159.91 (10.58.159.91) 56(84) bytes of data.
+PING 192.0.2.91 (192.0.2.91) 56(84) bytes of data.
 
---- 10.58.159.91 ping statistics ---
+--- 192.0.2.91 ping statistics ---
 3 packets transmitted, 0 received, 100% packet loss, time 2043ms
 
 Process exited with status 1
 === c4 binding disable rollback ===
 state=not_requested generation=4862 latency_ms=3029
-PING 10.58.159.91 (10.58.159.91) 56(84) bytes of data.
-64 bytes from 10.58.159.91: icmp_seq=1 ttl=64 time=0.314 ms
-64 bytes from 10.58.159.91: icmp_seq=2 ttl=64 time=0.265 ms
-64 bytes from 10.58.159.91: icmp_seq=3 ttl=64 time=0.278 ms
+PING 192.0.2.91 (192.0.2.91) 56(84) bytes of data.
+64 bytes from 192.0.2.91: icmp_seq=1 ttl=64 time=0.314 ms
+64 bytes from 192.0.2.91: icmp_seq=2 ttl=64 time=0.265 ms
+64 bytes from 192.0.2.91: icmp_seq=3 ttl=64 time=0.278 ms
 
---- 10.58.159.91 ping statistics ---
+--- 192.0.2.91 ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2029ms
 rtt min/avg/max/mdev = 0.265/0.285/0.314/0.020 ms
 c4-rollback-tcp
