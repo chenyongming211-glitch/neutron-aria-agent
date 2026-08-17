@@ -248,7 +248,10 @@ fn entries(entries: &[ProjectionEntry]) -> BTreeSet<(String, u32)> {
 
 #[test]
 fn managed_projection_replay_routes_cannot_mix_runtime_identity() {
-    let compatibility = ManagedReplayRoute::new(GroupProjectionMode::StandaloneCompatibility);
+    let compatibility = ManagedReplayRoute::new(
+        GroupProjectionMode::StandaloneCompatibility,
+        LegacyAclMigrationAuthority::StandaloneInfer,
+    );
     assert_eq!(
         compatibility.fragment_runtime_identity(),
         FragmentRuntimeIdentity::Managed
@@ -258,7 +261,10 @@ fn managed_projection_replay_routes_cannot_mix_runtime_identity() {
         GroupProjectionMode::StandaloneCompatibility
     );
 
-    let managed = ManagedReplayRoute::new(GroupProjectionMode::Managed);
+    let managed = ManagedReplayRoute::new(
+        GroupProjectionMode::Managed,
+        LegacyAclMigrationAuthority::ManagedLegacyIpv4,
+    );
     assert_eq!(
         managed.fragment_runtime_identity(),
         FragmentRuntimeIdentity::Managed

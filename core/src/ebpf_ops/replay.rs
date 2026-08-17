@@ -24,11 +24,18 @@ impl FragmentRuntimeIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ManagedReplayRoute {
     projection_mode: GroupProjectionMode,
+    legacy_acl_migration_authority: crate::state::LegacyAclMigrationAuthority,
 }
 
 impl ManagedReplayRoute {
-    pub const fn new(projection_mode: GroupProjectionMode) -> Self {
-        Self { projection_mode }
+    pub const fn new(
+        projection_mode: GroupProjectionMode,
+        legacy_acl_migration_authority: crate::state::LegacyAclMigrationAuthority,
+    ) -> Self {
+        Self {
+            projection_mode,
+            legacy_acl_migration_authority,
+        }
     }
 
     pub const fn projection_mode(self) -> GroupProjectionMode {
@@ -38,14 +45,7 @@ impl ManagedReplayRoute {
     pub const fn legacy_acl_migration_authority(
         self,
     ) -> crate::state::LegacyAclMigrationAuthority {
-        match self.projection_mode {
-            GroupProjectionMode::Managed => {
-                crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4
-            }
-            GroupProjectionMode::StandaloneCompatibility => {
-                crate::state::LegacyAclMigrationAuthority::StandaloneInfer
-            }
-        }
+        self.legacy_acl_migration_authority
     }
 
     pub const fn fragment_runtime_identity(self) -> FragmentRuntimeIdentity {

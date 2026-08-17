@@ -467,7 +467,7 @@ fn managed_replay_route(mode: ManagedAttachMode) -> ManagedReplayRoute {
             GroupProjectionMode::StandaloneCompatibility
         }
     };
-    ManagedReplayRoute::new(projection_mode)
+    ManagedReplayRoute::new(projection_mode, mode.legacy_acl_migration_authority())
 }
 
 async fn persist_fresh_managed_registration_gate_state<Persist, PersistFuture>(

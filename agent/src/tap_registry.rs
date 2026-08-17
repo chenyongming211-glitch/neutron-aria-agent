@@ -72,11 +72,10 @@ impl ManagedAttachMode {
         self,
     ) -> aria_core::state::LegacyAclMigrationAuthority {
         match self {
-            Self::NeutronResyncRequired { acl_managed: true } => {
+            Self::NeutronResyncRequired { .. } => {
                 aria_core::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4
             }
-            Self::StandaloneRestoreAfterTcAttach
-            | Self::NeutronResyncRequired { acl_managed: false } => {
+            Self::StandaloneRestoreAfterTcAttach => {
                 aria_core::state::LegacyAclMigrationAuthority::StandaloneInfer
             }
         }
