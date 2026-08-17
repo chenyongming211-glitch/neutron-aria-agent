@@ -282,7 +282,14 @@ def _validate_loaded_config(parser, config):
 
 def load_config(path):
     parser = configparser.ConfigParser()
-    parser.read(path)
+    try:
+        loaded_paths = parser.read(path)
+    except configparser.Error:
+        raise ConfigError("unable to parse explicit config file: %s" % path)
+    except (IOError, OSError):
+        raise ConfigError("unable to read explicit config file: %s" % path)
+    if not loaded_paths:
+        raise ConfigError("unable to read explicit config file: %s" % path)
     config = AgentConfig(
         host=_get(parser, "agent", "host"),
         ovs_bridge=_get_first(

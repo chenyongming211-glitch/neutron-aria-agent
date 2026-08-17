@@ -18,6 +18,37 @@ class ConfigTestCase(unittest.TestCase):
         os.close(fd)
         return path
 
+    def test_rejects_missing_explicit_config_file(self):
+        path = os.path.join(
+            tempfile.gettempdir(),
+            "neutron-aria-config-does-not-exist.ini",
+        )
+        if os.path.exists(path):
+            os.unlink(path)
+
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(path)
+
+        self.assertIn("unable to read explicit config file", str(ctx.exception))
+
+    def test_rejects_unreadable_explicit_config_path(self):
+        path = tempfile.mkdtemp()
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("unable to read explicit config file", str(ctx.exception))
+        finally:
+            os.rmdir(path)
+
+    def test_rejects_malformed_explicit_config_file(self):
+        path = self._write_config("[agent\nhost = compute-1\n")
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("unable to parse explicit config file", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
     def test_loads_service_loop_options(self):
         fd, path = tempfile.mkstemp()
         try:

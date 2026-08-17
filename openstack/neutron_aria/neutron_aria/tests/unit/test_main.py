@@ -167,6 +167,36 @@ class MainBuildSynchronizerTestCase(unittest.TestCase):
         os.close(fd)
         return path
 
+    def test_missing_config_blocks_daemon_before_runtime_initialization(self):
+        path = os.path.join(tempfile.gettempdir(), "missing-neutron-aria-daemon.ini")
+        if os.path.exists(path):
+            os.unlink(path)
+        original_initialize = agent_main.initialize_neutron_runtime
+        calls = []
+        try:
+            agent_main.initialize_neutron_runtime = lambda *_args, **_kwargs: calls.append(
+                "initialize"
+            )
+            self.assertRaises(ConfigError, agent_main.main, ["-c", path])
+            self.assertEqual([], calls)
+        finally:
+            agent_main.initialize_neutron_runtime = original_initialize
+
+    def test_missing_config_blocks_once_before_snapshot_submission(self):
+        path = os.path.join(tempfile.gettempdir(), "missing-neutron-aria-once.ini")
+        if os.path.exists(path):
+            os.unlink(path)
+        original_synchronizer = agent_main.build_synchronizer
+        calls = []
+        try:
+            agent_main.build_synchronizer = lambda *_args, **_kwargs: calls.append(
+                "build_synchronizer"
+            )
+            self.assertRaises(ConfigError, agent_main.main, ["-c", path, "--once"])
+            self.assertEqual([], calls)
+        finally:
+            agent_main.build_synchronizer = original_synchronizer
+
     def test_once_status_reporter_disabled_for_non_neutron_acl_source(self):
         self.assertEqual(
             None,
