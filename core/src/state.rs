@@ -38,6 +38,12 @@ pub struct RuleInfo {
     pub ip_family: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyAclMigrationAuthority {
+    ManagedLegacyIpv4,
+    StandaloneInfer,
+}
+
 fn legacy_group_families(
     group_id: u32,
     groups: &HashMap<String, GroupInfo>,
@@ -83,6 +89,7 @@ fn legacy_group_families(
 pub fn migrate_legacy_rule_families(
     rule: &RuleInfo,
     groups: &HashMap<String, GroupInfo>,
+    authority: LegacyAclMigrationAuthority,
 ) -> Result<Vec<RuleInfo>, String> {
     if acl_ip_family_is_valid(rule.ip_family) {
         return Ok(vec![rule.clone()]);
@@ -97,7 +104,14 @@ pub fn migrate_legacy_rule_families(
         return Err("legacy_acl_rule_mixed_family".to_string());
     }
     if families.is_empty() {
-        families.extend([IP_FAMILY_V4, IP_FAMILY_V6]);
+        match authority {
+            LegacyAclMigrationAuthority::ManagedLegacyIpv4 => {
+                families.insert(IP_FAMILY_V4);
+            }
+            LegacyAclMigrationAuthority::StandaloneInfer => {
+                families.extend([IP_FAMILY_V4, IP_FAMILY_V6]);
+            }
+        }
     }
 
     Ok(families
@@ -110,12 +124,15 @@ pub fn migrate_legacy_rule_families(
         .collect())
 }
 
-pub(crate) fn migrate_state_rule_families(state: &mut FirewallState) -> Result<bool, String> {
+pub(crate) fn migrate_state_rule_families(
+    state: &mut FirewallState,
+    authority: LegacyAclMigrationAuthority,
+) -> Result<bool, String> {
     let mut migrated = Vec::with_capacity(state.rules.len());
     let mut bitmap_ref_increments = BTreeMap::<u32, u32>::new();
     let mut changed = false;
     for rule in &state.rules {
-        let normalized = migrate_legacy_rule_families(rule, &state.groups)?;
+        let normalized = migrate_legacy_rule_families(rule, &state.groups, authority)?;
         changed |= normalized.len() != 1 || normalized[0].ip_family != rule.ip_family;
         if normalized.len() > 1 {
             if let Some(bitmap_idx) = rule.bitmap_idx {

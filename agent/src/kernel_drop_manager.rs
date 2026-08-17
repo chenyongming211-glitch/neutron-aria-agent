@@ -732,23 +732,29 @@ impl KernelDropManager {
                 continue;
             };
             let state_path = format!("{}/{}", self.base_state_path, persisted.iface);
-            let state = wal::load_with_wal(&state_path).map_err(|error| {
-                format!(
-                    "failed to load managed state for kernel-drop recovery {}: {}",
-                    persisted.iface, error
-                )
-            })?;
-            if state.tap_id == aria_core::common::TAP_ID_UNASSIGNED {
+            let tap_id = aria_core::state::StateManager::new(&state_path)
+                .get_tap_id()
+                .map_err(|error| {
+                    format!(
+                        "failed to read managed tap id for kernel-drop recovery {}: {}",
+                        persisted.iface, error
+                    )
+                })?;
+            if tap_id == aria_core::common::TAP_ID_UNASSIGNED {
                 continue;
             }
             managed_ifaces
                 .entry(current_ifindex)
-                .or_insert(state.tap_id);
+                .or_insert(tap_id);
         }
 
         let system_state_path = self.system_state_path();
         if Path::new(&system_state_path).exists() {
-            let system_state = wal::load_with_wal(&system_state_path).map_err(|error| {
+            let system_state = wal::load_with_wal_for_authority(
+                &system_state_path,
+                aria_core::state::LegacyAclMigrationAuthority::StandaloneInfer,
+            )
+            .map_err(|error| {
                 format!(
                     "failed to load standalone state for kernel-drop recovery: {}",
                     error

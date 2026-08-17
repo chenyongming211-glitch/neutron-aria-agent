@@ -623,7 +623,11 @@ pub async fn system_start(
         ));
     }
 
-    let desired = aria_core::wal::load_with_wal(state_path).map_err(|error| {
+    let desired = aria_core::wal::load_with_wal_for_authority(
+        state_path,
+        aria_core::state::LegacyAclMigrationAuthority::StandaloneInfer,
+    )
+    .map_err(|error| {
         start_error_with_cleanup(
             format!("failed to load standalone state: {}", error),
             iface,
@@ -632,7 +636,11 @@ pub async fn system_start(
             &ownership,
         )
     })?;
-    let mut desired = migrate_state_for_replay(state_path, &desired)?;
+    let mut desired = migrate_state_for_replay(
+        state_path,
+        &desired,
+        aria_core::state::LegacyAclMigrationAuthority::StandaloneInfer,
+    )?;
     ownership.owned_runtime_dirs = create_runtime_pin_directories(Path::new(pin_path))?;
 
     // Set max_port_policies
@@ -1541,12 +1549,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            start.matches("aria_core::wal::load_with_wal(state_path)").count(),
+            start
+                .matches("aria_core::wal::load_with_wal_for_authority(")
+                .count(),
             1,
             "standalone startup must approve exactly one durable snapshot"
         );
         let load = start
-            .find("aria_core::wal::load_with_wal(state_path)")
+            .find("aria_core::wal::load_with_wal_for_authority(")
             .unwrap();
         let runtime_dirs = start.find("create_runtime_pin_directories").unwrap();
         let state_update = start.find("set_max_port_policies").unwrap();

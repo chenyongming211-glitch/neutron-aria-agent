@@ -4964,9 +4964,13 @@ impl ControlPlane {
             }
         };
 
-        let mut state = aria_core::wal::load_with_wal(&state_path)
+        let migration_authority = mode.legacy_acl_migration_authority();
+        let mut state = aria_core::wal::load_with_wal_for_authority(
+            &state_path,
+            migration_authority,
+        )
             .map_err(|error| format!("failed to load state for {}: {}", name, error))?;
-        state = migrate_state_for_replay(&state_path, &state)?;
+        state = migrate_state_for_replay(&state_path, &state, migration_authority)?;
 
         // Do not compact an existing instance until the replacement's durable
         // ACL family projection has been fully validated.
@@ -8398,11 +8402,13 @@ impl ControlPlane {
                 }
 
                 let state_path = entry.path().to_string_lossy().to_string();
-                let state = aria_core::wal::load_with_wal(&state_path).map_err(|error| {
-                    format!("failed to load managed state {}: {}", entry_name, error)
-                })?;
-                if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
-                    used.insert(state.tap_id);
+                let tap_id = aria_core::state::StateManager::new(&state_path)
+                    .get_tap_id()
+                    .map_err(|error| {
+                        format!("failed to read managed tap id {}: {}", entry_name, error)
+                    })?;
+                if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+                    used.insert(tap_id);
                 }
             }
         }
@@ -8861,6 +8867,10 @@ mod tests {
             let route = managed_replay_route(attach_mode);
             assert_eq!(route.fragment_runtime_identity(), FragmentRuntimeIdentity::Managed);
             assert_eq!(route.projection_mode(), expected_projection);
+            assert_eq!(
+                route.legacy_acl_migration_authority(),
+                attach_mode.legacy_acl_migration_authority()
+            );
         }
     }
 

@@ -35,6 +35,19 @@ impl ManagedReplayRoute {
         self.projection_mode
     }
 
+    pub const fn legacy_acl_migration_authority(
+        self,
+    ) -> crate::state::LegacyAclMigrationAuthority {
+        match self.projection_mode {
+            GroupProjectionMode::Managed => {
+                crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4
+            }
+            GroupProjectionMode::StandaloneCompatibility => {
+                crate::state::LegacyAclMigrationAuthority::StandaloneInfer
+            }
+        }
+    }
+
     pub const fn fragment_runtime_identity(self) -> FragmentRuntimeIdentity {
         FragmentRuntimeIdentity::Managed
     }
@@ -66,9 +79,10 @@ impl Default for StandaloneReplayRoute {
 pub fn migrate_state_for_replay(
     state_path: &str,
     state: &crate::state::FirewallState,
+    authority: crate::state::LegacyAclMigrationAuthority,
 ) -> Result<crate::state::FirewallState, String> {
     let mut migrated = state.clone();
-    if crate::state::migrate_state_rule_families(&mut migrated)? {
+    if crate::state::migrate_state_rule_families(&mut migrated, authority)? {
         let state_json = serde_json::to_string(&migrated)
             .map_err(|error| format!("serialize migrated ACL state: {}", error))?;
         let checkpoint_id = crate::wal::WalWriter::open(state_path)?
@@ -85,9 +99,11 @@ pub fn migrate_state_for_replay(
 
 fn load_state_then_replay<T>(
     state_path: &str,
+    authority: crate::state::LegacyAclMigrationAuthority,
     replay: impl FnOnce(&crate::state::FirewallState) -> Result<T, String>,
 ) -> Result<T, String> {
-    let state = crate::wal::load_with_wal(state_path).map_err(|error| error.to_string())?;
+    let state = crate::wal::load_with_wal_for_authority(state_path, authority)
+        .map_err(|error| error.to_string())?;
     replay(&state)
 }
 
@@ -365,9 +381,11 @@ fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
 }
 
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String> {
-    load_state_then_replay(state_path, |state| {
-        replay_state_from_snapshot(bpf, state_path, state)
-    })
+    load_state_then_replay(
+        state_path,
+        crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
+        |state| replay_state_from_snapshot(bpf, state_path, state),
+    )
 }
 
 /// Replay one already-approved state snapshot into a freshly loaded eBPF object.
@@ -381,7 +399,11 @@ pub fn replay_state_from_snapshot(
     state_path: &str,
     state: &crate::state::FirewallState,
 ) -> Result<(), String> {
-    let state = migrate_state_for_replay(state_path, state)?;
+    let state = migrate_state_for_replay(
+        state_path,
+        state,
+        crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
+    )?;
     replay_state_from_snapshot_with_mode(
         bpf,
         state_path,
@@ -742,9 +764,11 @@ pub fn replay_standalone_state_to_pinned_maps(
     pin_path: &str,
     state_path: &str,
 ) -> Result<(), String> {
-    load_state_then_replay(state_path, |state| {
-        replay_standalone_state_to_pinned_maps_from_snapshot(pin_path, state_path, state)
-    })
+    load_state_then_replay(
+        state_path,
+        crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
+        |state| replay_standalone_state_to_pinned_maps_from_snapshot(pin_path, state_path, state),
+    )
 }
 
 pub fn replay_standalone_state_to_pinned_maps_from_snapshot(
@@ -752,7 +776,11 @@ pub fn replay_standalone_state_to_pinned_maps_from_snapshot(
     state_path: &str,
     state: &FirewallState,
 ) -> Result<(), String> {
-    let state = migrate_state_for_replay(state_path, state)?;
+    let state = migrate_state_for_replay(
+        state_path,
+        state,
+        crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
+    )?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
@@ -770,17 +798,29 @@ pub fn replay_managed_state_to_pinned_maps(
     if route.projection_mode() == GroupProjectionMode::StandaloneCompatibility {
         // Compatibility replay keeps the durable WAL snapshot as its projection
         // authority, matching the legacy standalone-compatible registration path.
-        return load_state_then_replay(state_path, |durable_state| {
-            let durable_state = migrate_state_for_replay(state_path, durable_state)?;
-            replay_state_to_pinned_maps_from_snapshot_with_mode(
-                pin_path,
-                state_path,
-                &durable_state,
-                PinnedReplayRoute::Managed(route),
-            )
-        });
+        return load_state_then_replay(
+            state_path,
+            route.legacy_acl_migration_authority(),
+            |durable_state| {
+                let durable_state = migrate_state_for_replay(
+                    state_path,
+                    durable_state,
+                    route.legacy_acl_migration_authority(),
+                )?;
+                replay_state_to_pinned_maps_from_snapshot_with_mode(
+                    pin_path,
+                    state_path,
+                    &durable_state,
+                    PinnedReplayRoute::Managed(route),
+                )
+            },
+        );
     }
-    let state = migrate_state_for_replay(state_path, state)?;
+    let state = migrate_state_for_replay(
+        state_path,
+        state,
+        route.legacy_acl_migration_authority(),
+    )?;
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
@@ -1082,10 +1122,14 @@ mod family_migration_startup_tests {
         .unwrap();
         let replay_called = AtomicBool::new(false);
 
-        let error = load_state_then_replay(path.to_str().unwrap(), |_| {
-            replay_called.store(true, Ordering::Relaxed);
-            Ok(())
-        })
+        let error = load_state_then_replay(
+            path.to_str().unwrap(),
+            crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
+            |_| {
+                replay_called.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
         .expect_err("family migration must abort before replay");
 
         assert_eq!(error, "legacy_acl_rule_mixed_family");
@@ -1126,10 +1170,14 @@ mod family_migration_startup_tests {
         let wal_before = fs::read(path.join("state.wal")).unwrap();
         let replay_called = AtomicBool::new(false);
 
-        let error = load_state_then_replay(path.to_str().unwrap(), |_| {
-            replay_called.store(true, Ordering::Relaxed);
-            Ok(())
-        })
+        let error = load_state_then_replay(
+            path.to_str().unwrap(),
+            crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
+            |_| {
+                replay_called.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
         .expect_err("WAL failure must abort family migration before replay");
 
         assert_eq!(

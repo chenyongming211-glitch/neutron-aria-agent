@@ -14,7 +14,7 @@ use aria_core::state::{
     migrate_legacy_rule_families, FirewallState, GroupInfo, LegacyAclMigrationAuthority,
     MirrorRuleInfo, QosRuleInfo, RuleInfo,
 };
-use aria_core::wal::{apply_wal_entry, WalEntry};
+use aria_core::wal::{apply_wal_entry_for_authority, WalEntry};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -69,7 +69,11 @@ fn wal_inventory_ipv6_rule_round_trips_family() {
     let decoded: WalEntry = serde_json::from_str(&encoded).expect("WAL entry deserializes");
     let mut replayed = FirewallState::default();
 
-    assert!(apply_wal_entry(&mut replayed, decoded));
+    assert!(apply_wal_entry_for_authority(
+        &mut replayed,
+        decoded,
+        LegacyAclMigrationAuthority::StandaloneInfer,
+    ));
     assert_eq!(replayed.rules.len(), 1);
     assert_eq!(rule_identity(&replayed.rules[0]), (10, 20, 6, 0, 6));
 }
@@ -110,7 +114,11 @@ fn local_projection_legacy_ipv4_rule_infers_family() {
     let legacy: RuleInfo = serde_json::from_value(stored).expect("legacy rule deserializes");
     assert_eq!(legacy.ip_family, IP_FAMILY_UNSPECIFIED);
 
-    let migrated = migrate_legacy_rule_families(&legacy, &state.groups)
+    let migrated = migrate_legacy_rule_families(
+        &legacy,
+        &state.groups,
+        LegacyAclMigrationAuthority::StandaloneInfer,
+    )
         .expect("one-family legacy selector must infer its family");
 
     assert_eq!(migrated.len(), 1);
@@ -122,7 +130,11 @@ fn local_projection_legacy_any_rule_expands_both_families() {
     let mut legacy = acl_rule(0, 0);
     legacy.ip_family = IP_FAMILY_UNSPECIFIED;
 
-    let migrated = migrate_legacy_rule_families(&legacy, &FirewallState::default().groups)
+    let migrated = migrate_legacy_rule_families(
+        &legacy,
+        &FirewallState::default().groups,
+        LegacyAclMigrationAuthority::StandaloneInfer,
+    )
         .expect("legacy any/any rule must expand into both concrete families");
     let identities = migrated.iter().map(rule_identity).collect::<Vec<_>>();
 
@@ -130,7 +142,11 @@ fn local_projection_legacy_any_rule_expands_both_families() {
     let remigrated = migrated
         .iter()
         .flat_map(|rule| {
-            migrate_legacy_rule_families(rule, &FirewallState::default().groups)
+            migrate_legacy_rule_families(
+                rule,
+                &FirewallState::default().groups,
+                LegacyAclMigrationAuthority::StandaloneInfer,
+            )
                 .expect("concrete family migration is idempotent")
         })
         .map(|rule| rule_identity(&rule))
@@ -165,7 +181,11 @@ fn local_projection_legacy_mixed_selector_families_fail_closed_before_replay() {
     legacy.ip_family = IP_FAMILY_UNSPECIFIED;
     let mut replayed = Vec::new();
 
-    let error = match migrate_legacy_rule_families(&legacy, &state.groups) {
+    let error = match migrate_legacy_rule_families(
+        &legacy,
+        &state.groups,
+        LegacyAclMigrationAuthority::StandaloneInfer,
+    ) {
         Ok(rules) => {
             replayed.extend(rules);
             panic!("mixed legacy selector families unexpectedly replayed")

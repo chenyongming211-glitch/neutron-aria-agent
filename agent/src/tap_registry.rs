@@ -67,6 +67,22 @@ pub enum ManagedAttachMode {
     NeutronResyncRequired { acl_managed: bool },
 }
 
+impl ManagedAttachMode {
+    pub(crate) const fn legacy_acl_migration_authority(
+        self,
+    ) -> aria_core::state::LegacyAclMigrationAuthority {
+        match self {
+            Self::NeutronResyncRequired { acl_managed: true } => {
+                aria_core::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4
+            }
+            Self::StandaloneRestoreAfterTcAttach
+            | Self::NeutronResyncRequired { acl_managed: false } => {
+                aria_core::state::LegacyAclMigrationAuthority::StandaloneInfer
+            }
+        }
+    }
+}
+
 async fn complete_managed_registration_transaction<
     T,
     E,
@@ -433,7 +449,10 @@ impl TapRegistry {
             });
         }
 
-        let attached = match instance.attach_links_from_pinned_runtime(&runtime_pin) {
+        let attached = match instance.attach_links_from_pinned_runtime(
+            &runtime_pin,
+            mode.legacy_acl_migration_authority(),
+        ) {
             Ok(attached) => attached,
             Err(e) => {
                 let quiesce_error = self

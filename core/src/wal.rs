@@ -12,8 +12,8 @@ use tracing::{info, warn};
 use crate::common::{IP_FAMILY_V4, IP_FAMILY_V6};
 use crate::state::{
     migrate_legacy_rule_families, migrate_state_rule_families,
-    persist_state_file_atomically_classified, AtomicStatePersistError, FirewallState, RuleInfo,
-    WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
+    persist_state_file_atomically_classified, AtomicStatePersistError, FirewallState,
+    LegacyAclMigrationAuthority, RuleInfo, WalReplayCursor, WAL_REPLAY_CURSOR_VERSION,
 };
 
 /// Time-based compact interval (5 minutes)
@@ -781,6 +781,7 @@ impl WalActor {
 fn apply_wal_entry_for_load(
     state: &mut FirewallState,
     entry: WalEntry,
+    authority: LegacyAclMigrationAuthority,
 ) -> Result<WalApplyOutcome, WalLoadError> {
     let mut family_migrated = false;
     match entry {
@@ -817,7 +818,7 @@ fn apply_wal_entry_for_load(
                 direction,
                 ip_family,
             };
-            let normalized = migrate_legacy_rule_families(&persisted, &state.groups)
+            let normalized = migrate_legacy_rule_families(&persisted, &state.groups, authority)
                 .map_err(WalLoadError::family_migration)?;
             family_migrated = ip_family == 0;
             let mut staged = state.clone();
@@ -858,7 +859,7 @@ fn apply_wal_entry_for_load(
                 direction,
                 ip_family,
             };
-            let normalized = migrate_legacy_rule_families(&persisted, &state.groups)
+            let normalized = migrate_legacy_rule_families(&persisted, &state.groups, authority)
                 .map_err(WalLoadError::family_migration)?;
             family_migrated = ip_family == 0;
             let mut staged = state.clone();
@@ -1013,14 +1014,23 @@ fn apply_wal_entry_for_load(
 
 /// Apply a single WAL entry to an in-memory FirewallState.
 /// Errors in individual entries are logged and skipped (best-effort replay).
-pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
-    match apply_wal_entry_for_load(state, entry) {
+pub fn apply_wal_entry_for_authority(
+    state: &mut FirewallState,
+    entry: WalEntry,
+    authority: LegacyAclMigrationAuthority,
+) -> bool {
+    match apply_wal_entry_for_load(state, entry, authority) {
         Ok(outcome) => outcome.applied,
         Err(error) => {
             warn!(error = %error, "WAL replay ACL family migration failed");
             false
         }
     }
+}
+
+#[cfg(test)]
+fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
+    apply_wal_entry_for_authority(state, entry, LegacyAclMigrationAuthority::StandaloneInfer)
 }
 
 fn checkpoint_family_migrated_state_with_hook<F>(
@@ -1048,13 +1058,17 @@ where
     Ok(())
 }
 
-/// Load state from snapshot + replay WAL entries.
-pub fn load_with_wal(state_path: &str) -> Result<FirewallState, WalLoadError> {
-    load_with_wal_with_compact_hook(state_path, |_| Ok(()))
+/// Load state from snapshot + replay WAL entries under an explicit legacy ACL authority.
+pub fn load_with_wal_for_authority(
+    state_path: &str,
+    authority: LegacyAclMigrationAuthority,
+) -> Result<FirewallState, WalLoadError> {
+    load_with_wal_with_compact_hook_for_authority(state_path, authority, |_| Ok(()))
 }
 
-fn load_with_wal_with_compact_hook<F>(
+fn load_with_wal_with_compact_hook_for_authority<F>(
     state_path: &str,
+    authority: LegacyAclMigrationAuthority,
     mut compact_hook: F,
 ) -> Result<FirewallState, WalLoadError>
 where
@@ -1076,7 +1090,8 @@ where
     };
 
     let snapshot_family_migrated =
-        migrate_state_rule_families(&mut state).map_err(WalLoadError::family_migration)?;
+        migrate_state_rule_families(&mut state, authority)
+            .map_err(WalLoadError::family_migration)?;
     let checkpoint_state = state.clone();
     let cursor_result = state.wal_replay_cursor.supported_checkpoint_id();
     let cursor_failed = cursor_result.is_err();
@@ -1104,7 +1119,7 @@ where
                     }
                     match parse_persisted_wal_record(&line) {
                         Ok(PersistedWalRecord::Mutation(entry)) => {
-                            let outcome = apply_wal_entry_for_load(&mut state, entry)?;
+                            let outcome = apply_wal_entry_for_load(&mut state, entry, authority)?;
                             family_migrated |= outcome.family_migrated;
                             if outcome.applied {
                                 replayed += 1;
@@ -1188,6 +1203,26 @@ where
     }
 
     Ok(state)
+}
+
+#[cfg(test)]
+pub(crate) fn load_with_wal(state_path: &str) -> Result<FirewallState, WalLoadError> {
+    load_with_wal_for_authority(state_path, LegacyAclMigrationAuthority::StandaloneInfer)
+}
+
+#[cfg(test)]
+fn load_with_wal_with_compact_hook<F>(
+    state_path: &str,
+    compact_hook: F,
+) -> Result<FirewallState, WalLoadError>
+where
+    F: FnMut(FamilyMigrationCheckpointPhase) -> Result<(), String>,
+{
+    load_with_wal_with_compact_hook_for_authority(
+        state_path,
+        LegacyAclMigrationAuthority::StandaloneInfer,
+        compact_hook,
+    )
 }
 
 #[cfg(test)]
@@ -1530,7 +1565,7 @@ mod tests {
             .to_string()],
         );
 
-        let first = load_with_wal(
+        let first = load_with_wal_for_authority(
             &state_path,
             crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
         )
@@ -1543,7 +1578,7 @@ mod tests {
         let checkpointed_snapshot = fs::read(format!("{}/state.json", state_path)).unwrap();
         let checkpointed_wal = fs::read(format!("{}/state.wal", state_path)).unwrap();
 
-        let restarted = load_with_wal(
+        let restarted = load_with_wal_for_authority(
             &state_path,
             crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
         )

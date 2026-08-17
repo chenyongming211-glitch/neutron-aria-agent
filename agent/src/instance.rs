@@ -1839,6 +1839,7 @@ impl FirewallInstance {
     pub fn attach_links_from_pinned_runtime(
         &mut self,
         pin_state: &RuntimePinState,
+        legacy_acl_migration_authority: aria_core::state::LegacyAclMigrationAuthority,
     ) -> Result<AttachedLinks, String> {
         let mut attached = AttachedLinks::default();
         let xdp_link_pin = self.xdp_link_pin_path();
@@ -1901,7 +1902,9 @@ impl FirewallInstance {
             return Err(e);
         }
 
-        if let Some(error) = optional_fq_recovery_error(self.ensure_fq_runtime()) {
+        if let Some(error) = optional_fq_recovery_error(
+            self.ensure_fq_runtime(legacy_acl_migration_authority),
+        ) {
             warn!(
                 instance = %self.iface,
                 error = %error,
@@ -2131,7 +2134,10 @@ impl FirewallInstance {
         }
     }
 
-    fn ensure_fq_runtime(&mut self) -> Result<(), String> {
+    fn ensure_fq_runtime(
+        &mut self,
+        legacy_acl_migration_authority: aria_core::state::LegacyAclMigrationAuthority,
+    ) -> Result<(), String> {
         let Some(state_path_str) = self.state_path.to_str() else {
             warn!(
                 instance = %self.iface,
@@ -2141,7 +2147,11 @@ impl FirewallInstance {
             self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
             return Ok(());
         };
-        let state = aria_core::wal::load_with_wal(state_path_str).map_err(|error| {
+        let state = aria_core::wal::load_with_wal_for_authority(
+            state_path_str,
+            legacy_acl_migration_authority,
+        )
+        .map_err(|error| {
             format!(
                 "failed to load persisted state for {} QoS recovery: {}",
                 self.iface, error
