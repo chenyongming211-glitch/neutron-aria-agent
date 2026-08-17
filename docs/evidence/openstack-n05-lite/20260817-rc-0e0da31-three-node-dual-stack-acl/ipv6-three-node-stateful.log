@@ -1,0 +1,37 @@
+=== c2 IPv6 stateful policy ===
+c2-stateful-tcp
+c2-stateful-udp
+c2 stateful=true pass generation=5605
+Process exited with status 1
+
+c2 stateful=false pass generation=5606
+c2-stateful-restored-tcp
+c2-stateful-restored-udp
+c2 stateful restore pass generation=5607
+c2-rollback-tcp
+c2-rollback-udp
+=== c3 IPv6 stateful policy ===
+c3-stateful-tcp
+c3-stateful-udp
+c3 stateful=true pass generation=7511
+Process exited with status 1
+
+c3 stateful=false pass generation=7512
+c3-stateful-restored-tcp
+c3-stateful-restored-udp
+c3 stateful restore pass generation=7513
+c3-rollback-tcp
+c3-rollback-udp
+=== c4 IPv6 stateful policy ===
+c4-stateful-tcp
+c4-stateful-udp
+c4 stateful=true pass generation=4853
+Process exited with status 1
+
+c4 stateful=false pass generation=4854
+c4-stateful-restored-tcp
+c4-stateful-restored-udp
+c4 stateful restore pass generation=4855
+c4-rollback-tcp
+c4-rollback-udp
+three_node_ipv6_stateful=pass

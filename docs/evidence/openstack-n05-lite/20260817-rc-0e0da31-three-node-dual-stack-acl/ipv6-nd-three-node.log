@@ -1,0 +1,131 @@
+=== c2 explicit ICMPv6 allow ===
+2001:db8:159:17:f816:3eff:fef1:613f lladdr fa:16:3e:f1:61:3f used 0/0/0 probes 1 STALE
+fe80::f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 used 0/0/0 probes 1 STALE
+fe80::f816:3eff:fef1:613f lladdr fa:16:3e:f1:61:3f used 0/0/0 probes 1 STALE
+2001:db8:159:17:f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 used 0/0/0 probes 1 STALE
+
+*** Round 1, deleting 4 entries ***
+*** Flush is complete after 1 round(s) ***
+PING 2001:db8:159:17:f816:3eff:fef1:613f(2001:db8:159:17:f816:3eff:fef1:613f) 56 data bytes
+64 bytes from 2001:db8:159:17:f816:3eff:fef1:613f: icmp_seq=1 ttl=64 time=1.53 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fef1:613f: icmp_seq=2 ttl=64 time=0.272 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fef1:613f: icmp_seq=3 ttl=64 time=0.236 ms
+
+--- 2001:db8:159:17:f816:3eff:fef1:613f ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2029ms
+rtt min/avg/max/mdev = 0.236/0.679/1.530/0.601 ms
+2001:db8:159:17:f816:3eff:fef1:613f lladdr fa:16:3e:f1:61:3f ref 1 used 0/0/0 probes 4 REACHABLE
+=== c2 IPv6 deny-any blocks ND ===
+2001:db8:159:17:f816:3eff:fef1:613f lladdr fa:16:3e:f1:61:3f ref 1 used 0/0/0 probes 4 REACHABLE
+fe80::f816:3eff:fef1:613f lladdr fa:16:3e:f1:61:3f ref 1 used 0/0/0 probes 1 PROBE
+
+*** Round 1, deleting 2 entries ***
+*** Flush is complete after 1 round(s) ***
+PING 2001:db8:159:17:f816:3eff:fef1:613f(2001:db8:159:17:f816:3eff:fef1:613f) 56 data bytes
+From 2001:db8:159:17:f816:3eff:fe7a:7d38 icmp_seq=1 Destination unreachable: Address unreachable
+From 2001:db8:159:17:f816:3eff:fe7a:7d38 icmp_seq=2 Destination unreachable: Address unreachable
+From 2001:db8:159:17:f816:3eff:fe7a:7d38 icmp_seq=3 Destination unreachable: Address unreachable
+
+--- 2001:db8:159:17:f816:3eff:fef1:613f ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2026ms
+
+2001:db8:159:17:f816:3eff:fef1:613f  used 0/0/0 probes 6 FAILED
+=== c2 ND rollback ===
+Nothing to flush
+PING 2001:db8:159:17:f816:3eff:fef1:613f(2001:db8:159:17:f816:3eff:fef1:613f) 56 data bytes
+64 bytes from 2001:db8:159:17:f816:3eff:fef1:613f: icmp_seq=1 ttl=64 time=0.729 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fef1:613f: icmp_seq=2 ttl=64 time=0.267 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fef1:613f: icmp_seq=3 ttl=64 time=0.261 ms
+
+--- 2001:db8:159:17:f816:3eff:fef1:613f ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2032ms
+rtt min/avg/max/mdev = 0.261/0.419/0.729/0.219 ms
+2001:db8:159:17:f816:3eff:fef1:613f lladdr fa:16:3e:f1:61:3f ref 1 used 0/0/0 probes 4 REACHABLE
+c2 IPv6 ND ACL=pass
+=== c3 explicit ICMPv6 allow ===
+2001:db8:159:17:f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d used 0/0/0 probes 4 STALE
+fe80::f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d used 0/0/0 probes 1 STALE
+2001:db8:159:17:f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 used 0/0/0 probes 1 STALE
+fe80::f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 used 0/0/0 probes 1 STALE
+
+*** Round 1, deleting 4 entries ***
+*** Flush is complete after 1 round(s) ***
+PING 2001:db8:159:17:f816:3eff:fe48:18a5(2001:db8:159:17:f816:3eff:fe48:18a5) 56 data bytes
+64 bytes from 2001:db8:159:17:f816:3eff:fe48:18a5: icmp_seq=1 ttl=64 time=0.684 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe48:18a5: icmp_seq=2 ttl=64 time=0.222 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe48:18a5: icmp_seq=3 ttl=64 time=0.254 ms
+
+--- 2001:db8:159:17:f816:3eff:fe48:18a5 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2033ms
+rtt min/avg/max/mdev = 0.222/0.386/0.684/0.210 ms
+2001:db8:159:17:f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 ref 1 used 0/0/0 probes 4 REACHABLE
+=== c3 IPv6 deny-any blocks ND ===
+2001:db8:159:17:f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 ref 1 used 0/0/0 probes 4 REACHABLE
+fe80::f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 ref 1 used 0/0/0 probes 0 DELAY
+
+*** Round 1, deleting 2 entries ***
+*** Flush is complete after 1 round(s) ***
+PING 2001:db8:159:17:f816:3eff:fe48:18a5(2001:db8:159:17:f816:3eff:fe48:18a5) 56 data bytes
+From 2001:db8:159:17:f816:3eff:fe08:e638 icmp_seq=1 Destination unreachable: Address unreachable
+From 2001:db8:159:17:f816:3eff:fe08:e638 icmp_seq=2 Destination unreachable: Address unreachable
+From 2001:db8:159:17:f816:3eff:fe08:e638 icmp_seq=3 Destination unreachable: Address unreachable
+
+--- 2001:db8:159:17:f816:3eff:fe48:18a5 ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2046ms
+
+2001:db8:159:17:f816:3eff:fe48:18a5  used 0/0/0 probes 6 FAILED
+=== c3 ND rollback ===
+Nothing to flush
+PING 2001:db8:159:17:f816:3eff:fe48:18a5(2001:db8:159:17:f816:3eff:fe48:18a5) 56 data bytes
+64 bytes from 2001:db8:159:17:f816:3eff:fe48:18a5: icmp_seq=1 ttl=64 time=0.359 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe48:18a5: icmp_seq=2 ttl=64 time=0.285 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe48:18a5: icmp_seq=3 ttl=64 time=0.252 ms
+
+--- 2001:db8:159:17:f816:3eff:fe48:18a5 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2026ms
+rtt min/avg/max/mdev = 0.252/0.298/0.359/0.044 ms
+2001:db8:159:17:f816:3eff:fe48:18a5 lladdr fa:16:3e:48:18:a5 ref 1 used 0/0/0 probes 4 REACHABLE
+c3 IPv6 ND ACL=pass
+=== c4 explicit ICMPv6 allow ===
+fe80::f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d used 0/0/0 probes 1 STALE
+2001:db8:159:17:f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d used 0/0/0 probes 1 STALE
+
+*** Round 1, deleting 2 entries ***
+*** Flush is complete after 1 round(s) ***
+PING 2001:db8:159:17:f816:3eff:fe77:750d(2001:db8:159:17:f816:3eff:fe77:750d) 56 data bytes
+64 bytes from 2001:db8:159:17:f816:3eff:fe77:750d: icmp_seq=1 ttl=64 time=0.644 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe77:750d: icmp_seq=2 ttl=64 time=0.274 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe77:750d: icmp_seq=3 ttl=64 time=0.294 ms
+
+--- 2001:db8:159:17:f816:3eff:fe77:750d ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2035ms
+rtt min/avg/max/mdev = 0.274/0.404/0.644/0.169 ms
+2001:db8:159:17:f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d ref 1 used 0/0/0 probes 4 REACHABLE
+=== c4 IPv6 deny-any blocks ND ===
+fe80::f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d ref 1 used 0/0/0 probes 0 DELAY
+2001:db8:159:17:f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d ref 1 used 0/0/0 probes 4 REACHABLE
+
+*** Round 1, deleting 2 entries ***
+*** Flush is complete after 1 round(s) ***
+PING 2001:db8:159:17:f816:3eff:fe77:750d(2001:db8:159:17:f816:3eff:fe77:750d) 56 data bytes
+From 2001:db8:159:17:f816:3eff:fe63:af5b icmp_seq=1 Destination unreachable: Address unreachable
+From 2001:db8:159:17:f816:3eff:fe63:af5b icmp_seq=2 Destination unreachable: Address unreachable
+From 2001:db8:159:17:f816:3eff:fe63:af5b icmp_seq=3 Destination unreachable: Address unreachable
+
+--- 2001:db8:159:17:f816:3eff:fe77:750d ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2036ms
+
+2001:db8:159:17:f816:3eff:fe77:750d  used 0/0/0 probes 6 FAILED
+=== c4 ND rollback ===
+Nothing to flush
+PING 2001:db8:159:17:f816:3eff:fe77:750d(2001:db8:159:17:f816:3eff:fe77:750d) 56 data bytes
+64 bytes from 2001:db8:159:17:f816:3eff:fe77:750d: icmp_seq=1 ttl=64 time=0.301 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe77:750d: icmp_seq=2 ttl=64 time=0.271 ms
+64 bytes from 2001:db8:159:17:f816:3eff:fe77:750d: icmp_seq=3 ttl=64 time=0.283 ms
+
+--- 2001:db8:159:17:f816:3eff:fe77:750d ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2044ms
+rtt min/avg/max/mdev = 0.271/0.285/0.301/0.012 ms
+2001:db8:159:17:f816:3eff:fe77:750d lladdr fa:16:3e:77:75:0d ref 1 used 0/0/0 probes 4 REACHABLE
+c4 IPv6 ND ACL=pass
+three_node_ipv6_nd_acl=pass
