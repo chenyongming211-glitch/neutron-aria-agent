@@ -28,6 +28,10 @@ pub struct FirewallInstance {
     pub edt_available: bool,
 }
 
+fn optional_fq_recovery_error(result: Result<(), String>) -> Option<String> {
+    result.err()
+}
+
 const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
 const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
@@ -1897,7 +1901,13 @@ impl FirewallInstance {
             return Err(e);
         }
 
-        self.ensure_fq_runtime()?;
+        if let Some(error) = optional_fq_recovery_error(self.ensure_fq_runtime()) {
+            warn!(
+                instance = %self.iface,
+                error = %error,
+                "QoS FQ recovery unavailable; preserving committed ACL/CT links"
+            );
+        }
 
         let health = self.tc_acl_link_health();
         info!(instance = %self.iface, tc_ingress = health.ingress, tc_egress = health.egress, xdp = health.xdp, edt_available = self.edt_available, "interface links attached from pinned runtime");
@@ -2513,6 +2523,15 @@ mod tests {
         assert!(!TcAclLinkHealth::new(false, true, true).acl_ready());
         assert!(TcAclLinkHealth::new(true, true, true).xdp_ready());
         assert!(!TcAclLinkHealth::new(true, true, false).xdp_ready());
+    }
+
+    #[test]
+    fn optional_fq_recovery_failure_is_observable_but_not_fatal() {
+        assert_eq!(None, optional_fq_recovery_error(Ok(())));
+        assert_eq!(
+            Some("persisted QoS state unavailable".to_string()),
+            optional_fq_recovery_error(Err("persisted QoS state unavailable".to_string())),
+        );
     }
 
     #[test]
