@@ -101,9 +101,13 @@ The helper must not contact Neutron, OVS, or Docker from inside the container.
 ### Candidate Start And Reattach
 
 After `managed_ports=0`, stop and rename the old datapath container, create the
-candidate with the existing state mount and Kolla configuration, and start it.
-Then start `neutron_aria_agent`. Its configured startup/full-resync path is the
-only source of reattachment.
+candidate with the Kolla configuration, and start it. A hash-changing upgrade
+does not let the candidate migrate the old release in place: after the old
+datapath stops, the installer copies its quiesced state directory to a
+candidate-specific sibling and renames the dormant Aria shared pin directory
+to a release-specific backup. The candidate mounts the copied state and creates
+fresh shared pins. Then start `neutron_aria_agent`. Its configured
+startup/full-resync path is the only source of reattachment.
 
 Final convergence requires:
 
@@ -126,6 +130,8 @@ Rollback uses the same safety boundary in reverse:
 stop Python writer
   -> detach candidate-managed ports
   -> verify zero managed ports
+  -> stop candidate and quarantine candidate shared pins
+  -> restore old shared-pin name (old state was never modified)
   -> remove candidate container
   -> restore previous container
   -> start Python writer
@@ -134,7 +140,10 @@ stop Python writer
 ```
 
 Rollback must not merely rename the old container over live candidate pins.
-The previous release state is retired only after all rollback checks pass.
+The old container retains its original state mount, so it never needs to parse
+or downgrade a future runtime schema. Candidate state and quarantined pins are
+removed only after the old runtime is ready again. The previous release state
+is retired only after all rollback checks pass.
 
 ## Failure Semantics
 
@@ -154,9 +163,10 @@ The previous release state is retired only after all rollback checks pass.
 
 Extend the root-owned mode-0600 release state with the lifecycle phase,
 whether runtime migration was required, active/candidate hashes, Python agent
-identity, preflight managed-port IDs, and rollback identity. State updates use
-pending-file plus atomic rename. A retained pending state prevents a second
-installer from starting an overlapping mutation.
+identity, preflight managed-port IDs, original/candidate state paths, old pin
+backup path, candidate pin quarantine path, and rollback identity. State
+updates use pending-file plus atomic rename. A host-local `flock` plus retained
+pending state prevents overlapping lifecycle mutations.
 
 No ACL rule payload is stored in release state. Neutron remains the authority
 for reconstruction.
@@ -183,4 +193,3 @@ Privileged field validation uses a temporary managed port on one test compute,
 then a three-node rolling RC test. It records exact image and file hashes,
 readiness/generation convergence, rollback, cleanup, and unchanged OVS
 identities.
-

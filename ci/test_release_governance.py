@@ -315,14 +315,34 @@ class ReleaseGovernanceTest(unittest.TestCase):
             "EXPECTED_EBPF_SHA256",
             "docker load",
             "docker rename",
-            "mutation_phase=stopped",
-            "mutation_phase=renamed",
+            "PENDING_STATE_FILE",
+            "lifecycle.lock",
+            "flock -n",
+            "RUNTIME_MIGRATION_REQUIRED",
+            "LIFECYCLE_PHASE",
+            "runtime_migration_required",
+            "stop_agent_writer",
+            "detach_all_managed_ports",
+            "run_runtime_migration_sequence",
+            "run_hash_aware_rollback_sequence",
             "restore_stopped_original",
             "BACKUP_IMAGE_ID",
+            "BACKUP_EBPF_SHA256",
+            "BACKUP_DATAPATH_STATE_SOURCE",
+            "CANDIDATE_DATAPATH_STATE_SOURCE",
+            "PIN_BACKUP_PATH",
+            "PERSISTENT_RUNTIME_PREPARED",
+            "CANDIDATE_PIN_QUARANTINE",
+            "preserve_persistent_runtime",
+            "restore_persistent_runtime",
+            "cp -a --",
             "release state must have mode 0600",
             "rollback restored an unexpected image",
             "rollback container image ID mismatch",
             "Automatic recovery failed; state retained",
+            "Python writer remains stopped",
+            "accepted_generation",
+            "applied_generation",
             "overall_readiness",
             "neutron_openvswitch_agent",
             "ovs-vswitchd",
@@ -330,7 +350,9 @@ class ReleaseGovernanceTest(unittest.TestCase):
         ):
             self.assertIn(term, source)
         self.assertNotIn("docker restart neutron_openvswitch_agent", source)
+        self.assertNotIn("docker stop neutron_openvswitch_agent", source)
         self.assertNotIn("systemctl restart openvswitch", source)
+        self.assertNotIn("rm -rf -- /sys/fs/bpf", source)
         mode = subprocess.check_output(
             ["git", "ls-files", "-s", str(path.relative_to(ROOT))],
             cwd=str(ROOT),

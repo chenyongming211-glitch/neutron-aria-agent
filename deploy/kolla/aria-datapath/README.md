@@ -137,3 +137,24 @@ Fault injection is disabled by default and is intended only for CI or live
 smoke validation. `FAULT_ONCE_FILE` should be used for crash actions so a
 restarted `--restart unless-stopped` container can recover instead of
 re-triggering the same fault point forever.
+
+## Hash-Aware RC Upgrade
+
+Use `deploy/kolla/package/install_aria_datapath_rc_image.sh` for RC install,
+check, and rollback. When the active and candidate eBPF hashes match, it keeps
+the normal fast container replacement. When they differ, it automatically:
+
+1. stops only `neutron_aria_agent` to quiesce control-plane writes;
+2. detaches the exact UDS-reported managed ports and requires zero remaining;
+3. preserves the old state and dormant shared pins, then gives the candidate a
+   state copy and fresh shared-pin namespace;
+4. switches `aria_datapath` while preserving the old container;
+5. restarts `neutron_aria_agent` for an authoritative full resync;
+6. verifies readiness, generation convergence, image/file hashes, container
+   health, and unchanged OVS identities.
+
+Rollback crosses the same boundary in reverse. An unresolved candidate or
+failed rollback leaves the Python writer stopped and retains
+`/var/lib/aria-datapath-release/active.env.pending`. Correct the recorded
+failure and rerun `rollback`; do not delete pinned runtime state manually.
+Neither path restarts or modifies OVS or the Neutron OVS agent.

@@ -152,10 +152,29 @@ datapath state mount, keeps the old container stopped, waits for authenticated
 UDS readiness, and verifies that `ovs-vswitchd` and the Neutron OVS agent did
 not change. It never restarts either OVS service.
 
+The eBPF hash selects the lifecycle automatically. An unchanged hash uses the
+bounded container replacement path. A changed hash stops only
+`neutron_aria_agent`, uses a short-lived same-image/same-UID UDS client to
+detach every reported managed port, requires `managed_ports=0`, replaces the
+datapath, and gives the candidate a copy of the quiesced old state while
+retaining the old state and dormant shared pins as the rollback point. It then
+restarts the Python agent and lets its authoritative full resync
+reattach current Neutron state. Final verification requires no pending
+generation, `accepted_generation == applied_generation`, strict readiness, and
+both Aria containers to be Docker `healthy`.
+
 ```bash
 sudo deploy/kolla/package/install_aria_datapath_rc_image.sh check
 sudo deploy/kolla/package/install_aria_datapath_rc_image.sh rollback
 ```
+
+Rollback is also hash-aware. It quiesces the Python writer and detaches the
+candidate runtime, quarantines its shared pins, and restores the old pin name
+and old state/container before starting an older eBPF image. The old binary
+never has to parse a future schema. If automatic recovery
+cannot prove cleanup or convergence, the installer retains the root-only
+pending state and leaves the Python writer stopped for explicit operator
+recovery. It never guesses that an exited candidate left no live links.
 
 When no registry is available, the image tar plus manifest and `SHA256SUMS` is
 the accepted RC transport. This is not equivalent to production registry

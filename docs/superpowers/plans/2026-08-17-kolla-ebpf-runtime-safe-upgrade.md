@@ -48,14 +48,18 @@ eBPF hashes.
    zero managed ports.
 5. Persist lifecycle phase and migration identity in the root-owned pending
    release state before every mutation boundary.
-6. Start the candidate, resume the Python agent, and require readiness,
+6. For hash-changing upgrades, copy the quiesced old state into a
+   candidate-specific mount and rename the dormant old shared-pin directory;
+   never migrate the rollback copy in place.
+7. Start the candidate, resume the Python agent, and require readiness,
    generation convergence, Docker health, exact file hashes, and unchanged OVS
    identities.
-7. On failure, perform the reverse hash-aware detach and restore. If recovery
+8. On failure, perform the reverse hash-aware detach, pin-name restore, and
+   old-state/container restore. If recovery
    cannot converge, stop the Python writer and retain pending state.
-8. Make `rollback` consume either committed or interrupted pending release
+9. Make `rollback` consume either committed or interrupted pending release
    state and use the same safety boundary.
-9. Run shell syntax and the selected tests until GREEN.
+10. Run shell syntax and the selected tests until GREEN.
 
 ### Task 3: Document Operator Behavior And Bundle Contract
 
@@ -82,4 +86,3 @@ eBPF hashes.
 6. Commit scoped changes and push `main`.
 7. Build/deploy a new Kolla RC only after source tests are green. Rust/eBPF
    compilation remains GitHub CI-only if a new binary artifact is required.
-

@@ -89,6 +89,7 @@ jobs:
           python3 ci/check_blocked_terms.py
           python3 -m unittest ci.test_public_release_hygiene
           python3 -m unittest ci.test_release_governance
+          python3 -m unittest ci.test_kolla_datapath_runtime_upgrade
           python3 ci/check_build_workflow_contract.py
           python3 -m unittest ci.test_ci_lane_contract
           python3 -m unittest ci.test_workflow_action_pins
