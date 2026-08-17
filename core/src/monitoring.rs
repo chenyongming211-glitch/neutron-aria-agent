@@ -427,6 +427,17 @@ fn sum_per_cpu_flow_stats(values: PerCpuValues<FlowStatsValue>) -> (u64, u64, u6
     (packets, bytes, last_seen)
 }
 
+fn validate_rule_stats_policy_family(ip_family: u8) -> Result<(), String> {
+    if policy_family_is_valid(ip_family) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid_rule_stats_ip_family: {}",
+            ip_family
+        ))
+    }
+}
+
 pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/RULE_STATS", pin_path);
@@ -443,6 +454,7 @@ pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>,
                 if key.tap_id != runtime.tap_id {
                     continue;
                 }
+                validate_rule_stats_policy_family(key.ip_family)?;
                 let (packets, bytes, dropped_packets, dropped_bytes) =
                     sum_per_cpu_rule_stats(values);
                 if packets > 0 {
@@ -1104,5 +1116,19 @@ mod tests {
         assert_eq!(direction_name(0), "ingress");
         assert_eq!(direction_name(1), "egress");
         assert_eq!(direction_name(5), "unknown");
+    }
+
+    #[test]
+    fn rule_stats_policy_family_accepts_only_ipv4_and_ipv6() {
+        assert_eq!(Ok(()), validate_rule_stats_policy_family(4));
+        assert_eq!(Ok(()), validate_rule_stats_policy_family(6));
+        assert_eq!(
+            Err("invalid_rule_stats_ip_family: 0".to_string()),
+            validate_rule_stats_policy_family(0),
+        );
+        assert_eq!(
+            Err("invalid_rule_stats_ip_family: 7".to_string()),
+            validate_rule_stats_policy_family(7),
+        );
     }
 }
