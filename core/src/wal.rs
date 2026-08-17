@@ -1512,6 +1512,60 @@ mod tests {
     }
 
     #[test]
+    fn managed_legacy_snapshot_and_wal_any_stay_ipv4_and_checkpoint_is_idempotent() {
+        let state_path = temp_state_path();
+        legacy_any_rule_snapshot(&state_path);
+        wal_checkpoint_write_lines(
+            &state_path,
+            &[serde_json::json!({
+                "AddRule": {
+                    "src_id": 0,
+                    "dst_id": 0,
+                    "proto": 6,
+                    "action": 1,
+                    "ports": "443",
+                    "direction": 0
+                }
+            })
+            .to_string()],
+        );
+
+        let first = load_with_wal(
+            &state_path,
+            crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
+        )
+        .expect("managed family migration must succeed");
+        assert_eq!(first.rules.len(), 2);
+        assert!(first
+            .rules
+            .iter()
+            .all(|rule| rule.ip_family == IP_FAMILY_V4));
+        let checkpointed_snapshot = fs::read(format!("{}/state.json", state_path)).unwrap();
+        let checkpointed_wal = fs::read(format!("{}/state.wal", state_path)).unwrap();
+
+        let restarted = load_with_wal(
+            &state_path,
+            crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
+        )
+        .expect("managed restart must remain usable");
+        assert_eq!(restarted.rules.len(), 2);
+        assert!(restarted
+            .rules
+            .iter()
+            .all(|rule| rule.ip_family == IP_FAMILY_V4));
+        assert_eq!(
+            fs::read(format!("{}/state.json", state_path)).unwrap(),
+            checkpointed_snapshot
+        );
+        assert_eq!(
+            fs::read(format!("{}/state.wal", state_path)).unwrap(),
+            checkpointed_wal
+        );
+
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[test]
     fn legacy_snapshot_then_wal_any_remove_removes_both_family_owners() {
         let state_path = temp_state_path();
         legacy_any_rule_snapshot(&state_path);

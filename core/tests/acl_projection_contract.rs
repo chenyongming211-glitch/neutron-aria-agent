@@ -11,7 +11,8 @@ use aria_core::ebpf_ops::{
 };
 use aria_core::common::{IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6};
 use aria_core::state::{
-    migrate_legacy_rule_families, FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo,
+    migrate_legacy_rule_families, FirewallState, GroupInfo, LegacyAclMigrationAuthority,
+    MirrorRuleInfo, QosRuleInfo, RuleInfo,
 };
 use aria_core::wal::{apply_wal_entry, WalEntry};
 use std::collections::BTreeSet;
@@ -135,6 +136,24 @@ fn local_projection_legacy_any_rule_expands_both_families() {
         .map(|rule| rule_identity(&rule))
         .collect::<Vec<_>>();
     assert_eq!(remigrated, identities);
+}
+
+#[test]
+fn managed_legacy_any_rule_migrates_to_ipv4_only() {
+    let mut legacy = acl_rule(0, 0);
+    legacy.ip_family = IP_FAMILY_UNSPECIFIED;
+
+    let migrated = migrate_legacy_rule_families(
+        &legacy,
+        &FirewallState::default().groups,
+        LegacyAclMigrationAuthority::ManagedLegacyIpv4,
+    )
+    .expect("managed legacy any/any rule must retain the historical IPv4 contract");
+
+    assert_eq!(
+        migrated.iter().map(rule_identity).collect::<Vec<_>>(),
+        vec![(0, 0, 6, 0, 4)]
+    );
 }
 
 #[test]
