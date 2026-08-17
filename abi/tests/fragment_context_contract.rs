@@ -1,6 +1,7 @@
 use aria_ebpf_abi::{
     fragment_context_disposition, fragment_context_flags_for_l4, fragment_context_l4_proto,
-    fragment_ct_create_point, fragment_first_observation_metric, fragment_install_result,
+    fragment_authority_tracking_required, fragment_ct_create_point,
+    fragment_first_observation_metric, fragment_install_result,
     fragment_resolve_decision, fragment_resolved_l4_fields, fragment_tracking_required,
     FragmentConfig, FragmentContextDisposition, FragmentContextKey4, FragmentContextValue,
     FragmentCtCreatePoint, FragmentEpochValue, FragmentInstallDecision, FragmentKind,
@@ -259,6 +260,33 @@ fn fragment_tracking_applies_only_to_real_tcp_udp_or_ambiguous_extension_fragmen
         IPPROTO_ICMP,
         false,
     ));
+}
+
+#[test]
+fn fragment_authority_is_neutral_without_acl_or_conntrack() {
+    for fragment_kind in [FragmentKind::First, FragmentKind::NonInitial] {
+        assert!(!fragment_authority_tracking_required(
+            fragment_kind as u8,
+            IPPROTO_UDP,
+            true,
+            false,
+            false,
+        ));
+        assert!(fragment_authority_tracking_required(
+            fragment_kind as u8,
+            IPPROTO_UDP,
+            true,
+            true,
+            false,
+        ));
+        assert!(fragment_authority_tracking_required(
+            fragment_kind as u8,
+            IPPROTO_UDP,
+            true,
+            false,
+            true,
+        ));
+    }
 }
 
 #[test]
