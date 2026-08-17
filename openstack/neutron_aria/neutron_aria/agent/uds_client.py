@@ -988,7 +988,16 @@ def _decode_counters_v2(counters):
 
 
 def _counter_decoder(counters):
-    if isinstance(counters, dict) and counters.get("counters_schema_version") == 2:
+    if not isinstance(counters, dict):
+        return _decode_counters_v1, "invalid_counters_v1", 1
+    version = counters.get("counters_schema_version")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, _INTEGER_TYPES)
+        or version not in (1, 2)
+    ):
+        raise LocalApiContractError("invalid counters schema version %r" % version)
+    if version == 2:
         return _decode_counters_v2, "invalid_counters_v2", 2
     return _decode_counters_v1, "invalid_counters_v1", 1
 
@@ -1002,10 +1011,14 @@ def _decode_status_v3(body):
         allow_retry_snapshot=True,
     )
     if "counters" in body:
-        decoder, error_code, schema_version = _counter_decoder(body["counters"])
+        decoder = None
         try:
+            decoder, error_code, schema_version = _counter_decoder(body["counters"])
             decoded["counters"] = decoder(body["counters"])
         except LocalApiContractError as exc:
+            if decoder is None:
+                error_code = "invalid_counters_version"
+                schema_version = 0
             decoded["counters"] = {
                 "counters_schema_version": schema_version,
                 "sampled_at_ms": 0,

@@ -1989,22 +1989,50 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
             0,
         )
 
+    def test_counter_decoder_reports_invalid_version_before_v1_or_v2(self):
+        from neutron_aria.agent.uds_client import _decode_status_v3
+        scenario = status_v3_scenario("counters-present-single-port")
+        for version in ("2", True, 0, 3, None):
+            status = copy.deepcopy(scenario["status"])
+            status["counters"]["counters_schema_version"] = version
+
+            decoded = _decode_status_v3(status)
+
+            self.assertEqual([], decoded["counters"]["ports"])
+            self.assertIn(
+                "invalid_counters_version",
+                decoded["counters"]["counters_error"],
+            )
+            self.assertNotIn(
+                "invalid_counters_v1",
+                decoded["counters"]["counters_error"],
+            )
+
     def test_status_v3_malformed_counters_are_contained_as_counter_error(self):
         from neutron_aria.agent.uds_client import _decode_status_v3
         scenario = status_v3_scenario("counters-present-single-port")
         invalid_sections = [
-            [],
-            {"counters_schema_version": 3, "sampled_at_ms": 2000, "ports": []},
-            {"counters_schema_version": 1, "sampled_at_ms": -1, "ports": []},
-            {"counters_schema_version": 1, "sampled_at_ms": 2000, "ports": "bad"},
-            {
+            ([], "invalid_counters_v1"),
+            (
+                {"counters_schema_version": 3, "sampled_at_ms": 2000, "ports": []},
+                "invalid_counters_version",
+            ),
+            (
+                {"counters_schema_version": 1, "sampled_at_ms": -1, "ports": []},
+                "invalid_counters_v1",
+            ),
+            (
+                {"counters_schema_version": 1, "sampled_at_ms": 2000, "ports": "bad"},
+                "invalid_counters_v1",
+            ),
+            ({
                 "counters_schema_version": 1,
                 "sampled_at_ms": 2000,
                 "ports": [{"port_id": "p1", "tap_id": 7,
                            "policy_packets": -1}],
-            },
+            }, "invalid_counters_v1"),
         ]
-        for invalid in invalid_sections:
+        for invalid, expected_error in invalid_sections:
             status = copy.deepcopy(scenario["status"])
             status["counters"] = invalid
             with self.subTest(counters=invalid):
@@ -2012,7 +2040,7 @@ class StatusContractV2RetryRedTestCase(unittest.TestCase):
                 self.assertEqual(parsed["transaction_state"], "blocked")
                 self.assertEqual(parsed["counters"]["ports"], [])
                 self.assertIn(
-                    "invalid_counters_v1",
+                    expected_error,
                     parsed["counters"]["counters_error"],
                 )
 
