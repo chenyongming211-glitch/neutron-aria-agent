@@ -31,6 +31,11 @@ REPOSITORY_URL = bytes.fromhex(
     "6368656e796f6e676d696e673231312d676c697463682f"
     "617269612d6669726577616c6c"
 )
+PRIMARY_REPOSITORY_URL = bytes.fromhex(
+    "68747470733a2f2f6769746875622e636f6d2f"
+    "6368656e796f6e676d696e673231312d676c697463682f"
+    "6e657574726f6e2d617269612d6167656e74"
+)
 
 
 class PublicReleasePolicyTest(unittest.TestCase):
@@ -46,17 +51,24 @@ class PublicReleasePolicyTest(unittest.TestCase):
         self.assertTrue(public_release_policy.find_rule_ids(value))
 
     def test_canonical_repository_and_actions_urls_are_the_only_owner_allowance(self):
-        self.assertEqual([], public_release_policy.find_rule_ids(REPOSITORY_URL))
-        self.assertEqual(
-            [],
-            public_release_policy.find_rule_ids(
-                REPOSITORY_URL
-                + bytes.fromhex("2f616374696f6e732f72756e732f313233")
-            ),
-        )
+        for repository_url in (REPOSITORY_URL, PRIMARY_REPOSITORY_URL):
+            with self.subTest(repository_url=repository_url):
+                self.assertEqual(
+                    [], public_release_policy.find_rule_ids(repository_url)
+                )
+                self.assertEqual(
+                    [],
+                    public_release_policy.find_rule_ids(
+                        repository_url
+                        + bytes.fromhex("2f616374696f6e732f72756e732f313233")
+                    ),
+                )
         owner = bytes.fromhex(NEW_RULE_HEX[0])
         self.assertTrue(public_release_policy.find_rule_ids(b"owner=" + owner))
         self.assertTrue(public_release_policy.find_rule_ids(REPOSITORY_URL + b"-copy"))
+        self.assertTrue(
+            public_release_policy.find_rule_ids(PRIMARY_REPOSITORY_URL + b"-copy")
+        )
 
     def test_path_names_are_scanned(self):
         label = os.fsdecode(bytes.fromhex(NEW_RULE_HEX[5])) + "/summary.md"

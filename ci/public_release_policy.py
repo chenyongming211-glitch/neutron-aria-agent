@@ -36,22 +36,27 @@ RULES = (
 )
 
 _OWNER = RULES[4][0]
-_REPOSITORY = bytes.fromhex("617269612d6669726577616c6c")
+_REPOSITORIES = (
+    bytes.fromhex("617269612d6669726577616c6c"),
+    bytes.fromhex("6e657574726f6e2d617269612d6167656e74"),
+)
 PUBLIC_REPOSITORY_URL_RE = re.compile(
     rb"https://github[.]com/"
     + re.escape(_OWNER)
     + rb"/"
-    + _REPOSITORY
+    + rb"(?:"
+    + rb"|".join(re.escape(repository) for repository in _REPOSITORIES)
+    + rb")"
     + rb"(?=$|[/#? \t\r\n)\]>'\"])",
     re.IGNORECASE,
 )
 
 
 def mask_allowed_provenance(data):
-    """Hide the one allowed public-repository URL shape before rule matching."""
+    """Hide approved canonical repository URL shapes before rule matching."""
 
     return PUBLIC_REPOSITORY_URL_RE.sub(
-        b"https://github.com/public/aria-firewall",
+        b"https://github.com/public/repository",
         data,
     )
 
