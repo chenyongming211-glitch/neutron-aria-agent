@@ -19,55 +19,55 @@ pub fn ct_list(runtime: TapMapRuntime<'_>) -> Result<Vec<CtEntry>, String> {
 
     // CT_TABLE_V4 — LruHashMap on kernel side
     let map_path = format!("{}/CT_TABLE_V4", pin_path);
-    if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(map) =
-            HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
-        {
-            for item in map.iter() {
-                if let Ok((key, val)) = item {
-                    if key.tap_id != runtime.tap_id {
-                        continue;
-                    }
-                    entries.push(CtEntry {
-                        src_ip: format!("{}", Ipv4Addr::from(key.src_ip)),
-                        dst_ip: format!("{}", Ipv4Addr::from(key.dst_ip)),
-                        src_port: key.src_port,
-                        dst_port: key.dst_port,
-                        proto: key.proto,
-                        state: val.state,
-                        pkt_count: val.pkt_count,
-                        byte_count: val.byte_count,
-                    });
-                }
+    if let Some(map_data) = crate::pinned_map::open_optional_pin("CT_TABLE_V4", &map_path)? {
+        let map = crate::pinned_map::require_map_operation(
+            "convert CT_TABLE_V4",
+            HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data)),
+        )?;
+        for item in map.iter() {
+            let (key, val) =
+                crate::pinned_map::require_map_operation("iterate CT_TABLE_V4", item)?;
+            if key.tap_id != runtime.tap_id {
+                continue;
             }
+            entries.push(CtEntry {
+                src_ip: format!("{}", Ipv4Addr::from(key.src_ip)),
+                dst_ip: format!("{}", Ipv4Addr::from(key.dst_ip)),
+                src_port: key.src_port,
+                dst_port: key.dst_port,
+                proto: key.proto,
+                state: val.state,
+                pkt_count: val.pkt_count,
+                byte_count: val.byte_count,
+            });
         }
     }
 
     // CT_TABLE_V6 — LruHashMap on kernel side
     let map_path = format!("{}/CT_TABLE_V6", pin_path);
-    if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(map) =
-            HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
-        {
-            for item in map.iter() {
-                if let Ok((key, val)) = item {
-                    if key.tap_id != runtime.tap_id {
-                        continue;
-                    }
-                    let src = std::net::Ipv6Addr::from(key.src_ip);
-                    let dst = std::net::Ipv6Addr::from(key.dst_ip);
-                    entries.push(CtEntry {
-                        src_ip: format!("{}", src),
-                        dst_ip: format!("{}", dst),
-                        src_port: key.src_port,
-                        dst_port: key.dst_port,
-                        proto: key.proto,
-                        state: val.state,
-                        pkt_count: val.pkt_count,
-                        byte_count: val.byte_count,
-                    });
-                }
+    if let Some(map_data) = crate::pinned_map::open_optional_pin("CT_TABLE_V6", &map_path)? {
+        let map = crate::pinned_map::require_map_operation(
+            "convert CT_TABLE_V6",
+            HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data)),
+        )?;
+        for item in map.iter() {
+            let (key, val) =
+                crate::pinned_map::require_map_operation("iterate CT_TABLE_V6", item)?;
+            if key.tap_id != runtime.tap_id {
+                continue;
             }
+            let src = std::net::Ipv6Addr::from(key.src_ip);
+            let dst = std::net::Ipv6Addr::from(key.dst_ip);
+            entries.push(CtEntry {
+                src_ip: format!("{}", src),
+                dst_ip: format!("{}", dst),
+                src_port: key.src_port,
+                dst_port: key.dst_port,
+                proto: key.proto,
+                state: val.state,
+                pkt_count: val.pkt_count,
+                byte_count: val.byte_count,
+            });
         }
     }
 

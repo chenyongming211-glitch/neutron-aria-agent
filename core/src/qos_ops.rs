@@ -18,24 +18,40 @@ fn sync_qos_enabled(runtime: TapMapRuntime<'_>, enabled: bool) -> Result<(), Str
 }
 
 /// Check if any QoS rules remain in the QOS_CONFIG map.
-fn has_qos_rules(runtime: TapMapRuntime<'_>) -> bool {
+fn has_qos_rules(runtime: TapMapRuntime<'_>) -> Result<bool, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
-    let Ok(map_data) = MapData::from_pin(&map_path) else {
-        return false;
+    let Some(map_data) = crate::pinned_map::open_optional_pin("QOS_CONFIG", &map_path)? else {
+        return Ok(false);
     };
-    let Ok(map) = HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
-    else {
-        return false;
-    };
+    let map = crate::pinned_map::require_map_operation(
+        "convert QOS_CONFIG",
+        HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data)),
+    )?;
     for item in map.iter() {
-        if let Ok((key, _)) = item {
-            if key.tap_id == runtime.tap_id {
-                return true;
-            }
+        let (key, _) = crate::pinned_map::require_map_operation("iterate QOS_CONFIG", item)?;
+        if key.tap_id == runtime.tap_id {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
+}
+
+fn sync_qos_after_delete_with<HasRules, Sync>(
+    user_qos_enabled: bool,
+    has_rules: HasRules,
+    sync: Sync,
+) -> Result<(), String>
+where
+    HasRules: FnOnce() -> Result<bool, String>,
+    Sync: FnOnce(bool) -> Result<(), String>,
+{
+    let enabled = if user_qos_enabled {
+        has_rules()?
+    } else {
+        false
+    };
+    sync(enabled)
 }
 
 fn clear_qos_token_bucket(runtime: TapMapRuntime<'_>, key: &QosKey) -> Result<(), String> {
@@ -124,7 +140,11 @@ pub fn delete_qos_rule(
     clear_qos_token_bucket(runtime, &key)?;
 
     // After deleting, check if any rules remain and user wants QoS
-    sync_qos_enabled(runtime, user_qos_enabled && has_qos_rules(runtime))?;
+    sync_qos_after_delete_with(
+        user_qos_enabled,
+        || has_qos_rules(runtime),
+        |enabled| sync_qos_enabled(runtime, enabled),
+    )?;
 
     Ok(())
 }
@@ -138,10 +158,9 @@ pub fn list_qos_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(QosKey, QosConf
 
     let mut entries = Vec::new();
     for item in map.iter() {
-        if let Ok((key, val)) = item {
-            if key.tap_id == runtime.tap_id {
-                entries.push((key, val));
-            }
+        let (key, val) = crate::pinned_map::require_map_operation("iterate QOS_CONFIG", item)?;
+        if key.tap_id == runtime.tap_id {
+            entries.push((key, val));
         }
     }
 

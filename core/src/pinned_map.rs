@@ -1,3 +1,52 @@
+use aya::maps::{MapData, MapError};
+
+fn pin_missing(error: &MapError) -> bool {
+    match error {
+        MapError::SyscallError(syscall) => {
+            syscall.io_error.kind() == std::io::ErrorKind::NotFound
+        }
+        MapError::PinError { error: pin_error, .. } => match pin_error {
+            aya::pin::PinError::SyscallError(syscall) => {
+                syscall.io_error.kind() == std::io::ErrorKind::NotFound
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn classify_optional_pin_open<T, E>(
+    map_name: &str,
+    result: Result<T, E>,
+    is_missing: impl FnOnce(&E) -> bool,
+) -> Result<Option<T>, String>
+where
+    E: std::fmt::Debug,
+{
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if is_missing(&error) => Ok(None),
+        Err(error) => Err(format!("open {}: {:?}", map_name, error)),
+    }
+}
+
+pub(crate) fn open_optional_pin(
+    map_name: &str,
+    path: &str,
+) -> Result<Option<MapData>, String> {
+    classify_optional_pin_open(map_name, MapData::from_pin(path), pin_missing)
+}
+
+pub(crate) fn require_map_operation<T, E>(
+    operation: &str,
+    result: Result<T, E>,
+) -> Result<T, String>
+where
+    E: std::fmt::Debug,
+{
+    result.map_err(|error| format!("{}: {:?}", operation, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
