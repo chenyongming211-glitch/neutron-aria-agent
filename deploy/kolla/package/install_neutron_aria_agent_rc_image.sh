@@ -74,11 +74,14 @@ check_non_interference() {
 
 validate_image_runtime() {
     docker run --rm --entrypoint python "${IMAGE_REF}" -c '
+import netaddr
 from neutron_aria.agent.config import DEFAULT_HEARTBEAT_DETAIL_MODE
 from neutron_aria.agent.status_reporter import HEARTBEAT_SCHEMA_VERSION
 assert HEARTBEAT_SCHEMA_VERSION == 2
 assert DEFAULT_HEARTBEAT_DETAIL_MODE == "summary_only"
+assert netaddr.__version__ == "0.7.19"
 ' >/dev/null
+    docker run --rm --entrypoint neutron-aria-agent "${IMAGE_REF}" --help >/dev/null
 }
 
 wait_candidate_ready() {

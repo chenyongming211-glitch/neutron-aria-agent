@@ -122,6 +122,66 @@ class ReleaseGovernanceTest(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("source commit", result.stderr.lower())
 
+    def test_manifest_generator_accepts_safe_nested_artifact_name(self):
+        generator = ROOT / "ci" / "create_release_manifest.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            artifact = temp / "asset"
+            artifact.write_bytes(b"nested")
+            output = temp / "release-manifest.json"
+            checksums = temp / "SHA256SUMS"
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    str(generator),
+                    "--repo-root",
+                    str(ROOT),
+                    "--source-commit",
+                    "7" * 40,
+                    "--artifact",
+                    "dist/kolla/asset=" + str(artifact),
+                    "--output",
+                    str(output),
+                    "--checksums-output",
+                    str(checksums),
+                ]
+            )
+            self.assertEqual(
+                "dist/kolla/asset",
+                json.loads(output.read_text(encoding="utf-8"))["artifacts"][0]["name"],
+            )
+            self.assertTrue(checksums.read_text(encoding="utf-8").endswith(
+                "  dist/kolla/asset\n"
+            ))
+
+    def test_manifest_generator_rejects_artifact_path_traversal(self):
+        generator = ROOT / "ci" / "create_release_manifest.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            artifact = temp / "asset"
+            artifact.write_bytes(b"x")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(generator),
+                    "--repo-root",
+                    str(ROOT),
+                    "--source-commit",
+                    "7" * 40,
+                    "--artifact",
+                    "../asset=" + str(artifact),
+                    "--output",
+                    str(temp / "manifest.json"),
+                    "--checksums-output",
+                    str(temp / "SHA256SUMS"),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("invalid artifact", result.stderr.lower())
+
     def test_manifest_generator_rejects_duplicate_asset_name(self):
         generator = ROOT / "ci" / "create_release_manifest.py"
         with tempfile.TemporaryDirectory() as temp_dir:

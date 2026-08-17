@@ -295,7 +295,11 @@ jobs:
           ls -la release/
 
       - name: Build Neutron stage-two ACL Kolla bundle
-        run: bash deploy/kolla/package/build_stage2_acl_bundle.sh
+        run: |
+          mkdir -p dist/kolla/python2-wheels
+          python3 -m pip download --disable-pip-version-check --no-deps \
+            --only-binary=:all: --dest dist/kolla/python2-wheels netaddr==0.7.19
+          bash deploy/kolla/package/build_stage2_acl_bundle.sh
 
       - name: Check Neutron stage-two ACL Kolla bundle payload policy
         if: env.PUBLISH_BUILD_ARTIFACTS == 'true'

@@ -170,6 +170,9 @@ def check_production_acl_smoke():
     image_builder = _read(os.path.join(
         "deploy", "kolla", "package", "build_neutron_aria_agent_image.sh"
     ))
+    agent_dockerfile = _read(os.path.join(
+        "deploy", "kolla", "neutron-aria-agent", "Dockerfile"
+    ))
     agent_rc_installer = _read(os.path.join(
         "deploy", "kolla", "package", "install_neutron_aria_agent_rc_image.sh"
     ))
@@ -287,6 +290,13 @@ def check_production_acl_smoke():
         "agent_rc_installer=deploy/kolla/package/install_neutron_aria_agent_rc_image.sh",
         "build_aria_datapath_image.sh",
         "deploy/kolla/aria-datapath",
+        "NETADDR_WHEEL_PATH",
+        "NETADDR_WHEEL_NAME",
+        "netaddr-0.7.19-py2.py3-none-any.whl",
+        "dist/kolla/python2-wheels",
+        "56b3558bd71f3f6999e4c52e349f38660e54a7a8a9943335f73dfc96883e08ca",
+        '--artifact "dist/kolla/${EGG_NAME}=',
+        '--artifact "dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}=',
         "tar --sort=name",
         "gzip -n",
     ):
@@ -300,9 +310,19 @@ def check_production_acl_smoke():
         "docker save",
         "docker run --rm -i --entrypoint python",
         "image_imports=ok",
+        "neutron-aria-agent --help",
     ):
         if term not in image_builder:
             raise SystemExit("ERROR: neutron-aria-agent image builder missing %s" % term)
+    for term in (
+        "netaddr-0.7.19-py2.py3-none-any.whl",
+        "python3 -m pip install",
+        "--no-deps --upgrade",
+        "/usr/lib/python2.7/site-packages",
+        "neutron-aria-agent --help",
+    ):
+        if term not in agent_dockerfile:
+            raise SystemExit("ERROR: neutron-aria-agent Dockerfile missing %s" % term)
     for term in (
         "install|check|rollback",
         "EXPECTED_IMAGE_ID",
@@ -312,6 +332,9 @@ def check_production_acl_smoke():
         "Aria datapath container identity changed",
         "Neutron OVS agent container identity changed",
         "heartbeat_detail_mode == \"summary_only\"",
+        "netaddr.__version__ == \"0.7.19\"",
+        "--entrypoint neutron-aria-agent",
+        "--help",
     ):
         if term not in agent_rc_installer:
             raise SystemExit("ERROR: agent RC image installer missing %s" % term)

@@ -7,6 +7,9 @@ BUNDLE_NAME="${BUNDLE_NAME:-neutron-aria-stage2-acl-kolla-bundle.tgz}"
 BUNDLE_PATH="${BUNDLE_PATH:-${OUT_DIR}/${BUNDLE_NAME}}"
 STAGING_DIR="${STAGING_DIR:-${OUT_DIR}/stage2-acl-bundle}"
 EGG_NAME="${EGG_NAME:-neutron_aria-0.1.0-py2.7.egg}"
+NETADDR_WHEEL_NAME="${NETADDR_WHEEL_NAME:-netaddr-0.7.19-py2.py3-none-any.whl}"
+NETADDR_WHEEL_SHA256="${NETADDR_WHEEL_SHA256:-56b3558bd71f3f6999e4c52e349f38660e54a7a8a9943335f73dfc96883e08ca}"
+NETADDR_WHEEL_PATH="${NETADDR_WHEEL_PATH:-${REPO_ROOT}/dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.0}"
 SOURCE_TREEISH="${SOURCE_TREEISH:-HEAD}"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse "${SOURCE_TREEISH}^{commit}")"
@@ -44,6 +47,13 @@ for path in \
 do
     require_path "${path}"
 done
+
+require_path "${NETADDR_WHEEL_PATH}"
+actual_netaddr_sha256="$(sha256sum "${NETADDR_WHEEL_PATH}" | awk '{print $1}')"
+if [ "${actual_netaddr_sha256}" != "${NETADDR_WHEEL_SHA256}" ]; then
+    echo "netaddr wheel SHA-256 mismatch: ${actual_netaddr_sha256}" >&2
+    exit 1
+fi
 
 rm -rf "${STAGING_DIR}"
 mkdir -p "${OUT_DIR}" "${STAGING_DIR}"
@@ -86,6 +96,9 @@ EGG_PATH="${egg_path}" \
     SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
     bash "${STAGING_DIR}/deploy/kolla/package/build_neutron_aria_egg.sh"
 cp -a "${OUT_DIR}/${EGG_NAME}" "${STAGING_DIR}/dist/kolla/${EGG_NAME}"
+mkdir -p "${STAGING_DIR}/dist/kolla/python2-wheels"
+cp -a "${NETADDR_WHEEL_PATH}" \
+    "${STAGING_DIR}/dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}"
 
 find "${STAGING_DIR}" -type f -name '*.pyc' -delete
 find "${STAGING_DIR}" -type d -name '__pycache__' -prune -exec rm -rf {} +
@@ -341,6 +354,8 @@ EOF
         echo "source_commit=${SOURCE_COMMIT}"
         echo "recommended_image_tag=${RECOMMENDED_IMAGE_TAG}"
         echo "egg=dist/kolla/${EGG_NAME}"
+        echo "python2_dependency=dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}"
+        echo "python2_dependency_sha256=${NETADDR_WHEEL_SHA256}"
         echo "gate=deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh"
         echo "db_migration=deploy/kolla/smoke/neutron_aria_acl_db_migration_smoke.sh"
         echo "agent_installer=deploy/kolla/package/install_neutron_aria_agent_egg.sh"
@@ -361,7 +376,8 @@ EOF
 python3 "${STAGING_DIR}/ci/create_release_manifest.py" \
     --repo-root "${STAGING_DIR}" \
     --source-commit "${SOURCE_COMMIT}" \
-    --artifact "${EGG_NAME}=${STAGING_DIR}/dist/kolla/${EGG_NAME}" \
+    --artifact "dist/kolla/${EGG_NAME}=${STAGING_DIR}/dist/kolla/${EGG_NAME}" \
+    --artifact "dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}=${STAGING_DIR}/dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}" \
     --output "${STAGING_DIR}/release-manifest.json" \
     --checksums-output "${STAGING_DIR}/SHA256SUMS"
 

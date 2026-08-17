@@ -13,6 +13,7 @@ from pathlib import Path
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 IMAGE_IDENTITY_RE = re.compile(
     r"^[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}$"
 )
@@ -33,7 +34,13 @@ def parse_named(values: list[str], label: str) -> list[tuple[str, str]]:
         if "=" not in value:
             raise ValueError(f"{label} must use name=value: {value!r}")
         name, item = value.split("=", 1)
-        if not NAME_RE.fullmatch(name) or not item:
+        valid_name = NAME_RE.fullmatch(name)
+        if label == "artifact":
+            valid_name = (
+                ARTIFACT_NAME_RE.fullmatch(name)
+                and all(part not in (".", "..") for part in name.split("/"))
+            )
+        if not valid_name or not item:
             raise ValueError(f"invalid {label}: {value!r}")
         if name in names:
             raise ValueError(f"duplicate {label} name: {name}")
