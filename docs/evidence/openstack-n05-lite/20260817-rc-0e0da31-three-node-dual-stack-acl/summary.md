@@ -9,6 +9,9 @@ three test computes. It covers real Neutron `aria_acl` objects and real VM
 traffic. It does not claim the separate fragment, host-reboot, scale, or soak
 gates.
 
+IPv4 and IPv6 were exercised through separate Neutron ports on paired test
+VMs. This evidence does not claim the separate same-port dual-stack case.
+
 Aria did not restart or modify OVS or the Neutron OVS agent during this run.
 
 ## Candidate
@@ -98,4 +101,3 @@ start identity were unchanged.
 ## Result
 
 Result: **PASS** for the stated three-compute IPv4/IPv6 ACL RC matrix.
-
