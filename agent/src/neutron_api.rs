@@ -12039,6 +12039,7 @@ mod tests {
         assert_eq!(body["transaction_state"], "blocked");
         assert_eq!(body["overall_readiness"], "blocked");
         assert_eq!(body["required_action"], "retry_snapshot");
+        assert_eq!(body["wal_status"], "committed");
         assert_eq!(body["applied_generation"], 0);
         assert_eq!(body["pending_generation"], 1);
         assert!(body["port_statuses"]
