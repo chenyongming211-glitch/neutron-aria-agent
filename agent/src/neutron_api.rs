@@ -8106,6 +8106,8 @@ mod tests {
             authority_state,
             ports,
             port_statuses: statuses,
+            applied_baseline_ports: None,
+            applied_baseline_port_statuses: None,
             wal_status,
             recovery_cause,
             wal_replay_failures,
