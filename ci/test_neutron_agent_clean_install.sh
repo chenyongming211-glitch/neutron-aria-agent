@@ -38,6 +38,15 @@ docker run --detach --name "${SERVICE_NAME}" --entrypoint sh \
         exec sleep 600
     ' >/dev/null
 
+# Compile the complete target package with the target Python runtime before
+# testing selected imports. This catches Python 2 syntax and source-encoding
+# failures that Python 3 packaging alone cannot detect.
+docker cp \
+    "${REPO_ROOT}/openstack/neutron_aria/neutron_aria" \
+    "${SERVICE_NAME}:/tmp/neutron_aria-source"
+docker exec "${SERVICE_NAME}" python -m compileall -q \
+    /tmp/neutron_aria-source
+
 SITE_PACKAGES="$(
     docker exec "${SERVICE_NAME}" python -c \
         'from distutils.sysconfig import get_python_lib; print(get_python_lib())'

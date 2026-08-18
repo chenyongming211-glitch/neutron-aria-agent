@@ -364,7 +364,7 @@ class AriaAclPlugin(object):
         counters_error = payload.pop("counters_error", None)
         if counters_error is not None:
             # Datapath reported a read failure: keep the last good snapshot
-            # (spec §10); staleness stays visible via counters_sampled_at age.
+            # (spec section 10); staleness stays visible via sample age.
             LOG.warning(
                 "aria_acl port counters unavailable port_id=%s error=%s",
                 payload.get("port_id"),

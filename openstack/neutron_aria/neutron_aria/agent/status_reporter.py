@@ -43,7 +43,7 @@ def port_counters_blob(runtime_status, port_id):
     Returns None when the runtime status carries no counters section (older
     datapath or feature disabled). Returns an error blob (``counters_error``
     only) when the datapath reported a read failure or this port was not
-    sampled — the server then keeps the last good snapshot per spec §10.
+    sampled; the server then keeps the last good snapshot per spec section 10.
     Otherwise returns the diffed rows, the cumulative summary, the exact drop
     pps diffed from the summary drop totals, and the reset/truncated flags.
     Rates are None on the first snapshot and on any negative-delta reset.

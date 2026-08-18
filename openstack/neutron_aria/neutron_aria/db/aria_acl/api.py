@@ -578,7 +578,7 @@ class InMemoryAriaAclRepository(object):
         key = (values["port_id"], values["host"])
         # Merge like the DB-backed repository: unspecified columns keep their
         # previous values so e.g. counter-less reports do not wipe the last
-        # good counter snapshot (spec §10).
+        # good counter snapshot (spec section 10).
         merged = dict(self.port_statuses.get(key) or {})
         merged.update(values)
         self.port_statuses[key] = merged
