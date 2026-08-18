@@ -59,6 +59,10 @@ pub(crate) struct NeutronWalState {
     #[serde(default)]
     pub(crate) port_statuses: BTreeMap<String, NeutronPortStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) applied_baseline_ports: Option<BTreeMap<String, ManagedNeutronPort>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) applied_baseline_port_statuses: Option<BTreeMap<String, NeutronPortStatus>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recovery_cause: Option<String>,
     #[serde(default)]
     pub(crate) status_hash: Option<String>,
@@ -74,6 +78,10 @@ struct NeutronWalStatusHashPayload<'a> {
     authority_state: &'a str,
     ports: &'a BTreeMap<String, ManagedNeutronPort>,
     port_statuses: &'a BTreeMap<String, NeutronPortStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied_baseline_ports: Option<&'a BTreeMap<String, ManagedNeutronPort>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied_baseline_port_statuses: Option<&'a BTreeMap<String, NeutronPortStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_cause: Option<&'a str>,
 }
@@ -155,6 +163,8 @@ impl NeutronWalState {
             authority_state: &self.authority_state,
             ports: &self.ports,
             port_statuses: &self.port_statuses,
+            applied_baseline_ports: self.applied_baseline_ports.as_ref(),
+            applied_baseline_port_statuses: self.applied_baseline_port_statuses.as_ref(),
             recovery_cause: self.recovery_cause.as_deref(),
         };
         let bytes = serde_json::to_vec(&payload)

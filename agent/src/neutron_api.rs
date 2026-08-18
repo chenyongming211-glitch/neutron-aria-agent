@@ -85,6 +85,8 @@ struct NeutronRuntimeState {
     authority_state: String,
     ports: BTreeMap<String, ManagedNeutronPort>,
     port_statuses: BTreeMap<String, NeutronPortStatus>,
+    applied_baseline_ports: Option<BTreeMap<String, ManagedNeutronPort>>,
+    applied_baseline_port_statuses: Option<BTreeMap<String, NeutronPortStatus>>,
     wal_status: String,
     recovery_cause: Option<String>,
     wal_replay_failures: u64,
@@ -100,6 +102,8 @@ struct SnapshotAdmissionIdentity {
     authority_state: String,
     ports: BTreeMap<String, ManagedNeutronPort>,
     port_statuses: BTreeMap<String, NeutronPortStatus>,
+    applied_baseline_ports: Option<BTreeMap<String, ManagedNeutronPort>>,
+    applied_baseline_port_statuses: Option<BTreeMap<String, NeutronPortStatus>>,
     wal_status: String,
     recovery_cause: Option<String>,
     wal_replay_failures: u64,
@@ -116,6 +120,8 @@ impl SnapshotAdmissionIdentity {
             authority_state: runtime.authority_state.clone(),
             ports: runtime.ports.clone(),
             port_statuses: runtime.port_statuses.clone(),
+            applied_baseline_ports: runtime.applied_baseline_ports.clone(),
+            applied_baseline_port_statuses: runtime.applied_baseline_port_statuses.clone(),
             wal_status: runtime.wal_status.clone(),
             recovery_cause: runtime.recovery_cause.clone(),
             wal_replay_failures: runtime.wal_replay_failures,
@@ -957,6 +963,8 @@ impl NeutronRuntimeState {
             authority_state: state.authority_state,
             ports: state.ports,
             port_statuses: state.port_statuses,
+            applied_baseline_ports: state.applied_baseline_ports,
+            applied_baseline_port_statuses: state.applied_baseline_port_statuses,
             wal_status,
             recovery_cause: state.recovery_cause,
             wal_replay_failures,
@@ -973,6 +981,8 @@ impl NeutronRuntimeState {
             authority_state: self.authority_state.clone(),
             ports: self.ports.clone(),
             port_statuses: self.port_statuses.clone(),
+            applied_baseline_ports: self.applied_baseline_ports.clone(),
+            applied_baseline_port_statuses: self.applied_baseline_port_statuses.clone(),
             recovery_cause: self.recovery_cause.clone(),
             status_hash: None,
         }
@@ -2133,7 +2143,18 @@ fn project_neutron_status_v2(
     runtime: &NeutronRuntimeState,
     durable_partial_retryable: bool,
 ) -> NeutronStatusV1Projection {
-    let mut projection = project_neutron_status_v1(runtime);
+    let baseline_runtime = durable_partial_retryable
+        .then(|| {
+            let ports = runtime.applied_baseline_ports.as_ref()?;
+            let port_statuses = runtime.applied_baseline_port_statuses.as_ref()?;
+            let mut baseline = runtime.clone();
+            baseline.ports = ports.clone();
+            baseline.port_statuses = port_statuses.clone();
+            Some(baseline)
+        })
+        .flatten();
+    let projection_runtime = baseline_runtime.as_ref().unwrap_or(runtime);
+    let mut projection = project_neutron_status_v1(projection_runtime);
     if durable_partial_retryable {
         projection.transaction_state = NeutronStatusTransactionState::Blocked;
         projection.overall_readiness = NeutronStatusOverallReadiness::Blocked;
@@ -2351,7 +2372,15 @@ async fn build_neutron_status_response(
     let durable_partial_retryable =
         validate_durable_partial_retry_barrier(state, &runtime).is_ok();
     let projection = project_neutron_status_v2(&runtime, durable_partial_retryable);
-    let managed_ports = runtime.ports.values().cloned().collect();
+    let projected_ports = if durable_partial_retryable {
+        runtime
+            .applied_baseline_ports
+            .as_ref()
+            .unwrap_or(&runtime.ports)
+    } else {
+        &runtime.ports
+    };
+    let managed_ports = projected_ports.values().cloned().collect();
     let generation = runtime.applied_generation;
     let accepted_generation = runtime.accepted_generation;
     let applied_generation = runtime.applied_generation;
@@ -2369,7 +2398,7 @@ async fn build_neutron_status_response(
     } else {
         runtime.authority_state.clone()
     };
-    let counters_ports = include_counters.then(|| runtime.ports.clone());
+    let counters_ports = include_counters.then(|| projected_ports.clone());
     drop(runtime);
 
     let active_instances = state.registry.list().await;
@@ -2608,6 +2637,8 @@ fn validate_durable_partial_retry_barrier(
         || runtime.wal_replay_failures > 0
         || runtime.pending_generation != Some(runtime.accepted_generation)
         || !status_v1_has_complete_pending_identity(runtime)
+        || runtime.applied_baseline_ports.is_none()
+        || runtime.applied_baseline_port_statuses.is_none()
     {
         return Err(snapshot_retry_not_safe(
             "pending snapshot is not a complete ordinary partial transaction",
@@ -4247,6 +4278,12 @@ fn build_snapshot_commit_runtime(
     next_runtime.wal_status = "commit_written".to_string();
     next_runtime.recovery_cause = None;
     if has_error {
+        if previous.authority_state != "partial"
+            || previous.pending_generation != Some(generation)
+        {
+            next_runtime.applied_baseline_ports = Some(previous.ports.clone());
+            next_runtime.applied_baseline_port_statuses = Some(previous.port_statuses.clone());
+        }
         next_runtime.pending_generation = Some(generation);
         next_runtime.authority_state = "partial".to_string();
     } else {
@@ -4254,6 +4291,8 @@ fn build_snapshot_commit_runtime(
         next_runtime.applied_desired_hash = requested_hash;
         next_runtime.pending_generation = None;
         next_runtime.authority_state = "ready".to_string();
+        next_runtime.applied_baseline_ports = None;
+        next_runtime.applied_baseline_port_statuses = None;
     }
     next_runtime
 }
