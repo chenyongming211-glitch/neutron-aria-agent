@@ -4,6 +4,9 @@ set -euo pipefail
 CONTAINER="${CONTAINER:-neutron_server}"
 NEUTRON_CONF="${NEUTRON_CONF:-/etc/kolla/neutron-server/neutron.conf}"
 SITE_PACKAGES="${SITE_PACKAGES:-/usr/lib/python2.7/site-packages}"
+EGG_NAME="${EGG_NAME:-neutron_aria-0.1.0-py2.7.egg}"
+EGG_PATH="${EGG_PATH:-${SITE_PACKAGES}/${EGG_NAME}}"
+EASY_INSTALL_PTH="${EASY_INSTALL_PTH:-${SITE_PACKAGES}/easy-install.pth}"
 PLUGIN_PROVIDER="${PLUGIN_PROVIDER:-neutron_aria.services.aria_acl.plugin.AriaAclPlugin}"
 EXTENSION_PATH="${EXTENSION_PATH:-${SITE_PACKAGES}/neutron_aria/extensions}"
 POLICY_FILE="${POLICY_FILE:-/etc/neutron/policy.json}"
@@ -88,11 +91,35 @@ backup_current_state() {
         rm -f "${STATE_DIR}/neutron_aria.latest.tgz"
     fi
 
+    backup_optional_container_file \
+        "${EGG_PATH}" \
+        "${STATE_DIR}/${EGG_NAME}.${ts}" \
+        "${STATE_DIR}/${EGG_NAME}.latest.bak"
+    backup_optional_container_file \
+        "${EASY_INSTALL_PTH}" \
+        "${STATE_DIR}/easy-install.pth.${ts}" \
+        "${STATE_DIR}/easy-install.pth.latest.bak"
+
     log "Backed up neutron.conf to ${conf_backup}"
+}
+
+backup_optional_container_file() {
+    local container_path="$1" backup_prefix="$2" latest="$3"
+    local backup="${backup_prefix}.bak" marker="${backup_prefix}.none"
+    if docker exec -u 0 "${CONTAINER}" test -f "${container_path}"; then
+        docker cp "${CONTAINER}:${container_path}" "${backup}"
+        ln -sfn "${backup}" "${latest}"
+    else
+        : >"${marker}"
+        ln -sfn "${marker}" "${latest}"
+    fi
 }
 
 copy_package_into_container() {
     log "Copying neutron_aria package into ${CONTAINER}:${SITE_PACKAGES}"
+    docker exec -u 0 "${CONTAINER}" rm -f "${EGG_PATH}"
+    docker exec -u 0 "${CONTAINER}" \
+        sed -i "\\|${EGG_NAME}|d" "${EASY_INSTALL_PTH}" 2>/dev/null || true
     docker exec -u 0 "${CONTAINER}" rm -rf /tmp/neutron_aria.smoke
     docker cp "${PACKAGE_SRC}" "${CONTAINER}:/tmp/neutron_aria.smoke"
     docker exec -u 0 "${CONTAINER}" sh -c "
@@ -101,6 +128,26 @@ copy_package_into_container() {
         chmod -R a+rX '${SITE_PACKAGES}/neutron_aria' &&
         rm -rf /tmp/neutron_aria.smoke
     "
+}
+
+restore_optional_container_file() {
+    local latest="$1" container_path="$2" mode="$3"
+    [ -e "${latest}" ] || return 0
+    local source
+    source="$(readlink -f "${latest}")"
+    case "${source}" in
+        *.bak)
+            docker cp "${source}" "${CONTAINER}:${container_path}"
+            docker exec -u 0 "${CONTAINER}" chmod "${mode}" "${container_path}"
+            ;;
+        *.none)
+            docker exec -u 0 "${CONTAINER}" rm -f "${container_path}"
+            ;;
+        *)
+            echo "Unknown package rollback marker: ${source}" >&2
+            exit 1
+            ;;
+    esac
 }
 
 enable_service_plugin() {
@@ -238,6 +285,11 @@ rollback() {
         log "Removing smoke-installed neutron_aria package"
         docker exec -u 0 "${CONTAINER}" rm -rf "${SITE_PACKAGES}/neutron_aria"
     fi
+
+    restore_optional_container_file \
+        "${STATE_DIR}/${EGG_NAME}.latest.bak" "${EGG_PATH}" 0644
+    restore_optional_container_file \
+        "${STATE_DIR}/easy-install.pth.latest.bak" "${EASY_INSTALL_PTH}" 0644
 
     local policy_backup="${STATE_DIR}/policy.json.latest.bak"
     if [ -e "${policy_backup}" ]; then

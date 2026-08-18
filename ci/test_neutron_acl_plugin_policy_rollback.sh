@@ -12,10 +12,14 @@ STATE_DIR="${ROOT}/state"
 NEUTRON_CONF="${ROOT}/neutron.conf"
 PACKAGE_SRC="${ROOT}/package/neutron_aria"
 SITE_PACKAGES="/site-packages"
+EGG_NAME="neutron_aria-0.1.0-py2.7.egg"
 POLICY_FILE="/etc/neutron/policy.json"
 mkdir -p "${FAKE_BIN}" "${CONTAINER_ROOT}${SITE_PACKAGES}" "${PACKAGE_SRC}"
 printf '[DEFAULT]\nservice_plugins = router\n' >"${NEUTRON_CONF}"
 printf 'package\n' >"${PACKAGE_SRC}/__init__.py"
+printf 'old-egg\n' >"${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+printf './%s\n' "${EGG_NAME}" \
+    >"${CONTAINER_ROOT}${SITE_PACKAGES}/easy-install.pth"
 
 cat >"${FAKE_BIN}/id" <<'EOF'
 #!/usr/bin/env bash
@@ -89,6 +93,11 @@ case "${command_name}" in
                 ;;
             chmod)
                 ;;
+            sed)
+                pth="${FAKE_CONTAINER_ROOT}${!#}"
+                grep -Fv "${EGG_NAME}" "${pth}" >"${pth}.tmp" 2>/dev/null || true
+                mv "${pth}.tmp" "${pth}"
+                ;;
             sh)
                 rm -rf "${FAKE_CONTAINER_ROOT}${SITE_PACKAGES}/neutron_aria"
                 cp -a "${FAKE_CONTAINER_ROOT}/tmp/neutron_aria.smoke" \
@@ -117,7 +126,7 @@ chmod +x "${FAKE_BIN}"/*
 
 export FAKE_CONTAINER_ROOT="${CONTAINER_ROOT}"
 export FAKE_RESTART_RECORD="${ROOT}/restart-record"
-export NEUTRON_CONF PACKAGE_SRC POLICY_FILE SITE_PACKAGES STATE_DIR
+export EGG_NAME NEUTRON_CONF PACKAGE_SRC POLICY_FILE SITE_PACKAGES STATE_DIR
 export PATH="${FAKE_BIN}:${PATH}"
 
 set +e
@@ -142,11 +151,24 @@ case "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${LATE
         ;;
 esac
 test -f "${CONTAINER_ROOT}${POLICY_FILE}"
+if [ -e "${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}" ]; then
+    echo "plugin install left a stale egg shadowing the copied package" >&2
+    exit 1
+fi
+if grep -Fq "${EGG_NAME}" \
+    "${CONTAINER_ROOT}${SITE_PACKAGES}/easy-install.pth"; then
+    echo "plugin install left the stale egg active in easy-install.pth" >&2
+    exit 1
+fi
 
 /bin/bash "${INSTALLER}" rollback >"${ROOT}/rollback.log"
 if [ -e "${CONTAINER_ROOT}${POLICY_FILE}" ]; then
     echo "first-install rollback left the smoke-created policy file" >&2
     exit 1
 fi
+grep -Fqx 'old-egg' \
+    "${CONTAINER_ROOT}${SITE_PACKAGES}/${EGG_NAME}"
+grep -Fqx "./${EGG_NAME}" \
+    "${CONTAINER_ROOT}${SITE_PACKAGES}/easy-install.pth"
 
 printf 'plugin_policy_first_install_rollback=pass\n'
