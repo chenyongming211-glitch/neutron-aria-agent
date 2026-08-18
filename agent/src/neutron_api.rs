@@ -12055,6 +12055,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_generation_retry_status_preserves_positive_applied_baseline_rows() {
+        let root = temp_root("status-v3-positive-partial-baseline");
+        let state = test_neutron_state(&root);
+        let mut previous = NeutronRuntimeState {
+            accepted_generation: 4,
+            applied_generation: 4,
+            desired_hash: Some("hash-4".to_string()),
+            applied_desired_hash: Some("hash-4".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+        let mut port = managed("port-a", "tap-port-a");
+        port.managed_domains = vec!["acl".to_string()];
+        previous.ports.insert(port.port_id.clone(), port.clone());
+        previous.port_statuses.insert(
+            port.port_id.clone(),
+            ready_status(&port.port_id, &port.ifname, 4),
+        );
+
+        let partial = build_snapshot_commit_runtime(
+            &previous,
+            5,
+            Some("hash-5".to_string()),
+            BTreeMap::from([(port.port_id.clone(), port.clone())]),
+            BTreeMap::from([(
+                port.port_id.clone(),
+                port_runtime_status(
+                    &port.port_id,
+                    &port.ifname,
+                    5,
+                    Some("hash-5".to_string()),
+                    port.managed_domains.clone(),
+                    "error",
+                    Some("transient_attach_failure".to_string()),
+                    domain_statuses_for(
+                        &port.managed_domains,
+                        "error",
+                        Some("transient_attach_failure".to_string()),
+                    ),
+                ),
+            )]),
+            true,
+        );
+        state
+            .wal
+            .append_snapshot_commit(partial.to_wal_state())
+            .expect("positive-baseline partial commit should be durable");
+        *state.runtime.write().await = partial;
+
+        let response = get_neutron_status_with_query(
+            State(state),
+            Query(NeutronStatusQuery::default()),
+        )
+        .await
+        .into_response();
+        let (status, body) = response_json_value(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["transaction_state"], "blocked");
+        assert_eq!(body["required_action"], "retry_snapshot");
+        assert_eq!(body["applied_generation"], 4);
+        assert_eq!(body["pending_generation"], 5);
+        let rows = body["port_statuses"]
+            .as_array()
+            .expect("Status V3 port rows must be an array");
+        assert_eq!(rows.len(), 1, "the applied baseline row must remain public");
+        assert_eq!(rows[0]["port_id"], "port-a");
+        assert_eq!(rows[0]["generation"], 4);
+        assert_eq!(rows[0]["desired_hash"], "hash-4");
+        assert_eq!(rows[0]["status"], "ready");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_submit_rejects_different_hash_inflight() {
         let root = temp_root("submit-pending-different-hash");
         let state = test_neutron_state(&root);
