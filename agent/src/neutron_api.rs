@@ -7671,6 +7671,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_snapshot_delete_clears_unmanaged_stale_status_for_full_resync() {
+        let root = temp_root("delete-stale-status");
+        let state = test_neutron_state(&root);
+        let runtime_ref = Arc::clone(&state.runtime);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 42;
+            runtime.applied_generation = 42;
+            runtime.desired_hash = Some("hash-42".to_string());
+            runtime.applied_desired_hash = Some("hash-42".to_string());
+            runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+            runtime.wal_status = "runtime_reconciled_acl_resync_required".to_string();
+            runtime.port_statuses.insert(
+                "stale-port".to_string(),
+                port_runtime_status(
+                    "stale-port",
+                    "tap-stale",
+                    43,
+                    Some("hash-43".to_string()),
+                    vec!["acl".to_string()],
+                    "error",
+                    Some("legacy_partial_apply_failed".to_string()),
+                    vec![domain_status_with_action(
+                        "acl",
+                        "error",
+                        Some("legacy_partial_apply_failed".to_string()),
+                        None,
+                    )],
+                ),
+            );
+        }
+
+        let (status, response) =
+            apply_delete_neutron_port(state.clone(), "stale-port".to_string()).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response.port_id, "stale-port");
+        assert_eq!(response.ifname.as_deref(), Some("tap-stale"));
+        assert!(!response.detached);
+        assert_eq!(response.status, "deleted");
+        assert!(response.error.is_none());
+
+        let runtime = runtime_ref.read().await;
+        assert!(!runtime.ports.contains_key("stale-port"));
+        assert!(!runtime.port_statuses.contains_key("stale-port"));
+        let projection = project_neutron_status_v1(&runtime);
+        assert_eq!(
+            projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+        drop(runtime);
+
+        let replay = state.wal.replay();
+        assert!(!replay.state.ports.contains_key("stale-port"));
+        assert!(!replay.state.port_statuses.contains_key("stale-port"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_ovs_inventory_command_timeout_is_bounded_and_stops_command_sequence() {
         let root = temp_root("ovs-command-timeout");
         let marker = root.join("command-finished");
