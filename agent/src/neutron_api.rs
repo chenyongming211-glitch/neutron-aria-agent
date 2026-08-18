@@ -5067,13 +5067,60 @@ async fn apply_delete_neutron_port(
     let port = previous.ports.get(&port_id).cloned();
 
     let Some(port) = port else {
+        let stale_status = previous.port_statuses.get(&port_id).cloned();
+        let Some(stale_status) = stale_status else {
+            return (
+                StatusCode::OK,
+                NeutronDeleteResponse {
+                    port_id,
+                    ifname: None,
+                    detached: false,
+                    status: "not_found".to_string(),
+                    error: None,
+                },
+            );
+        };
+
+        if previous.pending_generation.is_some() {
+            return (
+                StatusCode::CONFLICT,
+                NeutronDeleteResponse {
+                    port_id,
+                    ifname: Some(stale_status.ifname),
+                    detached: false,
+                    status: "blocked".to_string(),
+                    error: Some(format!(
+                        "delete_blocked_by_unresolved_pending: pending generation {} is still applying",
+                        previous.pending_generation.unwrap_or_default()
+                    )),
+                },
+            );
+        }
+
+        let committed = build_committed_delete_runtime(&previous, &port_id);
+        if let Err(error) = state.wal.append_snapshot_commit(committed.to_wal_state()) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                NeutronDeleteResponse {
+                    port_id,
+                    ifname: Some(stale_status.ifname),
+                    detached: false,
+                    status: "error".to_string(),
+                    error: Some(format!("wal_commit_failed:{}", error)),
+                },
+            );
+        }
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = committed;
+        }
         return (
             StatusCode::OK,
             NeutronDeleteResponse {
                 port_id,
-                ifname: None,
+                ifname: Some(stale_status.ifname),
                 detached: false,
-                status: "not_found".to_string(),
+                status: "deleted".to_string(),
                 error: None,
             },
         );
