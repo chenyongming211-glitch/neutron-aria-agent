@@ -79,6 +79,7 @@ class CiLaneContractTests(unittest.TestCase):
     def test_clean_agent_install_is_an_independent_cargo_free_container_lane(self):
         clean_install = job_block(self.source, "neutron-agent-clean-install")
         self.assertIn("ci/test_neutron_agent_clean_install.sh", clean_install)
+        self.assertIn("ci/test_neutron_agent_image_upgrade.sh", clean_install)
         self.assertIn("sudo env", clean_install)
         self.assertNotRegex(clean_install, r"\bcargo\b")
         self.assertNotIn("needs: rust-build", clean_install)

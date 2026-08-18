@@ -101,6 +101,7 @@ jobs:
           python3 -m unittest ci.test_ebpf_stack_budget
           python3 -m unittest ci.test_legacy_kernel_canary_contract
           python3 -m unittest ci.test_kolla_container_healthchecks
+          python3 -m unittest ci.test_neutron_agent_image_upgrade
           python3 ci/check_rust_warning_hygiene.py
           bash ci/check_release_reproducibility.sh
           python3 ci/test_neutron_aria_acl_nonce_echo.py -v
@@ -117,6 +118,9 @@ jobs:
 
       - name: Verify clean-container agent package install
         run: sudo env "PATH=${PATH}" bash ci/test_neutron_agent_clean_install.sh
+
+      - name: Verify agent image same-name egg upgrade
+        run: sudo env "PATH=${PATH}" bash ci/test_neutron_agent_image_upgrade.sh
 
   neutron-db-contracts:
     runs-on: ubuntu-22.04

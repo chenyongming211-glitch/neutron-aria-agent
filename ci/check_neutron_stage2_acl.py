@@ -319,6 +319,9 @@ def check_production_acl_smoke():
         if term not in image_builder:
             raise SystemExit("ERROR: neutron-aria-agent image builder missing %s" % term)
     for term in (
+        "neutron_aria-0.1.0-py2.7.egg",
+        "install-neutron-aria-egg-image.sh",
+        "neutron-aria-agent-entrypoint.py",
         "netaddr-0.7.19-py2.py3-none-any.whl",
         "python3 -m pip install",
         "--no-deps --upgrade",
@@ -327,6 +330,10 @@ def check_production_acl_smoke():
     ):
         if term not in agent_dockerfile:
             raise SystemExit("ERROR: neutron-aria-agent Dockerfile missing %s" % term)
+    if "python setup.py install" in agent_dockerfile:
+        raise SystemExit(
+            "ERROR: neutron-aria-agent Dockerfile must not rebuild an active zipped egg"
+        )
     for term in (
         "install|check|rollback",
         "EXPECTED_IMAGE_ID",
