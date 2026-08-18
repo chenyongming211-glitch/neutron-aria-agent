@@ -461,9 +461,11 @@ capture_agent_identity() {
     AGENT_UID="$(docker exec "${AGENT_SERVICE}" id -u "${AGENT_RUNTIME_USER}")"
     AGENT_GID="$(docker exec "${AGENT_SERVICE}" id -g "${AGENT_RUNTIME_USER}")"
     validate_image_id "${AGENT_IMAGE_ID}" AGENT_IMAGE_ID
-    case "${AGENT_UID}:${AGENT_GID}" in
-        *[!0-9:]*) die "invalid neutron-aria-agent UID/GID" ;;
-        :*|*:|:) die "missing neutron-aria-agent UID/GID" ;;
+    if [ -z "${AGENT_UID}" ] || [ -z "${AGENT_GID}" ]; then
+        die "missing neutron-aria-agent UID/GID"
+    fi
+    case "${AGENT_UID}${AGENT_GID}" in
+        *[!0-9]*) die "invalid neutron-aria-agent UID/GID" ;;
     esac
 }
 
@@ -474,9 +476,11 @@ ensure_agent_identity() {
         capture_agent_identity
     fi
     validate_image_id "${AGENT_IMAGE_ID}" AGENT_IMAGE_ID
-    case "${AGENT_UID}:${AGENT_GID}" in
-        *[!0-9:]*) die "invalid recorded neutron-aria-agent UID/GID" ;;
-        :*|*:|:) die "missing recorded neutron-aria-agent UID/GID" ;;
+    if [ -z "${AGENT_UID}" ] || [ -z "${AGENT_GID}" ]; then
+        die "missing recorded neutron-aria-agent UID/GID"
+    fi
+    case "${AGENT_UID}${AGENT_GID}" in
+        *[!0-9]*) die "invalid recorded neutron-aria-agent UID/GID" ;;
     esac
 }
 

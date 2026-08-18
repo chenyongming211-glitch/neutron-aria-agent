@@ -154,6 +154,14 @@ class CiLaneContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", block)
         self.assertNotIn("|| true", block)
 
+    def test_deep_audit_installs_neutron_contract_dependencies(self):
+        block = job_block(self.source, "deep-audit")
+        self.assertIn(
+            "python3 -m pip install --requirement openstack/neutron_aria/requirements.txt",
+            block,
+        )
+        self.assertIn("python3 ci/check_neutron_stage1.py", block)
+
 
 if __name__ == "__main__":
     unittest.main()

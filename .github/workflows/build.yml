@@ -529,6 +529,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install Neutron agent contract dependencies
+        run: python3 -m pip install --requirement openstack/neutron_aria/requirements.txt
+
       - name: Validate Stage 1 static and artifact contracts
         run: python3 ci/check_neutron_stage1.py
 
