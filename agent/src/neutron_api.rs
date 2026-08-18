@@ -11846,6 +11846,8 @@ mod tests {
             desired_hash: Some(desired_hash.to_string()),
             applied_desired_hash: None,
             authority_state: "partial".to_string(),
+            applied_baseline_ports: Some(BTreeMap::new()),
+            applied_baseline_port_statuses: Some(BTreeMap::new()),
             wal_status: "commit_written".to_string(),
             ..NeutronRuntimeState::default()
         }
