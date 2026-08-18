@@ -149,6 +149,16 @@ class AclContractTestCase(unittest.TestCase):
             acl_contract.normalize_ipv4_cidr("255.255.255.255/0"),
         )
 
+    def test_bare_host_addresses_are_canonicalized_to_host_prefixes(self):
+        self.assertEqual(
+            "192.0.2.7/32",
+            acl_contract.normalize_cidr("192.0.2.7", "IPv4"),
+        )
+        self.assertEqual(
+            "2001:db8::7/128",
+            acl_contract.normalize_cidr("2001:db8::7", "IPv6"),
+        )
+
     def test_address_set_reference_requires_enabled_single_family_members(self):
         validate_address_set_reference({
             "enabled": True,

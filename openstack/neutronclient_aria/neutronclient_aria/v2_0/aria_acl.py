@@ -321,8 +321,14 @@ class AriaAclRuleCreate(_AriaAclCreate):
         parser.add_argument("--priority", type=int, required=True)
         parser.add_argument("--action", choices=["allow", "deny", "drop"], required=True)
         parser.add_argument("--protocol", type=_protocol)
-        parser.add_argument("--src-cidr")
-        parser.add_argument("--dst-cidr")
+        parser.add_argument(
+            "--src-cidr",
+            help="Source CIDR or host IP; hosts become /32 or /128",
+        )
+        parser.add_argument(
+            "--dst-cidr",
+            help="Destination CIDR or host IP; hosts become /32 or /128",
+        )
         parser.add_argument("--src-address-set-id")
         parser.add_argument("--dst-address-set-id")
         parser.add_argument("--dst-port-min", type=int)
@@ -368,8 +374,14 @@ class AriaAclRuleUpdate(_AriaAclUpdate):
         parser.add_argument("--priority", type=int)
         parser.add_argument("--action", choices=["allow", "deny", "drop"])
         parser.add_argument("--protocol", type=_protocol)
-        parser.add_argument("--src-cidr")
-        parser.add_argument("--dst-cidr")
+        parser.add_argument(
+            "--src-cidr",
+            help="Source CIDR or host IP; hosts become /32 or /128",
+        )
+        parser.add_argument(
+            "--dst-cidr",
+            help="Destination CIDR or host IP; hosts become /32 or /128",
+        )
         parser.add_argument("--src-address-set-id")
         parser.add_argument("--dst-address-set-id")
         parser.add_argument("--dst-port-min", type=int)
@@ -441,7 +453,13 @@ class AriaAclAddressSetCreate(_AriaAclCreate):
     def add_known_arguments(self, parser):
         self._add_project_arguments(parser)
         parser.add_argument("--name", default="")
-        parser.add_argument("--member", dest="members", action="append", default=[])
+        parser.add_argument(
+            "--member",
+            dest="members",
+            action="append",
+            default=[],
+            help="Member CIDR or host IP; hosts become /32 or /128",
+        )
         self._add_enabled(parser)
 
     def args2body(self, parsed_args):

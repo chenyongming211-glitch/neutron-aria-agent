@@ -637,7 +637,7 @@ class EffectiveAclTestCase(unittest.TestCase):
             acl_rule("second", 10, protocol="udp"),
         ])
         self.assertIn(
-            "duplicate_acl_priority:egress:10:first:second",
+            "duplicate_acl_priority:egress:IPv4:10:first:second",
             result["reason"],
         )
 
@@ -647,9 +647,20 @@ class EffectiveAclTestCase(unittest.TestCase):
             acl_rule("second", 10, direction="egress", protocol="udp"),
         ])
         self.assertIn(
-            "duplicate_acl_priority:egress:10:first:second",
+            "duplicate_acl_priority:egress:IPv4:10:first:second",
             result["reason"],
         )
+
+    def test_equal_priority_across_ip_families_remains_ready(self):
+        result = effective_acl([
+            acl_rule("ipv4", 10, ethertype="IPv4"),
+            acl_rule("ipv6", 10, ethertype="IPv6"),
+        ], ipv6_acl_enabled=True)
+
+        self.assertEqual(ACL_READY, result["status"])
+        self.assertEqual(["ipv4", "ipv6"], sorted(
+            rule["id"] for rule in result["rules"]
+        ))
 
     def test_overlap_normalization_strips_protocol_and_action(self):
         result = effective_acl([

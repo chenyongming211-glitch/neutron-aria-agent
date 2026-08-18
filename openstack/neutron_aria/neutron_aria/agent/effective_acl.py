@@ -569,7 +569,9 @@ class EffectiveAclIndex(object):
         compiled = []
         reasons = []
         for rule in sorted(rules, key=lambda r: (
-                _normalized_direction(r.get("direction")), _rule_priority(r))):
+                _normalized_direction(r.get("direction")),
+                _rule_priority(r),
+                _normalized_ethertype(r.get("ethertype") or "IPv4"))):
             if self._invalid_priority(rule):
                 reasons.append("invalid_acl_priority:%s:%s" % (
                     rule.get("id"), rule.get("priority"),
@@ -577,10 +579,22 @@ class EffectiveAclIndex(object):
                 continue
 
             priority = _rule_priority(rule)
-            key = (_normalized_direction(rule.get("direction")), priority)
+            try:
+                family = normalize_ethertype(
+                    rule.get("ethertype") or "IPv4"
+                )
+            except AclContractError:
+                family = _normalized_ethertype(
+                    rule.get("ethertype") or "IPv4"
+                )
+            key = (
+                _normalized_direction(rule.get("direction")),
+                family,
+                priority,
+            )
             if key in priority_keys:
-                reasons.append("duplicate_acl_priority:%s:%s:%s:%s" % (
-                    key[0], key[1], priority_keys[key], rule.get("id"),
+                reasons.append("duplicate_acl_priority:%s:%s:%s:%s:%s" % (
+                    key[0], key[1], key[2], priority_keys[key], rule.get("id"),
                 ))
                 continue
             priority_keys[key] = rule.get("id")

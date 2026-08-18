@@ -413,12 +413,12 @@ POST /v2.0/aria-acl-policies
 | `project_id` | string | 是 | owner project，必须与 policy 兼容 |
 | `policy_id` | uuid | 是 | 所属 policy |
 | `direction` | enum | 是 | `ingress` 或 `egress` |
-| `priority` | int | 是 | 控制层稳定排序与同方向唯一性字段；不参与 datapath 动作仲裁 |
+| `priority` | int | 是 | 控制层稳定排序字段；在同一 policy、direction、ethertype 内唯一，不参与 datapath 动作仲裁 |
 | `action` | enum | 是 | `allow` 或 `deny` |
 | `ethertype` | enum | 否 | `IPv4` 或 `IPv6` |
 | `protocol` | string/int | 否 | `tcp`、`udp`、`icmp`、`1` 等 |
-| `src_cidr` | cidr | 否 | 源 CIDR |
-| `dst_cidr` | cidr | 否 | 目的 CIDR |
+| `src_cidr` | cidr/ip | 否 | 源 CIDR 或 host IP；裸 IPv4/IPv6 分别规范化为 `/32`、`/128` |
+| `dst_cidr` | cidr/ip | 否 | 目的 CIDR 或 host IP；裸 IPv4/IPv6 分别规范化为 `/32`、`/128` |
 | `src_address_set_id` | uuid | 否 | 源 address set |
 | `dst_address_set_id` | uuid | 否 | 目的 address set |
 | `src_port_min` | int | 否 | 保留兼容字段；当前 ACL 产品不支持，create/update 必须拒绝 |
@@ -454,7 +454,7 @@ POST /v2.0/aria-acl-rules
 
 规则校验：
 
-- `priority` 在同一 policy、同一 direction 内不能重复。
+- `priority` 在同一 policy、同一 direction、同一 `ethertype` 内不能重复；IPv4 与 IPv6 可以复用同一 priority。
 - 当前 ACL datapath 是 priority-independent；合法策略的最终动作不能依赖
   `priority` 决定。
 - CIDR、协议或端口匹配空间发生重叠，且重叠结果需要依赖 priority 或产生
@@ -487,7 +487,7 @@ fast-path 的边界见
 | `project_id` | string | 是 | owner project |
 | `name` | string | 是 | 名称 |
 | `description` | string | 否 | 描述 |
-| `members` | list | 否 | IP/CIDR 成员 |
+| `members` | list | 否 | IP/CIDR 成员；裸 IPv4/IPv6 分别规范化为 `/32`、`/128` 后去重 |
 | `revision_number` | int | 否 | Neutron revision |
 
 创建示例：
@@ -842,7 +842,7 @@ policy_id             UUID foreign key aria_acl_policies.id
 direction             Enum ingress/egress not null
 priority              Integer not null
 action                Enum allow/deny not null
-ethertype             Enum IPv4/IPv6 nullable
+ethertype             Enum IPv4/IPv6 not null, default IPv4
 protocol              String nullable
 src_cidr              String nullable
 dst_cidr              String nullable
@@ -861,7 +861,7 @@ updated_at            DateTime
 约束：
 
 ```text
-unique(policy_id, direction, priority)
+unique(policy_id, direction, ethertype, priority)
 foreign key(policy_id) references aria_acl_policies(id)
 foreign key(src_address_set_id) references aria_acl_address_sets(id)
 foreign key(dst_address_set_id) references aria_acl_address_sets(id)

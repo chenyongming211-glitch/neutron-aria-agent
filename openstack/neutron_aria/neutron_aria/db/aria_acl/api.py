@@ -8,6 +8,8 @@ import sqlite3
 import threading
 import uuid
 
+from neutron_aria.acl_contract import AclContractError
+from neutron_aria.acl_contract import normalize_ethertype
 from neutron_aria.db.aria_acl.errors import AriaAclConflictError
 from neutron_aria.db.aria_acl.errors import AriaAclError
 from neutron_aria.db.aria_acl.errors import AriaAclNotFound
@@ -1183,10 +1185,37 @@ class NeutronDbAriaAclRepository(object):
             )
             if "enabled_guard" not in columns:
                 missing.append(table.name)
+            if table_key == "rules" and "ethertype" not in columns:
+                missing.append(table.name)
+        rule_indexes = {}
+        get_indexes = getattr(inspector, "get_indexes", lambda _table: [])
+        for index in get_indexes(self.tables["rules"].name):
+            rule_indexes[index.get("name")] = tuple(
+                index.get("column_names") or ()
+            )
+        get_unique_constraints = getattr(
+            inspector,
+            "get_unique_constraints",
+            None,
+        )
+        if get_unique_constraints is not None:
+            for constraint in get_unique_constraints(
+                    self.tables["rules"].name):
+                rule_indexes[constraint.get("name")] = tuple(
+                    constraint.get("column_names") or ()
+                )
+        expected_rule_index = (
+            "policy_id", "direction", "ethertype", "priority",
+            "enabled_guard",
+        )
+        if rule_indexes.get(
+                "uq_aria_acl_rules_enabled_priority") != expected_rule_index:
+            missing.append(self.tables["rules"].name)
         if missing:
             raise AriaAclValidationError(
-                "aria_acl_schema_migration_required: %s missing enabled_guard"
-                % ",".join(sorted(missing))
+                "aria_acl_schema_migration_required: %s missing required "
+                "write-invariant schema"
+                % ",".join(sorted(set(missing)))
             )
 
     @contextlib.contextmanager
@@ -1301,7 +1330,7 @@ class NeutronDbAriaAclRepository(object):
                 sa.Column("src_port_max", sa.Integer()),
                 sa.Column("dst_port_min", sa.Integer()),
                 sa.Column("dst_port_max", sa.Integer()),
-                sa.Column("ethertype", sa.String(64)),
+                sa.Column("ethertype", sa.String(64), nullable=False),
                 sa.Column("enabled", sa.Boolean(), nullable=False),
                 sa.Column("enabled_guard", sa.SmallInteger(), nullable=True),
                 sa.Column("revision_number", sa.Integer(), nullable=False),
@@ -1310,6 +1339,7 @@ class NeutronDbAriaAclRepository(object):
                 sa.UniqueConstraint(
                     "policy_id",
                     "direction",
+                    "ethertype",
                     "priority",
                     "enabled_guard",
                     name="uq_aria_acl_rules_enabled_priority",
@@ -1598,7 +1628,8 @@ class SqliteAriaAclRepository(object):
         (
             "aria_acl_rules",
             "id TEXT PRIMARY KEY, project_id TEXT, policy_id TEXT NOT NULL, "
-            "direction TEXT, priority INTEGER, enabled_guard INTEGER, "
+            "direction TEXT, ethertype TEXT NOT NULL DEFAULT 'IPv4', "
+            "priority INTEGER, enabled_guard INTEGER, "
             "payload TEXT NOT NULL",
         ),
         ("aria_acl_address_sets", "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL"),
@@ -1738,6 +1769,7 @@ class SqliteAriaAclRepository(object):
             project_id=values.get("project_id"),
             policy_id=values["policy_id"],
             direction=values["direction"],
+            ethertype=values["ethertype"],
             priority=int(values["priority"]),
             enabled_guard=1 if _enabled(values) else None,
         )
@@ -1777,6 +1809,7 @@ class SqliteAriaAclRepository(object):
             project_id=current.get("project_id"),
             policy_id=current["policy_id"],
             direction=current["direction"],
+            ethertype=current["ethertype"],
             priority=int(current["priority"]),
             enabled_guard=1 if _enabled(current) else None,
         )
@@ -2074,6 +2107,7 @@ class SqliteAriaAclRepository(object):
             "aria_acl_rules",
             (
                 ("direction", "TEXT"),
+                ("ethertype", "TEXT"),
                 ("priority", "INTEGER"),
                 ("enabled_guard", "INTEGER"),
             ),
@@ -2090,9 +2124,12 @@ class SqliteAriaAclRepository(object):
                 "aria_acl_schema_conflicts: %s" % "; ".join(conflicts)
             )
         self.connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS "
-            "uq_aria_acl_rules_enabled_priority ON aria_acl_rules "
-            "(policy_id, direction, priority, enabled_guard)"
+            "DROP INDEX IF EXISTS uq_aria_acl_rules_enabled_priority"
+        )
+        self.connection.execute(
+            "CREATE UNIQUE INDEX uq_aria_acl_rules_enabled_priority "
+            "ON aria_acl_rules "
+            "(policy_id, direction, ethertype, priority, enabled_guard)"
         )
         self.connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS "
@@ -2135,6 +2172,7 @@ class SqliteAriaAclRepository(object):
                 columns.get("project_id"),
                 columns.get("policy_id"),
                 columns.get("direction"),
+                columns.get("ethertype") or "IPv4",
                 columns.get("priority"),
                 columns.get("enabled_guard"),
                 payload,
@@ -2142,15 +2180,17 @@ class SqliteAriaAclRepository(object):
             if exists:
                 self.connection.execute(
                     "UPDATE aria_acl_rules SET project_id=?, policy_id=?, "
-                    "direction=?, priority=?, enabled_guard=?, payload=? "
+                    "direction=?, ethertype=?, priority=?, enabled_guard=?, "
+                    "payload=? "
                     "WHERE id=?",
                     ordered + (object_id,),
                 )
             else:
                 self.connection.execute(
                     "INSERT INTO aria_acl_rules "
-                    "(project_id, policy_id, direction, priority, "
-                    "enabled_guard, payload, id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(project_id, policy_id, direction, ethertype, priority, "
+                    "enabled_guard, payload, id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     ordered + (object_id,),
                 )
         else:
@@ -2185,15 +2225,28 @@ class SqliteAriaAclRepository(object):
             "SELECT id, payload FROM aria_acl_rules"
         ).fetchall():
             values = json.loads(row[1])
+            try:
+                family = normalize_ethertype(
+                    values.get("ethertype") or "IPv4"
+                )
+            except AclContractError as exc:
+                raise AriaAclValidationError(str(exc))
+            values["ethertype"] = family
+            values["direction"] = str(
+                values.get("direction") or ""
+            ).strip().lower()
             self.connection.execute(
                 "UPDATE aria_acl_rules SET project_id=?, policy_id=?, "
-                "direction=?, priority=?, enabled_guard=? WHERE id=?",
+                "direction=?, ethertype=?, priority=?, enabled_guard=?, "
+                "payload=? WHERE id=?",
                 (
                     values.get("project_id") or values.get("tenant_id"),
                     values.get("policy_id"),
-                    values.get("direction"),
+                    values["direction"],
+                    family,
                     values.get("priority"),
                     1 if _enabled(values) else None,
+                    _sqlite_json_dumps(values),
                     row[0],
                 ),
             )
@@ -2217,15 +2270,17 @@ class SqliteAriaAclRepository(object):
     def _sqlite_historical_conflicts(self):
         conflicts = []
         rule_rows = self.connection.execute(
-            "SELECT policy_id, direction, priority, GROUP_CONCAT(id) "
+            "SELECT policy_id, direction, ethertype, priority, GROUP_CONCAT(id) "
             "FROM aria_acl_rules WHERE enabled_guard=1 "
-            "GROUP BY policy_id, direction, priority HAVING COUNT(*) > 1"
+            "GROUP BY policy_id, direction, ethertype, priority "
+            "HAVING COUNT(*) > 1"
         ).fetchall()
-        for policy_id, direction, priority, object_ids in rule_rows:
+        for policy_id, direction, ethertype, priority, object_ids in rule_rows:
             conflicts.append(
-                "rule policy=%s direction=%s priority=%s ids=%s" % (
+                "rule policy=%s direction=%s ethertype=%s priority=%s ids=%s" % (
                     policy_id,
                     direction,
+                    ethertype,
                     priority,
                     ",".join(sorted((object_ids or "").split(","))),
                 )
@@ -2251,6 +2306,7 @@ class SqliteAriaAclRepository(object):
             "rule": (
                 "aria_acl_rules.policy_id",
                 "aria_acl_rules.direction",
+                "aria_acl_rules.ethertype",
                 "aria_acl_rules.priority",
                 "aria_acl_rules.enabled_guard",
             ),

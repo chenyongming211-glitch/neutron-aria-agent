@@ -173,6 +173,9 @@ def prepare_policy(values):
 def prepare_rule(repository, values, existing=None):
     final_values = copy.deepcopy(values)
     policy = _require_policy_project(repository, final_values)
+    final_values["direction"] = str(
+        final_values.get("direction") or ""
+    ).strip().lower()
     try:
         family = normalize_ethertype(final_values.get("ethertype") or "IPv4")
     except AclContractError as exc:
@@ -208,15 +211,24 @@ def prepare_rule(repository, values, existing=None):
                 continue
             if not enabled(rule):
                 continue
+            try:
+                rule_family = normalize_ethertype(
+                    rule.get("ethertype") or "IPv4"
+                )
+            except AclContractError as exc:
+                raise AriaAclValidationError(str(exc))
             if (
-                rule.get("direction") == final_values.get("direction") and
+                str(rule.get("direction") or "").strip().lower() ==
+                final_values.get("direction") and
+                rule_family == family and
                 int(rule.get("priority")) == int(final_values.get("priority"))
             ):
                 raise AriaAclConflictError(
                     "duplicate_enabled_rule_priority "
-                    "policy=%s direction=%s priority=%s" % (
+                    "policy=%s direction=%s ethertype=%s priority=%s" % (
                         final_values.get("policy_id"),
                         final_values.get("direction"),
+                        family,
                         final_values.get("priority"),
                     )
                 )

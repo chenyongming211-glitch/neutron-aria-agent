@@ -40,7 +40,7 @@ def normalize_cidr(value, ethertype):
     if expected == 4:
         parts = text.split("/")
         octets = parts[0].split(".")
-        if len(parts) != 2 or len(octets) != 4:
+        if len(parts) not in (1, 2) or len(octets) != 4:
             raise AclContractError("invalid IPv4 CIDR: %s" % value)
         for octet in octets:
             if (

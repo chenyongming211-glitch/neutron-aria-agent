@@ -225,6 +225,10 @@ def check_production_acl_smoke():
         "check",
         "downgrade",
         "NeutronDbAriaAclRepository(ctx, auto_create=False)",
+        "upgrade_counter_family_existing_schema",
+        "upgrade_acl_priority_family",
+        "priority_family_index=pass",
+        "missing aria_acl columns",
         "ensure_schema",
         "drop(bind=bind, checkfirst=True)",
     ):

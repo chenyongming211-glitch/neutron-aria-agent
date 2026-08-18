@@ -232,6 +232,16 @@ class RepositoryWriteInvariantBehavior(object):
         self.assertEqual("192.0.2.16/28", rule["dst_cidr"])
         self.assertEqual(rule, self.repository.get_rule("rule-1"))
 
+    def test_rule_write_canonicalizes_bare_host_cidrs(self):
+        self.create_policy()
+        rule = self.repository.create_rule(self.rule_values(
+            src_cidr="192.0.2.7",
+            dst_cidr="198.51.100.9",
+        ))
+        self.assertEqual("192.0.2.7/32", rule["src_cidr"])
+        self.assertEqual("198.51.100.9/32", rule["dst_cidr"])
+        self.assertEqual(rule, self.repository.get_rule("rule-1"))
+
     def test_rule_write_canonicalizes_ethertype_case(self):
         self.create_policy()
         rule = self.repository.create_rule(self.rule_values(
@@ -266,6 +276,48 @@ class RepositoryWriteInvariantBehavior(object):
             expected,
             self.repository.get_address_set("set-1")["members"],
         )
+
+    def test_address_set_bare_hosts_canonicalize_and_deduplicate(self):
+        address_set = self.create_address_set(members=[
+            "192.0.2.7",
+            {"address": "192.0.2.7/32"},
+        ])
+        self.assertEqual(
+            [{"address": "192.0.2.7/32"}],
+            address_set["members"],
+        )
+
+    def test_enabled_priority_is_scoped_by_ethertype(self):
+        self.create_policy()
+        ipv4 = self.repository.create_rule(self.rule_values(
+            rule_id="rule-v4",
+            ethertype="IPv4",
+        ))
+        ipv6 = self.repository.create_rule(self.rule_values(
+            rule_id="rule-v6",
+            ethertype="IPv6",
+        ))
+
+        self.assertEqual("IPv4", ipv4["ethertype"])
+        self.assertEqual("IPv6", ipv6["ethertype"])
+        self.assertEqual(
+            ["rule-v4", "rule-v6"],
+            sorted(rule["id"] for rule in self.repository.list_rules()),
+        )
+
+    def test_direction_is_canonicalized_before_priority_conflict(self):
+        self.create_policy()
+        first = self.repository.create_rule(self.rule_values(
+            rule_id="rule-first",
+            direction=" Ingress ",
+        ))
+        self.assertEqual("ingress", first["direction"])
+
+        with self.assertRaises(aria_acl_api.AriaAclConflictError):
+            self.repository.create_rule(self.rule_values(
+                rule_id="rule-second",
+                direction="ingress",
+            ))
 
     def test_address_set_accepts_2048_raw_members(self):
         address_set = self.create_address_set(members=self.raw_members(2048))
@@ -583,6 +635,7 @@ class SqliteWriteInvariantTestCase(
         ]
         self.assertIn("enabled_guard", rule_columns)
         self.assertIn("direction", rule_columns)
+        self.assertIn("ethertype", rule_columns)
         self.assertIn("priority", rule_columns)
         self.assertIn("enabled_guard", binding_columns)
 
@@ -601,22 +654,51 @@ class SqliteWriteInvariantTestCase(
         self.assertTrue(rule_indexes["uq_aria_acl_rules_enabled_priority"])
         self.assertTrue(binding_indexes["uq_aria_acl_bindings_enabled_target"])
 
+    def test_sqlite_schema_backfill_canonicalizes_legacy_ethertype_case(self):
+        self.create_policy()
+        rule = self.repository.create_rule(self.rule_values())
+        rule["ethertype"] = "ipv4"
+        rule["direction"] = " Ingress "
+        self.repository.connection.execute(
+            "UPDATE aria_acl_rules SET direction=?, ethertype=?, payload=? "
+            "WHERE id=?",
+            (" Ingress ", "ipv4", json.dumps(rule, sort_keys=True), rule["id"]),
+        )
+        self.repository.connection.commit()
+
+        self.repository._ensure_schema()
+
+        stored = self.repository.connection.execute(
+            "SELECT ethertype FROM aria_acl_rules WHERE id=?",
+            (rule["id"],),
+        ).fetchone()[0]
+        self.assertEqual("IPv4", stored)
+        stored_rule = self.repository.get_rule(rule["id"])
+        self.assertEqual("IPv4", stored_rule["ethertype"])
+        self.assertEqual("ingress", stored_rule["direction"])
+
     def test_sqlite_unique_indexes_are_final_concurrency_authority(self):
         self.test_sqlite_schema_has_enabled_guard_unique_indexes()
         connection = self.repository.connection
         connection.execute(
             "INSERT INTO aria_acl_rules "
-            "(id, project_id, policy_id, direction, priority, enabled_guard, payload) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("rule-raw-1", "project-1", "policy-1", "ingress", 10, 1, "{}"),
+            "(id, project_id, policy_id, direction, ethertype, priority, "
+            "enabled_guard, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("rule-raw-1", "project-1", "policy-1", "ingress", "IPv4", 10, 1, "{}"),
         )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO aria_acl_rules "
-                "(id, project_id, policy_id, direction, priority, enabled_guard, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("rule-raw-2", "project-1", "policy-1", "ingress", 10, 1, "{}"),
+                "(id, project_id, policy_id, direction, ethertype, priority, "
+                "enabled_guard, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("rule-raw-2", "project-1", "policy-1", "ingress", "IPv4", 10, 1, "{}"),
             )
+        connection.execute(
+            "INSERT INTO aria_acl_rules "
+            "(id, project_id, policy_id, direction, ethertype, priority, "
+            "enabled_guard, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("rule-raw-v6", "project-1", "policy-1", "ingress", "IPv6", 10, 1, "{}"),
+        )
         connection.execute(
             "INSERT INTO aria_acl_bindings "
             "(id, project_id, policy_id, target_type, target_id, "

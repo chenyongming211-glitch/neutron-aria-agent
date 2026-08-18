@@ -43,6 +43,12 @@ from neutron_aria.db.migration.aria_acl_write_invariants import (
 )
 from neutron_aria.db.migration.aria_acl_counters import (
     upgrade_existing_schema as upgrade_acl_counters,
+    upgrade_counter_family_existing_schema,
+)
+from neutron_aria.db.migration.aria_acl_priority_family import (
+    RULE_INDEX_COLUMNS_V2,
+    RULE_INDEX,
+    upgrade_existing_schema as upgrade_acl_priority_family,
 )
 
 
@@ -81,9 +87,19 @@ if ACTION == "upgrade":
         repo.session.get_bind(),
         sa_module=repo.sa,
     )
+    counter_family_changed = upgrade_counter_family_existing_schema(
+        repo.session.get_bind(),
+        sa_module=repo.sa,
+    )
+    priority_family_changed = upgrade_acl_priority_family(
+        repo.session.get_bind(),
+        sa_module=repo.sa,
+    )
     repo.ensure_schema()
     print("write_invariants_upgraded=%s" % write_invariants_changed)
     print("acl_counters_upgraded=%s" % counters_changed)
+    print("acl_counter_family_upgraded=%s" % counter_family_changed)
+    print("acl_priority_family_upgraded=%s" % priority_family_changed)
     print("upgraded=%s" % ",".join(existing_tables(repo)))
 elif ACTION == "check":
     expected = sorted(table.name for table in repo.tables.values())
@@ -92,6 +108,41 @@ elif ACTION == "check":
     print("found=%s" % ",".join(found))
     if missing:
         raise SystemExit("missing aria_acl tables: %s" % ",".join(missing))
+    inspector = repo.sa.inspect(repo.session.get_bind())
+    required_columns = {
+        "aria_acl_port_statuses": (
+            "counters_sampled_at",
+            "counters_policy_packets",
+            "counters_group_map",
+        ),
+        "aria_acl_port_counters": ("ip_family",),
+    }
+    missing_columns = []
+    for table_name, column_names in sorted(required_columns.items()):
+        present = set(
+            column["name"] for column in inspector.get_columns(table_name)
+        )
+        missing_columns.extend(
+            "%s.%s" % (table_name, column_name)
+            for column_name in column_names
+            if column_name not in present
+        )
+    if missing_columns:
+        raise SystemExit(
+            "missing aria_acl columns: %s" % ",".join(missing_columns)
+        )
+    print("schema_columns=pass")
+    rule_indexes = dict(
+        (index["name"], tuple(index.get("column_names") or ()))
+        for index in inspector.get_indexes("aria_acl_rules")
+    )
+    if rule_indexes.get(RULE_INDEX) != RULE_INDEX_COLUMNS_V2:
+        raise SystemExit(
+            "invalid aria_acl priority index: %s" % (
+                rule_indexes.get(RULE_INDEX),
+            )
+        )
+    print("priority_family_index=pass")
 elif ACTION == "downgrade":
     print("dropped=%s" % ",".join(drop_tables(repo)))
 PY
