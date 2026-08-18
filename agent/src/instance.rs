@@ -810,6 +810,26 @@ impl FirewallInstance {
         )
     }
 
+    pub(crate) fn legacy_tc_attachments_unambiguous(&self) -> bool {
+        [
+            (
+                "tc_ingress",
+                aya::programs::tc::TcAttachType::Ingress,
+            ),
+            (
+                "tc_egress",
+                aya::programs::tc::TcAttachType::Egress,
+            ),
+        ]
+        .into_iter()
+        .all(|(program, attach_type)| {
+            matches!(
+                self.observe_legacy_tc_attachment(program, attach_type),
+                Ok(LegacyTcAttachmentObservation::Absent | LegacyTcAttachmentObservation::Owned)
+            )
+        })
+    }
+
     pub(crate) fn detach_fragment_tc_links_strict(&self) -> Result<(), String> {
         let current_tcx_directions: HashSet<&str> = ["tc_ingress", "tc_egress"]
             .into_iter()
@@ -1326,7 +1346,7 @@ impl FirewallInstance {
                 true,
                 self.trace_map_mode,
             );
-            match stale.detach_with_cleanup(false) {
+            match stale.detach_with_cleanup_options(false, true) {
                 Ok(()) => cleaned.push(entry.iface),
                 Err(e) => errors.push(format!("{}:{}", entry.iface, e)),
             }
@@ -2287,7 +2307,11 @@ impl FirewallInstance {
         }
     }
 
-    fn detach_with_cleanup(&self, remove_pin_path: bool) -> Result<(), String> {
+    fn detach_with_cleanup_options(
+        &self,
+        remove_pin_path: bool,
+        cleanup_owned_qdisc: bool,
+    ) -> Result<(), String> {
         let xdp_link_pin = self.xdp_link_pin_path();
         let mut errors = Vec::new();
 
@@ -2323,8 +2347,10 @@ impl FirewallInstance {
             }
         }
 
-        if let Err(error) = self.cleanup_owned_fq_qdisc() {
-            errors.push(error);
+        if cleanup_owned_qdisc {
+            if let Err(error) = self.cleanup_owned_fq_qdisc() {
+                errors.push(error);
+            }
         }
 
         // Clean up pinned runtime dir only for non-shared runtimes or explicit rollback.
@@ -2348,11 +2374,15 @@ impl FirewallInstance {
     /// Detach XDP and TC. Shared managed runtimes keep the shared pin directory
     /// until the last tap is removed by TapRegistry.
     pub fn detach(&self) -> Result<(), String> {
-        self.detach_with_cleanup(!self.shared_runtime)
+        self.detach_with_cleanup_options(!self.shared_runtime, true)
     }
 
     pub(crate) fn detach_orphaned_managed_links(&self) -> Result<(), String> {
-        self.detach_with_cleanup(false)
+        self.detach_with_cleanup_options(false, true)
+    }
+
+    pub(crate) fn detach_orphaned_managed_acl_links(&self) -> Result<(), String> {
+        self.detach_with_cleanup_options(false, false)
     }
 }
 

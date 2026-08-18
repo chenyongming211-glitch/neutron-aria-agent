@@ -1,4 +1,7 @@
-use crate::control_plane::{ControlPlane, ControlPlaneError, MANAGED_SHARED_PIN_NAMESPACE};
+use crate::control_plane::{
+    managed_runtime_identity_missing, ControlPlane, ControlPlaneError,
+    MANAGED_SHARED_PIN_NAMESPACE,
+};
 use crate::instance::FirewallInstance;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -89,15 +92,30 @@ enum CommittedRuntimeRecoveryAction {
 }
 
 fn classify_committed_runtime_recovery(
-    _mode: ManagedAttachMode,
-    _runtime_identity_missing: bool,
-    _preexisting_live_links: bool,
-    _preexisting_tc_ingress: bool,
-    _preexisting_tc_egress: bool,
-    _owned_tc_ingress: bool,
-    _owned_tc_egress: bool,
+    mode: ManagedAttachMode,
+    runtime_identity_missing: bool,
+    preexisting_live_links: bool,
+    preexisting_tc_ingress: bool,
+    preexisting_tc_egress: bool,
+    owned_tc_ingress: bool,
+    owned_tc_egress: bool,
+    tc_identity_unambiguous: bool,
 ) -> CommittedRuntimeRecoveryAction {
-    CommittedRuntimeRecoveryAction::PreserveBlocked
+    let neutron_managed = matches!(mode, ManagedAttachMode::NeutronResyncRequired { .. });
+    let has_tc_link = preexisting_tc_ingress || preexisting_tc_egress;
+    let all_observed_tc_links_are_owned = (!preexisting_tc_ingress || owned_tc_ingress)
+        && (!preexisting_tc_egress || owned_tc_egress);
+    if neutron_managed
+        && runtime_identity_missing
+        && preexisting_live_links
+        && has_tc_link
+        && all_observed_tc_links_are_owned
+        && tc_identity_unambiguous
+    {
+        CommittedRuntimeRecoveryAction::DetachOwnedLinksAndRetry
+    } else {
+        CommittedRuntimeRecoveryAction::PreserveBlocked
+    }
 }
 
 async fn complete_managed_registration_transaction<
@@ -430,7 +448,7 @@ impl TapRegistry {
             .ebpf_path
             .to_str()
             .ok_or_else(|| format!("non-UTF-8 ebpf path: {}", self.ebpf_path.display()))?;
-        let runtime_pin = instance.ensure_runtime_pinned(ebpf_path, known_live_runtime)?;
+        let mut runtime_pin = instance.ensure_runtime_pinned(ebpf_path, known_live_runtime)?;
 
         let prepared = match self
             .control_plane
@@ -439,10 +457,53 @@ impl TapRegistry {
         {
             Ok(prepared) => prepared,
             Err(e) => {
-                if runtime_pin.created_shared_runtime {
-                    self.cleanup_shared_runtime_dir();
+                let health = instance.tc_acl_link_health();
+                let recovery = classify_committed_runtime_recovery(
+                    mode,
+                    managed_runtime_identity_missing(&e),
+                    runtime_pin.preexisting_live_links,
+                    runtime_pin.preexisting_tc_ingress_link,
+                    runtime_pin.preexisting_tc_egress_link,
+                    health.ingress,
+                    health.egress,
+                    instance.legacy_tc_attachments_unambiguous(),
+                );
+                if recovery == CommittedRuntimeRecoveryAction::PreserveBlocked {
+                    if runtime_pin.created_shared_runtime {
+                        self.cleanup_shared_runtime_dir();
+                    }
+                    return Err(format!("control-plane prepare failed: {}", e));
                 }
-                return Err(format!("control-plane prepare failed: {}", e));
+
+                let tap_id = load_orphan_tap_id(&self.base_state_path, iface)
+                    .map_err(|error| format!("owned runtime recovery identity: {}", error))?;
+                instance
+                    .detach_orphaned_managed_acl_links()
+                    .map_err(|error| format!("owned runtime recovery detach: {}", error))?;
+                finish_orphan_cleanup(
+                    &instance,
+                    self.control_plane
+                        .scrub_orphaned_managed_runtime_serialized(iface, tap_id)
+                        .await,
+                )
+                .map_err(|error| format!("owned runtime recovery scrub: {}", error))?;
+                info!(
+                    instance = %iface,
+                    tap_id,
+                    reason = %e,
+                    "detached exact owned legacy TC orphan before one managed reattach retry"
+                );
+
+                runtime_pin = instance.ensure_runtime_pinned(ebpf_path, known_live_runtime)?;
+                self.control_plane
+                    .prepare_managed_registration(iface, &runtime_pin, mode)
+                    .await
+                    .map_err(|retry_error| {
+                        format!(
+                            "control-plane prepare failed after owned runtime recovery: {}",
+                            retry_error
+                        )
+                    })?
             }
         };
 
@@ -774,7 +835,7 @@ mod tests {
         let managed = ManagedAttachMode::NeutronResyncRequired { acl_managed: true };
         assert_eq!(
             classify_committed_runtime_recovery(
-                managed, true, true, true, true, true, true,
+                managed, true, true, true, true, true, true, true,
             ),
             CommittedRuntimeRecoveryAction::DetachOwnedLinksAndRetry
         );
@@ -788,12 +849,16 @@ mod tests {
                 true,
                 true,
                 true,
+                true,
             ),
             classify_committed_runtime_recovery(
-                managed, false, true, true, true, true, true,
+                managed, false, true, true, true, true, true, true,
             ),
             classify_committed_runtime_recovery(
-                managed, true, true, true, true, false, true,
+                managed, true, true, true, true, false, true, true,
+            ),
+            classify_committed_runtime_recovery(
+                managed, true, true, true, true, true, true, false,
             ),
         ] {
             assert_eq!(action, CommittedRuntimeRecoveryAction::PreserveBlocked);

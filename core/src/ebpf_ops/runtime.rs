@@ -10,10 +10,25 @@ pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), St
         .map_err(|e| format!("IFACE_CTX_MAP insert for ifindex {}: {:?}", ifindex, e))
 }
 
-pub fn read_iface_ctx(pin_path: &str, ifindex: u32) -> Result<IfaceCtx, String> {
+pub fn lookup_iface_ctx(pin_path: &str, ifindex: u32) -> Result<Option<IfaceCtx>, String> {
     let map = open_pinned_iface_ctx(pin_path)?;
-    map.get(&ifindex, 0)
-        .map_err(|e| format!("read IFACE_CTX_MAP for ifindex {}: {:?}", ifindex, e))
+    match map.get(&ifindex, 0) {
+        Ok(ctx) => Ok(Some(ctx)),
+        Err(aya::maps::MapError::KeyNotFound) => Ok(None),
+        Err(error) => Err(format!(
+            "read IFACE_CTX_MAP for ifindex {}: {:?}",
+            ifindex, error
+        )),
+    }
+}
+
+pub fn read_iface_ctx(pin_path: &str, ifindex: u32) -> Result<IfaceCtx, String> {
+    lookup_iface_ctx(pin_path, ifindex)?.ok_or_else(|| {
+        format!(
+            "read IFACE_CTX_MAP for ifindex {}: KeyNotFound",
+            ifindex
+        )
+    })
 }
 
 pub fn clear_iface_ctx(pin_path: &str, ifindex: u32) -> Result<(), String> {
@@ -609,19 +624,28 @@ pub fn read_firewall_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig
         .map_err(|e| format!("read FIREWALL_CONFIG: {:?}", e))
 }
 
-pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig, String> {
+pub fn lookup_runtime_config(
+    runtime: TapMapRuntime<'_>,
+) -> Result<Option<FirewallConfig>, String> {
     if runtime.tap_id == TAP_ID_UNASSIGNED {
-        return read_firewall_config(runtime);
+        return read_firewall_config(runtime).map(Some);
     }
 
     let global = read_firewall_config(runtime)?;
 
     let map = open_pinned_tap_config(runtime.pin_path)?;
-    let tap_cfg = map
-        .get(&runtime.tap_id, 0)
-        .map_err(|e| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", runtime.tap_id, e))?;
+    let tap_cfg = match map.get(&runtime.tap_id, 0) {
+        Ok(config) => config,
+        Err(aya::maps::MapError::KeyNotFound) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "read TAP_CONFIG_MAP for tap_id {}: {:?}",
+                runtime.tap_id, error
+            ))
+        }
+    };
 
-    Ok(FirewallConfig {
+    Ok(Some(FirewallConfig {
         conntrack_enabled: tap_cfg.conntrack_enabled,
         monitoring_enabled: tap_cfg.monitoring_enabled,
         num_cpus: global.num_cpus,
@@ -631,5 +655,14 @@ pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig,
         tcprt_enabled: tap_cfg.tcprt_enabled,
         ssl_enabled: global.ssl_enabled,
         acl_active_bank: tap_cfg.acl_active_bank,
+    }))
+}
+
+pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig, String> {
+    lookup_runtime_config(runtime)?.ok_or_else(|| {
+        format!(
+            "read TAP_CONFIG_MAP for tap_id {}: KeyNotFound",
+            runtime.tap_id
+        )
     })
 }

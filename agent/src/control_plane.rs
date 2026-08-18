@@ -20,7 +20,8 @@ use crate::FragmentTrackingSettings;
 use aria_core::common::{TapMapRuntime, IP_FAMILY_V4, IP_FAMILY_V6};
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
-    migrate_state_for_replay, replay_managed_state_to_pinned_maps,
+    lookup_iface_ctx, lookup_runtime_config, migrate_state_for_replay,
+    replay_managed_state_to_pinned_maps,
     validate_managed_pinned_runtime_state, validate_pinned_runtime_state, FqQdiscState,
     GroupProjectionMode, ManagedReplayRoute, ProjectionDrift, RuntimeGateDisposition,
     RuntimeGroupMapEntries, TraceMapMode,
@@ -44,6 +45,12 @@ pub(crate) use standalone_acl::{
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
+const MANAGED_RUNTIME_IDENTITY_MISSING_PREFIX: &str =
+    "managed_runtime_identity_missing:";
+
+pub(crate) fn managed_runtime_identity_missing(error: &str) -> bool {
+    error.starts_with(MANAGED_RUNTIME_IDENTITY_MISSING_PREFIX)
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedAclPublicationMode {
@@ -660,6 +667,7 @@ struct PreexistingRuntimeValidation {
     projection_drift: ProjectionDrift,
     gate_disposition: Option<RuntimeGateDisposition>,
     actual_gate: Option<(bool, bool)>,
+    runtime_identity_missing: bool,
 }
 
 impl PreexistingRuntimeValidation {
@@ -668,6 +676,16 @@ impl PreexistingRuntimeValidation {
             projection_drift: ProjectionDrift::Fatal(error),
             gate_disposition: None,
             actual_gate: None,
+            runtime_identity_missing: false,
+        }
+    }
+
+    fn missing_identity(error: String) -> Self {
+        Self {
+            projection_drift: ProjectionDrift::Fatal(error),
+            gate_disposition: None,
+            actual_gate: None,
+            runtime_identity_missing: true,
         }
     }
 }
@@ -4084,8 +4102,14 @@ impl ControlPlane {
             true,
             self.trace_map_mode(),
         );
-        let iface_ctx = match aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex) {
-            Ok(iface_ctx) => iface_ctx,
+        let iface_ctx = match lookup_iface_ctx(pin_path, ifindex) {
+            Ok(Some(iface_ctx)) => iface_ctx,
+            Ok(None) => {
+                return PreexistingRuntimeValidation::missing_identity(format!(
+                    "preexisting live runtime for {} is missing IFACE_CTX_MAP identity for ifindex {}",
+                    name, ifindex
+                ))
+            }
             Err(error) => return PreexistingRuntimeValidation::fatal(error),
         };
         if iface_ctx.tap_id != tap_id {
@@ -4096,8 +4120,14 @@ impl ControlPlane {
         }
 
         let runtime = TapMapRuntime::new(pin_path, tap_id);
-        let actual = match aria_core::ebpf_ops::read_runtime_config(runtime) {
-            Ok(actual) => actual,
+        let actual = match lookup_runtime_config(runtime) {
+            Ok(Some(actual)) => actual,
+            Ok(None) => {
+                return PreexistingRuntimeValidation::missing_identity(format!(
+                    "preexisting live runtime for {} is missing TAP_CONFIG_MAP identity for tap_id {}",
+                    name, tap_id
+                ))
+            }
             Err(error) => return PreexistingRuntimeValidation::fatal(error),
         };
         let tc_runtime_complete = match preexisting_tc_acl_runtime_is_healthy(
@@ -4174,6 +4204,7 @@ impl ControlPlane {
                 actual.conntrack_enabled != 0,
                 actual.acl_enabled != 0,
             )),
+            runtime_identity_missing: false,
         }
     }
 
@@ -5092,6 +5123,7 @@ impl ControlPlane {
             );
             let actual_gate = preexisting_validation.actual_gate;
             let gate_disposition = preexisting_validation.gate_disposition;
+            let runtime_identity_missing = preexisting_validation.runtime_identity_missing;
             let projection_drift = preexisting_validation.projection_drift;
             let lifecycle_projection_drift = projection_drift.clone();
             preexisting_live_verified = match preexisting_projection_verification(projection_drift)
@@ -5100,6 +5132,15 @@ impl ControlPlane {
                     projection_verified && gate_disposition == Some(RuntimeGateDisposition::Desired)
                 }
                 Err(e) => {
+                    if runtime_identity_missing
+                        && matches!(mode, ManagedAttachMode::NeutronResyncRequired { .. })
+                    {
+                        wal.shutdown().await;
+                        return Err(format!(
+                            "{}{}",
+                            MANAGED_RUNTIME_IDENTITY_MISSING_PREFIX, e
+                        ));
+                    }
                     let transition = actual_gate.map_or(
                         FragmentEpochGateTransition::SemanticChange,
                         |(conntrack, acl)| {
