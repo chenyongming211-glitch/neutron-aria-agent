@@ -2358,7 +2358,11 @@ async fn build_neutron_status_response(
     let pending_generation = runtime.pending_generation;
     let desired_hash = runtime.desired_hash.clone();
     let applied_desired_hash = runtime.applied_desired_hash.clone();
-    let wal_status = runtime.wal_status.clone();
+    let wal_status = if projection.required_action == NeutronStatusRequiredAction::RetrySnapshot {
+        "committed".to_string()
+    } else {
+        runtime.wal_status.clone()
+    };
     let wal_replay_failures = runtime.wal_replay_failures;
     let authority_state = if runtime.authority_state.is_empty() {
         "idle".to_string()
