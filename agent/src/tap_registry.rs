@@ -82,6 +82,24 @@ impl ManagedAttachMode {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CommittedRuntimeRecoveryAction {
+    PreserveBlocked,
+    DetachOwnedLinksAndRetry,
+}
+
+fn classify_committed_runtime_recovery(
+    _mode: ManagedAttachMode,
+    _runtime_identity_missing: bool,
+    _preexisting_live_links: bool,
+    _preexisting_tc_ingress: bool,
+    _preexisting_tc_egress: bool,
+    _owned_tc_ingress: bool,
+    _owned_tc_egress: bool,
+) -> CommittedRuntimeRecoveryAction {
+    CommittedRuntimeRecoveryAction::PreserveBlocked
+}
+
 async fn complete_managed_registration_transaction<
     T,
     E,
@@ -749,6 +767,37 @@ mod tests {
                 "tap-shared".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_owned_legacy_orphan_requests_exact_retry() {
+        let managed = ManagedAttachMode::NeutronResyncRequired { acl_managed: true };
+        assert_eq!(
+            classify_committed_runtime_recovery(
+                managed, true, true, true, true, true, true,
+            ),
+            CommittedRuntimeRecoveryAction::DetachOwnedLinksAndRetry
+        );
+
+        for action in [
+            classify_committed_runtime_recovery(
+                ManagedAttachMode::StandaloneRestoreAfterTcAttach,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
+            classify_committed_runtime_recovery(
+                managed, false, true, true, true, true, true,
+            ),
+            classify_committed_runtime_recovery(
+                managed, true, true, true, true, false, true,
+            ),
+        ] {
+            assert_eq!(action, CommittedRuntimeRecoveryAction::PreserveBlocked);
+        }
     }
 
     #[test]
