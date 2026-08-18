@@ -31,8 +31,11 @@ cat >"${ROOT}/Dockerfile" <<'EOF'
 FROM python:2.7.18-slim-buster
 RUN ln -s /usr/local/bin/python /usr/local/bin/python3 && \
     groupadd -g 42435 neutron && \
-    useradd -u 42435 -g 42435 -d /var/lib/neutron -s /bin/sh neutron
-ENV PYTHONPATH=/usr/lib/python2.7/site-packages
+    useradd -u 42435 -g 42435 -d /var/lib/neutron -s /bin/sh neutron && \
+    printf "%s\n" \
+        "import site" \
+        "site.addsitedir('/usr/lib/python2.7/site-packages')" \
+        > /usr/local/lib/python2.7/site-packages/sitecustomize.py
 EOF
 docker build -t "${FIXTURE_IMAGE}" "${ROOT}" >/dev/null
 
