@@ -723,9 +723,11 @@ for direction in ("ingress", "egress"):
     rendered = json.dumps(link, sort_keys=True).lower()
     if direction not in rendered:
         raise AssertionError((direction, "wrong attach type", link))
+    attach_mode="legacy" if bool(link.get("legacy_tc")) else "tcx"
     evidence[direction] = {
         "ifindex": int(link["ifindex"]),
         "prog_id": int(link["prog_id"]),
+        "attach_mode": attach_mode,
         "attach_type": link.get("attach_type"),
         "legacy_tc": bool(link.get("legacy_tc")),
     }

@@ -1570,11 +1570,13 @@ mod tests {
             crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
         )
         .expect("managed family migration must succeed");
-        assert_eq!(first.rules.len(), 2);
+        assert_eq!(first.rules.len(), 1);
         assert!(first
             .rules
             .iter()
             .all(|rule| rule.ip_family == IP_FAMILY_V4));
+        assert_eq!(first.rules[0].action, 1);
+        assert_eq!(first.rules[0].ports.as_deref(), Some("443"));
         let checkpointed_snapshot = fs::read(format!("{}/state.json", state_path)).unwrap();
         let checkpointed_wal = fs::read(format!("{}/state.wal", state_path)).unwrap();
 
@@ -1583,11 +1585,13 @@ mod tests {
             crate::state::LegacyAclMigrationAuthority::ManagedLegacyIpv4,
         )
         .expect("managed restart must remain usable");
-        assert_eq!(restarted.rules.len(), 2);
+        assert_eq!(restarted.rules.len(), 1);
         assert!(restarted
             .rules
             .iter()
             .all(|rule| rule.ip_family == IP_FAMILY_V4));
+        assert_eq!(restarted.rules[0].action, 1);
+        assert_eq!(restarted.rules[0].ports.as_deref(), Some("443"));
         assert_eq!(
             fs::read(format!("{}/state.json", state_path)).unwrap(),
             checkpointed_snapshot
