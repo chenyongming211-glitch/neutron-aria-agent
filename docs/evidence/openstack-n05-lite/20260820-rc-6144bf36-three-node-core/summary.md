@@ -118,11 +118,13 @@ environment-specific host and port identities:
 Result: **PASS** for exact-candidate installation, API/DB contracts, the
 three-compute IPv4 core matrix, and three-compute ICMPv6 ingress enforcement.
 
-The current-candidate IPv6 TCP/UDP and ND follow-up is recorded in
-`../20260820-rc-6144bf36-ipv6-transport-nd/summary.md`. The following remain
-required before the overall RC can close:
+The current-candidate IPv6 follow-up is recorded in
+`../20260820-rc-6144bf36-ipv6-transport-nd/summary.md` and
+`../20260820-rc-6144bf36-ipv6-egress-fragment-dual-stack/summary.md`. The
+following remain required before the overall RC can close:
 
-- IPv6 egress, extension-header, fragment, and same-port dual-stack cases;
+- malformed IPv6 extension chains, deep fragment isolation, and established
+  conntrack revision invalidation;
 - RPC loss/duplicate/out-of-order/fanout and polling fallback;
 - UDS timeout, malformed request, peer-credential, and double-writer gates;
 - agent/datapath restart, tap recreate, migration, rebuild, shelve, and Kolla

@@ -102,7 +102,8 @@ Result: **PASS** for current-candidate IPv6 TCP/UDP ingress enforcement,
 stateful echo return traffic, explicit ND behavior, rule/policy/binding
 lifecycle, cleanup, and same-compute/cross-compute VLAN east-west paths.
 
-This gate does not close IPv6 egress-rule direction, extension-header,
-fragment, or same-port dual-stack cases for this exact candidate. Those remain
-separate RC tests. L3 agent, DNS, floating IP, and north-south cases are `N/A`
-for this environment rather than product failures.
+IPv6 egress-rule direction, valid extension headers, fragmented UDP, and
+same-port dual-stack behavior for this exact candidate are recorded separately
+in `../20260820-rc-6144bf36-ipv6-egress-fragment-dual-stack/summary.md`. L3
+agent, DNS, floating IP, and north-south cases are `N/A` for this environment
+rather than product failures.
