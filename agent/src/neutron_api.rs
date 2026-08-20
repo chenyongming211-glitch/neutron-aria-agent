@@ -73,6 +73,7 @@ pub(crate) struct NeutronApiState {
     restore_ready: Arc<AtomicBool>,
     wal: Arc<NeutronWal>,
     pending_recovery: Option<PendingNeutronIntent>,
+    applied_port_snapshots: Arc<RwLock<BTreeMap<String, AppliedPortSnapshot>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -90,6 +91,15 @@ struct NeutronRuntimeState {
     wal_status: String,
     recovery_cause: Option<String>,
     wal_replay_failures: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AppliedPortSnapshot {
+    schema_version: Option<u32>,
+    generation: u64,
+    desired_hash: Option<String>,
+    host: Option<String>,
+    port: NeutronPortSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -553,7 +563,23 @@ impl NeutronApiState {
             restore_ready: Arc::new(AtomicBool::new(false)),
             wal,
             pending_recovery,
+            applied_port_snapshots: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    async fn record_successful_snapshot(
+        &self,
+        snapshot: &NeutronSnapshotRequest,
+        scope: &ApplyScope,
+        committed_ports: &BTreeMap<String, ManagedNeutronPort>,
+    ) {
+        let mut cache = self.applied_port_snapshots.write().await;
+        update_applied_port_snapshot_cache(&mut cache, snapshot, scope, committed_ports);
+    }
+
+    async fn evict_applied_port_snapshot(&self, port_id: &str) {
+        let mut cache = self.applied_port_snapshots.write().await;
+        evict_applied_port_snapshot(&mut cache, port_id);
     }
 
     fn mark_restore_ready(&self) {
@@ -679,6 +705,69 @@ impl NeutronApiState {
         }
         info!("retrying committed Neutron runtime after tap return");
         self.reconcile_committed_runtime().await;
+    }
+
+    async fn replay_recreated_port(&self, ifname: &str, new_ifindex: u32) -> bool {
+        let runtime = self.runtime.read().await.clone();
+        let replay = {
+            let cache = self.applied_port_snapshots.read().await;
+            build_recreated_port_replay_request(&runtime, &cache, ifname, new_ifindex)
+        };
+        let Some((port_id, snapshot)) = replay else {
+            return false;
+        };
+        let scope = ApplyScope::SinglePort(port_id.clone());
+        let decision = match accept_neutron_snapshot_submit(self, &snapshot, &scope).await {
+            Ok(decision) => decision,
+            Err(error) => {
+                warn!(
+                    port_id = %port_id,
+                    ifname,
+                    new_ifindex,
+                    code = error.code,
+                    details = %error.details,
+                    "safe tap recreation replay admission failed; full resync remains required"
+                );
+                return false;
+            }
+        };
+        let SnapshotSubmitDecision { response, prepared } = decision;
+        let Some(prepared) = prepared else {
+            return response.status == "noop" || response.status == "ok";
+        };
+        match apply_neutron_snapshot_for_scope(self.clone(), snapshot, scope, prepared).await {
+            Ok(response) if response.status == "ok" => {
+                info!(
+                    port_id = %port_id,
+                    ifname,
+                    new_ifindex,
+                    generation = response.applied_generation,
+                    "tap recreation ACL replay completed"
+                );
+                true
+            }
+            Ok(response) => {
+                warn!(
+                    port_id = %port_id,
+                    ifname,
+                    new_ifindex,
+                    status = %response.status,
+                    "tap recreation ACL replay was not complete; full resync remains required"
+                );
+                false
+            }
+            Err(error) => {
+                warn!(
+                    port_id = %port_id,
+                    ifname,
+                    new_ifindex,
+                    code = error.code,
+                    details = %error.details,
+                    "tap recreation ACL replay failed; full resync remains required"
+                );
+                false
+            }
+        }
     }
 
     async fn recover_incomplete_wal_intent(&self) {
@@ -980,8 +1069,11 @@ impl NeutronApiState {
                 info!(
                     ifname = %ifname,
                     ifindex,
-                    "replacement tap is attached quiesced; requesting committed runtime retry"
+                    "replacement tap is attached quiesced; attempting safe ACL replay"
                 );
+                if self.replay_recreated_port(&ifname, ifindex).await {
+                    return;
+                }
                 self.retry_committed_runtime_after_tap_return().await;
             }
         }
@@ -1198,6 +1290,131 @@ fn project_tap_attachment_identity_loss(
         runtime.wal_status = "tap_attachment_identity_lost".to_string();
     }
     changed
+}
+
+fn applied_port_snapshot_from_committed(
+    snapshot: &NeutronSnapshotRequest,
+    port: &NeutronPortSnapshot,
+    committed_ports: &BTreeMap<String, ManagedNeutronPort>,
+) -> Option<AppliedPortSnapshot> {
+    let committed = committed_ports.get(&port.port_id)?;
+    let manages_acl = normalize_managed_domains(&committed.managed_domains)
+        .iter()
+        .any(|domain| domain == "acl");
+    if !manages_acl
+        || !port.eligible
+        || port.ifname != committed.ifname
+        || port.ifindex.is_none()
+        || port.ifindex != committed.ifindex
+    {
+        return None;
+    }
+    Some(AppliedPortSnapshot {
+        schema_version: snapshot.schema_version,
+        generation: snapshot.generation,
+        desired_hash: snapshot.desired_hash.clone(),
+        host: snapshot.host.clone(),
+        port: port.clone(),
+    })
+}
+
+fn update_applied_port_snapshot_cache(
+    cache: &mut BTreeMap<String, AppliedPortSnapshot>,
+    snapshot: &NeutronSnapshotRequest,
+    scope: &ApplyScope,
+    committed_ports: &BTreeMap<String, ManagedNeutronPort>,
+) {
+    match scope {
+        ApplyScope::FullHost => {
+            cache.clear();
+            for port in &snapshot.ports {
+                if let Some(entry) =
+                    applied_port_snapshot_from_committed(snapshot, port, committed_ports)
+                {
+                    cache.insert(port.port_id.clone(), entry);
+                }
+            }
+        }
+        ApplyScope::SinglePort(port_id) => {
+            cache.remove(port_id);
+            if let Some(port) = snapshot.ports.iter().find(|port| &port.port_id == port_id) {
+                if let Some(entry) =
+                    applied_port_snapshot_from_committed(snapshot, port, committed_ports)
+                {
+                    cache.insert(port_id.clone(), entry);
+                }
+            }
+        }
+    }
+}
+
+fn evict_applied_port_snapshot(
+    cache: &mut BTreeMap<String, AppliedPortSnapshot>,
+    port_id: &str,
+) {
+    cache.remove(port_id);
+}
+
+fn build_recreated_port_replay_request(
+    runtime: &NeutronRuntimeState,
+    cache: &BTreeMap<String, AppliedPortSnapshot>,
+    ifname: &str,
+    new_ifindex: u32,
+) -> Option<(String, NeutronSnapshotRequest)> {
+    if new_ifindex == 0
+        || runtime.pending_generation.is_some()
+        || runtime.authority_state != "runtime_reconcile_requires_full_resync"
+        || runtime.wal_status != "tap_attachment_identity_lost"
+    {
+        return None;
+    }
+    let applied_hash = runtime.applied_desired_hash.as_ref()?;
+    let targets = runtime
+        .ports
+        .values()
+        .filter(|port| {
+            port.ifname == ifname
+                && normalize_managed_domains(&port.managed_domains)
+                    .iter()
+                    .any(|domain| domain == "acl")
+        })
+        .collect::<Vec<_>>();
+    if targets.len() != 1 {
+        return None;
+    }
+    let managed = targets[0];
+    let old_ifindex = managed.ifindex?;
+    if old_ifindex == new_ifindex {
+        return None;
+    }
+    let status = runtime.port_statuses.get(&managed.port_id)?;
+    if status.status != "degraded"
+        || status.reason.as_deref() != Some("tap_attachment_identity_lost")
+    {
+        return None;
+    }
+    let entry = cache.get(&managed.port_id)?;
+    if entry.generation != runtime.applied_generation
+        || entry.desired_hash.as_ref() != Some(applied_hash)
+        || entry.port.port_id != managed.port_id
+        || entry.port.ifname != managed.ifname
+        || entry.port.ifindex != Some(old_ifindex)
+    {
+        return None;
+    }
+
+    let mut port = entry.port.clone();
+    port.ifindex = Some(new_ifindex);
+    Some((
+        managed.port_id.clone(),
+        NeutronSnapshotRequest {
+            schema_version: entry.schema_version,
+            generation: entry.generation,
+            desired_hash: entry.desired_hash.clone(),
+            host: entry.host.clone(),
+            ports: vec![port],
+        },
+    ))
 }
 
 fn neutron_tc_health_projection_blocked(runtime: &NeutronRuntimeState) -> bool {
@@ -3380,10 +3597,16 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
+    let committed_ports = next_runtime.ports.clone();
     publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
         fault_injection::check("neutron.snapshot.after_commit")
     })
     .await;
+    if !has_error {
+        state
+            .record_successful_snapshot(&snapshot, &scope, &committed_ports)
+            .await;
+    }
 
     info!(
         generation = snapshot.generation,
@@ -5102,6 +5325,7 @@ async fn finalize_detached_neutron_delete(
         let mut runtime = state.runtime.write().await;
         *runtime = committed;
     }
+    state.evict_applied_port_snapshot(&port.port_id).await;
     (
         StatusCode::OK,
         NeutronDeleteResponse {
@@ -5214,6 +5438,7 @@ async fn apply_delete_neutron_port(
     let Some(port) = port else {
         let stale_status = previous.port_statuses.get(&port_id).cloned();
         let Some(stale_status) = stale_status else {
+            state.evict_applied_port_snapshot(&port_id).await;
             return (
                 StatusCode::OK,
                 NeutronDeleteResponse {
@@ -5259,6 +5484,7 @@ async fn apply_delete_neutron_port(
             let mut runtime = state.runtime.write().await;
             *runtime = committed;
         }
+        state.evict_applied_port_snapshot(&port_id).await;
         return (
             StatusCode::OK,
             NeutronDeleteResponse {
