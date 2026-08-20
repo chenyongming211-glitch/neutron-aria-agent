@@ -2035,15 +2035,19 @@ fn project_status_v1_domain(
             )
         }
         "degraded" | "unsupported" => {
-            let terminal = domain_name == "acl"
+            let full_resync = status_v1_reason_requires_full_resync(domain.reason.as_deref());
+            let terminal = (domain_name == "acl"
                 && matches!(
                     action,
                     Some(NeutronStatusEffectiveAction::Bypass)
                         | Some(NeutronStatusEffectiveAction::Unchanged)
-                );
+                ))
+                || (domain_name == "attach"
+                    && action == Some(NeutronStatusEffectiveAction::Bypass)
+                    && full_resync);
             let evidence_class = if !terminal {
                 StatusV1EvidenceClass::Blocked
-            } else if status_v1_reason_requires_full_resync(domain.reason.as_deref()) {
+            } else if full_resync {
                 StatusV1EvidenceClass::FullResync
             } else {
                 StatusV1EvidenceClass::TerminalDegraded
