@@ -3598,15 +3598,15 @@ async fn apply_neutron_snapshot_for_scope(
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
     let committed_ports = next_runtime.ports.clone();
-    publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
-        fault_injection::check("neutron.snapshot.after_commit")
-    })
-    .await;
     if !has_error {
         state
             .record_successful_snapshot(&snapshot, &scope, &committed_ports)
             .await;
     }
+    publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
+        fault_injection::check("neutron.snapshot.after_commit")
+    })
+    .await;
 
     info!(
         generation = snapshot.generation,
