@@ -95,6 +95,7 @@ import sys
 from neutron_aria.agent.uds_client import LocalClient
 
 client = LocalClient(sys.argv[1], timeout=3.0)
+client.capabilities()
 status = client.status()
 for port in status.get("managed_ports") or []:
     port_id = port.get("port_id")
@@ -134,6 +135,59 @@ print(len(LocalClient(sys.argv[1], timeout=3.0).status().get("managed_ports") or
 PY
 }
 
+wait_for_production_baseline() {
+    local attempt count
+    docker restart "${SERVICE_NAME}" >/dev/null
+    for attempt in $(seq 1 60); do
+        sleep 1
+        count="$(managed_count 2>/dev/null || echo 0)"
+        if [ "${count}" -ge "${MIN_MANAGED_PORTS}" ]; then
+            echo "production_baseline_managed_ports=${count} attempt=${attempt}"
+            return 0
+        fi
+    done
+    die "production service did not restore MIN_MANAGED_PORTS=${MIN_MANAGED_PORTS}"
+}
+
+wait_for_transaction_recovery() {
+    local attempt
+    for attempt in $(seq 1 90); do
+        if docker_exec_env python - "${SOCKET_PATH}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.uds_client import LocalClient
+
+client = LocalClient(sys.argv[1], timeout=3.0)
+client.capabilities()
+status = client.status()
+ready = (
+    status.get("pending_generation") is None and
+    status.get("wal_status") == "commit_written" and
+    status.get("required_action") in (None, "none") and
+    status.get("authority_state") == "ready"
+)
+print(
+    "transaction_recovery_ready=%s pending=%s wal=%s required_action=%s authority=%s" % (
+        ready,
+        status.get("pending_generation"),
+        status.get("wal_status"),
+        status.get("required_action"),
+        status.get("authority_state"),
+    )
+)
+raise SystemExit(0 if ready else 1)
+PY
+        then
+            echo "transaction_recovery_attempt=${attempt}"
+            return 0
+        fi
+        sleep 1
+    done
+    die "transaction recovery did not become stable before cleanup"
+}
+
 first_managed_port() {
     docker_exec_env python - "${SOCKET_PATH}" <<'PY'
 from __future__ import print_function
@@ -170,7 +224,10 @@ if not last_generation or not last_hash:
 state["pending_generation"] = last_generation
 state["pending_desired_hash"] = last_hash
 state["pending_snapshot_ports"] = int(state.get("last_snapshot_ports") or 0)
-state["pending_projected_port_ids"] = list(state.get("last_projected_port_ids") or [])
+projected = list(state.get("last_projected_port_ids") or [])
+state["pending_projected_port_ids"] = projected
+state["pending_scope"] = "full_host"
+state["pending_affected_port_ids"] = list(projected)
 state["pending_since"] = time.time()
 state["updated_at"] = time.time()
 tmp = "%s.tmp.%s" % (state_file, os.getpid())
@@ -217,7 +274,9 @@ with open(tmp, "w") as fh:
     fh.flush()
     os.fsync(fh.fileno())
 os.rename(tmp, state_file)
-response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
+client = LocalClient(socket_path, timeout=3.0)
+client.capabilities()
+response = client.delete_port(port_id)
 print("datapath_delete_done_then_sigkill port_id=%s response=%s" % (
     port_id,
     json.dumps(response, sort_keys=True),
@@ -299,6 +358,9 @@ prepare_full_resync_config
 echo "Cleaning existing managed ports before crash injection smoke"
 rollback_managed_ports
 
+echo "Waiting for the production service to restore a stable baseline"
+wait_for_production_baseline
+
 echo "Applying baseline full-resync snapshot"
 run_agent_once
 ROLLBACK_ARMED=true
@@ -335,6 +397,7 @@ if [ "${RESTART_DATAPATH}" = "true" ]; then
     check_datapath_status
     run_agent_once
     assert_state_clean
+    wait_for_transaction_recovery
 fi
 
 if [ "${ROLLBACK}" = "true" ]; then

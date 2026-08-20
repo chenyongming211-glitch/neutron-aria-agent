@@ -12,6 +12,14 @@ This is not a new stage gate. The normative integration contracts still live in:
 3. `aria-acl-neutron-extension-product-design.md`
 4. `openstack-deployment-runbook.md`
 
+The system-level target for running Aria beside other independent eBPF
+products is documented separately in
+[`ebpf-multi-product-hook-broker-architecture.md`](ebpf-multi-product-hook-broker-architecture.md).
+That document introduces a neutral host Hook Broker, product manifests,
+cross-product ordering, resource isolation, and hook-level transactions. The
+current `aria-datapath` is an Aria-owned single-product manager with reusable
+foundations; it is not yet that generic multi-product Broker.
+
 ## Product Positioning
 
 Aria should not be positioned as an OVS replacement.
@@ -69,6 +77,27 @@ The long-term `aria-datapath` program architecture should be described as a
 modular eBPF manager. This is a target structure and responsibility model, not
 a claim that the current source tree is already fully split into these exact
 directories.
+
+This structure governs modules inside Aria. It must not be confused with the
+host-level Hook Broker required when two independent products share one XDP or
+TC hook. Internal Aria module ordering can later use the reserved tail-call
+pipeline; external product coexistence additionally needs product identity,
+registration manifests, permission boundaries, resource budgets, and a
+neutral hook owner.
+
+The adopted model follows the proven separation visible in Cilium, Calico,
+Tetragon, libxdp, and bpfman:
+
+- `aria-datapath` first becomes a well-bounded Aria Product Manager;
+- Aria modules use an internal fixed-stage ABI and are not third-party plugins;
+- port lifecycle converges through discovered, eligible, preparing, applying,
+  ready, degraded, recovering, deleting, and detached states;
+- policy, administration, observability, and future Broker APIs stay separate;
+- a neutral Host Hook Broker is extracted only when independent products are
+  an approved delivery target.
+
+The detailed target and source-project trade-offs are normative in
+[`ebpf-multi-product-hook-broker-architecture.md`](ebpf-multi-product-hook-broker-architecture.md).
 
 ```text
 aria-datapath
@@ -274,7 +303,7 @@ These boundaries must be reflected in product and design material.
    | ACL Semantics | Current State |
    | --- | --- |
    | IPv4 CIDR match | Supported. |
-   | IPv6 match | Not supported by the current Neutron ACL translator. |
+   | IPv6 match | Supported by the current API, translator, and datapath behind `ipv6_acl_enabled`; three-compute target-kernel evidence exists, while the packaged default remains disabled pending release enablement. |
    | Destination TCP/UDP port/range | Supported through current translator constraints. |
    | Source port match | Not supported by the current translator. |
    | `default_action=allow` | Supported. |

@@ -68,6 +68,16 @@ sanitize_point() {
 }
 
 docker_agent_exec() {
+    if [ "${DIRECT_SNAPSHOT_MODE}" = "true" ]; then
+        if [ "$1" = "python" ]; then
+            shift
+            PYTHONPATH="${REPO_ROOT}/openstack/neutron_aria${PYTHONPATH:+:${PYTHONPATH}}" \
+                "${PYTHON_BIN:-python3}" "$@"
+            return
+        fi
+        "$@"
+        return
+    fi
     docker exec -i -u "${EXEC_USER}" "${SERVICE_NAME}" "$@"
 }
 

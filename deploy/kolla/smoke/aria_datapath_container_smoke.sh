@@ -93,7 +93,7 @@ if name == "capabilities":
     if "peer_auth_policy" in payload:
         assert payload.get("peer_auth_policy"), payload
     if "capability_hash" in payload:
-        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-4", payload
+        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-6", payload
 elif name == "initial_status":
     assert payload.get("managed_ports") == [], payload
     if os.environ.get("REQUIRE_NO_ACTIVE_INSTANCES") == "true":
