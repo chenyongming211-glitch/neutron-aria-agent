@@ -1002,12 +1002,18 @@ def canonical(value):
         return {key:canonical(value[key]) for key in sorted(value)}
     return value
 
-def target_identity(status):
+def target_port_and_status(status):
     ports=[row for row in status.get("managed_ports") or [] if row.get("port_id")==port_id]
     statuses=[row for row in status.get("port_statuses") or [] if row.get("port_id")==port_id]
     assert len(ports)==1,(port_id,status)
+    assert len(statuses)==1,(port_id,status)
     assert ports[0].get("ifname")==ifname,ports
-    return canonical({"port":ports[0],"port_statuses":statuses})
+    return ports[0],statuses[0]
+
+def domain(row,name):
+    domains=[item for item in row.get("domains") or [] if item.get("domain")==name]
+    assert len(domains)==1,(name,row)
+    return domains[0]
 
 def committed_identity(path):
     committed=None
@@ -1046,7 +1052,30 @@ assert os.environ["EXPECTED_ERROR"] in str(body.get("error") or ""),response
 
 before_status=load(before,"status.json")
 after_status=load(after,"status.json")
-assert target_identity(before_status)==target_identity(after_status),(before_status,after_status)
+before_port,before_row=target_port_and_status(before_status)
+after_port,after_row=target_port_and_status(after_status)
+before_acl=domain(before_row,"acl")
+after_acl=domain(after_row,"acl")
+assert canonical(before_port)==canonical(after_port),(before_port,after_port)
+assert before_row.get("status")=="ready",before_row
+assert before_acl.get("status")=="ready",before_acl
+assert before_acl.get("effective_action")=="enforce",before_acl
+assert after_row.get("status")=="blocked",after_row
+assert after_row.get("reason"),after_row
+assert after_row.get("desired_hash")==before_row.get("desired_hash"),(before_row,after_row)
+assert after_row.get("desired_hash")==after_status.get("applied_desired_hash"),after_status
+assert int(after_row.get("generation"))==int(after_status.get("applied_generation")),after_status
+assert canonical(after_row.get("managed_domains") or [])==canonical(before_row.get("managed_domains") or []),(before_row,after_row)
+assert after_acl.get("status")=="blocked",after_acl
+assert after_acl.get("effective_action")=="bypass",after_acl
+assert not (after_row.get("status")=="ready" and after_acl.get("effective_action")=="enforce"),after_row
+assert after_status.get("transaction_state")=="blocked",after_status
+assert after_status.get("overall_readiness")=="blocked",after_status
+assert after_status.get("required_action")=="operator",after_status
+assert after_status.get("authority_state")=="blocked_recovery_required",after_status
+assert after_status.get("desired_hash") is None,after_status
+assert after_status.get("pending_generation") is not None,after_status
+assert after_status.get("applied_desired_hash")==before_status.get("applied_desired_hash"),(before_status,after_status)
 before_durable,before_entries=committed_identity(os.path.join(before,"neutron-snapshot.wal"))
 after_durable,after_entries=committed_identity(os.path.join(after,"neutron-snapshot.wal"))
 assert before_durable==after_durable,(before_durable,after_durable)
@@ -1087,7 +1116,8 @@ else:
 print(json.dumps({"fixture":os.environ["FIXTURE"],"detached":False,
                   "links_attached":True,"gate_quiesced":True,
                   "owned_projection":after_owned,"durable_identity_equal":True,
-                  "managed_identity_equal":True,"publication_equal":os.environ["REQUIRE_EQUAL"]=="true"},
+                  "managed_port_identity_equal":True,"blocked_status_visible":True,
+                  "publication_equal":os.environ["REQUIRE_EQUAL"]=="true"},
                  sort_keys=True))
 PY
 }

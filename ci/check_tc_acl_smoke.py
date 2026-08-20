@@ -167,6 +167,10 @@ def main():
         'DIRECT_SNAPSHOT_MODE}" = "true" ] && [ "${body_rc}" -ne 0',
         'DATAPATH_PIN_PATH="${DATAPATH_PIN_PATH:-}"',
         'DATAPATH_LISTEN_ADDR="${DATAPATH_LISTEN_ADDR:-}"',
+        "def target_port_and_status(status):",
+        'assert after_row.get("status")=="blocked"',
+        'assert after_acl.get("effective_action")=="bypass"',
+        '"blocked_status_visible":True',
     )
     isolated_transaction_missing = [
         term for term in isolated_transaction_required
