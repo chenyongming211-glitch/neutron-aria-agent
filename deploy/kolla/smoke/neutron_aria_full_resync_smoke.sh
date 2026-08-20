@@ -394,7 +394,8 @@ if [ "${ACL_SOURCE}" = "neutron" ]; then
         "${HOST_FQDN}" \
         "${EXPECTED_ACL_STATUS}" \
         "${EXPECTED_ACL_RUNTIME_STATUS}" \
-        "${EXPECTED_ACL_EFFECTIVE_ACTION}" <<'PY'
+        "${EXPECTED_ACL_EFFECTIVE_ACTION}" \
+        "${EXPECTED_PORT_ID}" <<'PY'
 from __future__ import print_function
 
 import sys
@@ -407,12 +408,20 @@ host = sys.argv[2]
 expected_status = sys.argv[3]
 expected_runtime_status = sys.argv[4]
 expected_effective_action = sys.argv[5]
+expected_port_id = sys.argv[6]
 runtime = LocalClient(socket_path, timeout=3.0).status()
 managed = runtime.get("managed_ports") or []
 port_ids = sorted([
     port.get("port_id") for port in managed
     if port.get("port_id")
 ])
+if expected_port_id:
+    if expected_port_id not in port_ids:
+        raise SystemExit(
+            "expected managed port missing from runtime status: %s" %
+            expected_port_id
+        )
+    port_ids = [expected_port_id]
 generation = runtime.get("applied_generation") or runtime.get("generation")
 
 api = build_aria_acl_client_from_env()

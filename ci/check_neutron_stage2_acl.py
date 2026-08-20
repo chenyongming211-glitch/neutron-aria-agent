@@ -217,6 +217,8 @@ def check_production_acl_smoke():
         "last_reported_at",
         "runtime_status",
         "stale",
+        "expected_port_id = sys.argv[6]",
+        "port_ids = [expected_port_id]",
     ):
         if term not in smoke and term not in full_resync_smoke:
             raise SystemExit("ERROR: production aria_acl smoke missing %s" % term)
