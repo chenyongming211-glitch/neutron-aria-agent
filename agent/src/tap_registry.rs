@@ -1,13 +1,13 @@
 use crate::control_plane::{
     managed_runtime_identity_missing, ControlPlane, ControlPlaneError,
-    MANAGED_SHARED_PIN_NAMESPACE,
+    NeutronPortAuthority, MANAGED_SHARED_PIN_NAMESPACE,
 };
 use crate::instance::FirewallInstance;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{info, warn};
 
 fn orphaned_managed_ifaces(
@@ -68,6 +68,29 @@ pub struct RuntimeReconcileResult {
 pub enum ManagedAttachMode {
     StandaloneRestoreAfterTcAttach,
     NeutronResyncRequired { acl_managed: bool },
+}
+
+fn managed_attach_mode_for_link_event(
+    authority: Option<&NeutronPortAuthority>,
+) -> ManagedAttachMode {
+    match authority {
+        Some(authority) => ManagedAttachMode::NeutronResyncRequired {
+            acl_managed: authority.managed_domains.contains("acl"),
+        },
+        None => ManagedAttachMode::StandaloneRestoreAfterTcAttach,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TapLifecycleEvent {
+    Deleted {
+        ifname: String,
+        ifindex: Option<u32>,
+    },
+    Ready {
+        ifname: String,
+        ifindex: u32,
+    },
 }
 
 impl ManagedAttachMode {
@@ -153,6 +176,7 @@ pub struct TapRegistry {
     pub iface_pattern: Regex,
     pub max_port_policies: u32,
     control_plane: Arc<ControlPlane>,
+    lifecycle_tx: broadcast::Sender<TapLifecycleEvent>,
 }
 
 impl TapRegistry {
@@ -164,6 +188,7 @@ impl TapRegistry {
         max_port_policies: u32,
         control_plane: Arc<ControlPlane>,
     ) -> Self {
+        let (lifecycle_tx, _) = broadcast::channel(256);
         Self {
             instances: RwLock::new(HashMap::new()),
             iface_locks: RwLock::new(HashMap::new()),
@@ -173,7 +198,16 @@ impl TapRegistry {
             iface_pattern,
             max_port_policies,
             control_plane,
+            lifecycle_tx,
         }
+    }
+
+    pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<TapLifecycleEvent> {
+        self.lifecycle_tx.subscribe()
+    }
+
+    fn publish_lifecycle(&self, event: TapLifecycleEvent) {
+        let _ = self.lifecycle_tx.send(event);
     }
 
     /// Get or create the per-iface mutex for serializing operations
@@ -367,8 +401,12 @@ impl TapRegistry {
 
     /// Attach XDP firewall to a tap interface. Idempotent: skips if already attached.
     pub async fn attach(&self, iface: &str) -> Result<(), String> {
-        self.attach_with_mode(iface, ManagedAttachMode::StandaloneRestoreAfterTcAttach)
-            .await
+        let authority = self.control_plane.get_neutron_port_authority(iface).await;
+        self.attach_with_mode(
+            iface,
+            managed_attach_mode_for_link_event(authority.as_ref()),
+        )
+        .await
     }
 
     pub async fn attach_neutron(&self, iface: &str, acl_managed: bool) -> Result<(), String> {
@@ -632,8 +670,11 @@ impl TapRegistry {
         .await
     }
 
-    /// Detach XDP firewall from a tap interface.
-    pub async fn detach(&self, iface: &str) -> Result<(), String> {
+    async fn detach_with_authority_policy(
+        &self,
+        iface: &str,
+        preserve_neutron_authority: bool,
+    ) -> Result<(), String> {
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
         let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
@@ -660,7 +701,13 @@ impl TapRegistry {
             instances.remove(iface);
         }
 
-        self.control_plane.unregister_instance(iface).await;
+        if preserve_neutron_authority {
+            self.control_plane
+                .unregister_instance_after_link_loss(iface)
+                .await;
+        } else {
+            self.control_plane.unregister_instance(iface).await;
+        }
 
         let should_cleanup_shared_runtime = {
             let instances = self.instances.read().await;
@@ -675,6 +722,42 @@ impl TapRegistry {
         let mut locks = self.iface_locks.write().await;
         locks.remove(iface);
 
+        Ok(())
+    }
+
+    /// Explicit detach removes both runtime and Neutron ownership.
+    pub async fn detach(&self, iface: &str) -> Result<(), String> {
+        self.detach_with_authority_policy(iface, false).await
+    }
+
+    /// Physical link loss preserves Neutron ownership for the replacement tap.
+    pub async fn link_deleted(&self, iface: &str, ifindex: Option<u32>) -> Result<(), String> {
+        self.publish_lifecycle(TapLifecycleEvent::Deleted {
+            ifname: iface.to_string(),
+            ifindex,
+        });
+        self.detach_with_authority_policy(iface, true).await
+    }
+
+    /// Attach a new Linux link according to its retained authority and publish
+    /// readiness only after its nonzero replacement ifindex is observable.
+    pub async fn link_ready(&self, iface: &str) -> Result<(), String> {
+        self.attach(iface).await?;
+        let ifindex_path = std::path::Path::new("/sys/class/net")
+            .join(iface)
+            .join("ifindex");
+        let ifindex = std::fs::read_to_string(&ifindex_path)
+            .map_err(|error| format!("read replacement ifindex for {}: {}", iface, error))?
+            .trim()
+            .parse::<u32>()
+            .map_err(|error| format!("parse replacement ifindex for {}: {}", iface, error))?;
+        if ifindex == 0 {
+            return Err(format!("replacement ifindex for {} is zero", iface));
+        }
+        self.publish_lifecycle(TapLifecycleEvent::Ready {
+            ifname: iface.to_string(),
+            ifindex,
+        });
         Ok(())
     }
 
@@ -733,7 +816,7 @@ mod tests {
     use crate::control_plane::{
         managed_acl_ownership_after_detach, managed_acl_promotion_action,
         managed_neutron_authority_confirmation_allowed, ManagedAclPromotionAction,
-        ManagedAclPublicationMode, ManagedProjectionHealth, NeutronPortAuthority,
+        ManagedAclPublicationMode, ManagedProjectionHealth,
     };
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;

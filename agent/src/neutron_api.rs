@@ -42,7 +42,7 @@ use crate::control_plane::{
 use crate::fault_injection;
 use crate::neutron_acl_ip::{acl_protocol, AclCidr, IpFamily};
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
-use crate::tap_registry::{RuntimeReconcileResult, TapRegistry};
+use crate::tap_registry::{RuntimeReconcileResult, TapLifecycleEvent, TapRegistry};
 
 const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
@@ -946,6 +946,46 @@ impl NeutronApiState {
         let mut runtime = self.runtime.write().await;
         *runtime = next_runtime;
     }
+
+    async fn handle_tap_lifecycle_event(&self, event: TapLifecycleEvent) {
+        match event {
+            TapLifecycleEvent::Deleted { ifname, ifindex } => {
+                let _guard = self.apply_lock.lock().await;
+                let mut next_runtime = {
+                    let runtime = self.runtime.read().await;
+                    runtime.clone()
+                };
+                if !project_tap_attachment_identity_loss(
+                    &mut next_runtime,
+                    &ifname,
+                    ifindex,
+                ) {
+                    return;
+                }
+                if let Err(error) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+                    next_runtime.authority_state =
+                        "wal_runtime_reconcile_commit_failed".to_string();
+                    next_runtime.wal_status = "commit_failed".to_string();
+                    warn!(
+                        ifname = %ifname,
+                        ifindex = ?ifindex,
+                        error = %error,
+                        "failed to persist tap attachment identity loss; publishing degraded RAM state"
+                    );
+                }
+                let mut runtime = self.runtime.write().await;
+                *runtime = next_runtime;
+            }
+            TapLifecycleEvent::Ready { ifname, ifindex } => {
+                info!(
+                    ifname = %ifname,
+                    ifindex,
+                    "replacement tap is attached quiesced; requesting committed runtime retry"
+                );
+                self.retry_committed_runtime_after_tap_return().await;
+            }
+        }
+    }
 }
 
 impl NeutronRuntimeState {
@@ -1081,6 +1121,85 @@ fn project_tc_acl_link_loss(
     changed
 }
 
+fn project_tap_attachment_identity_loss(
+    runtime: &mut NeutronRuntimeState,
+    ifname: &str,
+    deleted_ifindex: Option<u32>,
+) -> bool {
+    if neutron_tc_health_projection_blocked(runtime) {
+        return false;
+    }
+
+    let target_port_ids = runtime
+        .ports
+        .values()
+        .filter(|port| {
+            port.ifname == ifname
+                && normalize_managed_domains(&port.managed_domains)
+                    .iter()
+                    .any(|domain| domain == "acl")
+                && match (deleted_ifindex, port.ifindex) {
+                    (Some(deleted), Some(committed)) => deleted == committed,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+        })
+        .map(|port| port.port_id.clone())
+        .collect::<Vec<_>>();
+    if target_port_ids.is_empty() {
+        return false;
+    }
+
+    let applied_generation = runtime.applied_generation;
+    let applied_desired_hash = runtime.applied_desired_hash.clone();
+    let mut changed = false;
+    for port_id in target_port_ids {
+        let Some(port) = runtime.ports.get_mut(&port_id) else {
+            continue;
+        };
+        port.domain_desired_hashes.remove("acl");
+        let mut status = runtime.port_statuses.remove(&port_id).unwrap_or_else(|| {
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                applied_generation,
+                applied_desired_hash.clone(),
+                port.managed_domains.clone(),
+                "degraded",
+                None,
+                Vec::new(),
+            )
+        });
+        let mut domains = status
+            .domains
+            .drain(..)
+            .map(|domain| (domain.domain.clone(), domain))
+            .collect::<BTreeMap<_, _>>();
+        for domain in ["acl", "attach"] {
+            domains.insert(
+                domain.to_string(),
+                domain_status_with_action(
+                    domain,
+                    "degraded",
+                    Some("tap_attachment_identity_lost".to_string()),
+                    Some("bypass".to_string()),
+                ),
+            );
+        }
+        status.status = "degraded".to_string();
+        status.reason = Some("tap_attachment_identity_lost".to_string());
+        status.domains = domains.into_values().collect();
+        runtime.port_statuses.insert(port_id, status);
+        changed = true;
+    }
+
+    if changed {
+        runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+        runtime.wal_status = "tap_attachment_identity_lost".to_string();
+    }
+    changed
+}
+
 fn neutron_tc_health_projection_blocked(runtime: &NeutronRuntimeState) -> bool {
     runtime.pending_generation.is_some()
         || matches!(
@@ -1106,6 +1225,7 @@ fn neutron_tc_health_projection_blocked(runtime: &NeutronRuntimeState) -> bool {
 pub(crate) struct NeutronBackgroundTasks {
     restore_task: tokio::task::JoinHandle<()>,
     health_task: tokio::task::JoinHandle<()>,
+    lifecycle_task: tokio::task::JoinHandle<()>,
 }
 
 impl NeutronBackgroundTasks {
@@ -1113,9 +1233,11 @@ impl NeutronBackgroundTasks {
         let Self {
             restore_task,
             health_task,
+            lifecycle_task,
         } = self;
         restore_task.abort();
         health_task.abort();
+        lifecycle_task.abort();
         if let Err(error) = restore_task.await {
             if !error.is_cancelled() {
                 warn!(error = %error, "Neutron restore task failed during shutdown");
@@ -1124,6 +1246,11 @@ impl NeutronBackgroundTasks {
         if let Err(error) = health_task.await {
             if !error.is_cancelled() {
                 warn!(error = %error, "Neutron health task failed during shutdown");
+            }
+        }
+        if let Err(error) = lifecycle_task.await {
+            if !error.is_cancelled() {
+                warn!(error = %error, "Neutron tap lifecycle task failed during shutdown");
             }
         }
     }
@@ -1228,6 +1355,7 @@ pub(crate) fn build_router(
     control_plane: Arc<ControlPlane>,
     ovs_bridge: String,
 ) -> NeutronRouterRuntime {
+    let mut lifecycle_rx = registry.subscribe_lifecycle();
     let state = NeutronApiState::new(registry, control_plane, ovs_bridge);
     let restore_state = state.clone();
     let restore_task = tokio::spawn(async move {
@@ -1250,6 +1378,21 @@ pub(crate) fn build_router(
                 .retry_committed_runtime_after_tap_return()
                 .await;
             health_state.project_tc_acl_health().await;
+        }
+    });
+    let lifecycle_state = state.clone();
+    let lifecycle_task = tokio::spawn(async move {
+        loop {
+            match lifecycle_rx.recv().await {
+                Ok(event) => lifecycle_state.handle_tap_lifecycle_event(event).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        skipped,
+                        "Neutron tap lifecycle receiver lagged; health reconcile remains active"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
     let router = Router::new()
@@ -1282,6 +1425,7 @@ pub(crate) fn build_router(
         background: NeutronBackgroundTasks {
             restore_task,
             health_task,
+            lifecycle_task,
         },
     }
 }

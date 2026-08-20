@@ -85,7 +85,7 @@ async fn reconcile(registry: &Arc<TapRegistry>) {
     for iface in &existing {
         if !managed.contains(iface) {
             info!(instance = %iface, "reconcile detected unmanaged tap");
-            if let Err(e) = registry.attach(iface).await {
+            if let Err(e) = registry.link_ready(iface).await {
                 warn!(instance = %iface, error = %e, "reconcile failed to attach interface");
             }
         }
@@ -95,7 +95,7 @@ async fn reconcile(registry: &Arc<TapRegistry>) {
     for iface in &managed {
         if !existing.contains(iface) {
             info!(instance = %iface, "reconcile detected disappeared interface");
-            if let Err(e) = registry.detach(iface).await {
+            if let Err(e) = registry.link_deleted(iface, None).await {
                 warn!(instance = %iface, error = %e, "reconcile failed to detach interface");
             }
         }
@@ -124,7 +124,7 @@ pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
 
     // 3. Attach all existing tap interfaces
     for iface in &existing {
-        if let Err(e) = registry.attach(iface).await {
+        if let Err(e) = registry.link_ready(iface).await {
             warn!(instance = %iface, error = %e, "startup attach failed");
         }
     }
@@ -191,7 +191,7 @@ async fn handle_netlink_message(
                     info!(instance = %name, "received netlink NewLink");
                     // Small delay to let the interface fully initialize
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    if let Err(e) = registry.attach(&name).await {
+                    if let Err(e) = registry.link_ready(&name).await {
                         warn!(instance = %name, error = %e, "failed to attach interface after NewLink");
                     }
                 }
@@ -209,7 +209,7 @@ async fn handle_netlink_message(
             if let Some(name) = iface_name {
                 if registry.matches_pattern(&name) {
                     info!(instance = %name, "received netlink DelLink");
-                    if let Err(e) = registry.detach(&name).await {
+                    if let Err(e) = registry.link_deleted(&name, Some(msg.header.index)).await {
                         warn!(instance = %name, error = %e, "failed to detach interface after DelLink");
                     }
                 }

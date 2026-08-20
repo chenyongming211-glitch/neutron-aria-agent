@@ -5737,8 +5737,11 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Unregister an instance (called when TapRegistry detaches)
-    pub async fn unregister_instance(&self, name: &str) {
+    async fn unregister_instance_with_authority_policy(
+        &self,
+        name: &str,
+        preserve_neutron_authority: bool,
+    ) {
         // Compact before removing
         self.compact_instance(name).await;
         let removed = {
@@ -5790,7 +5793,22 @@ impl ControlPlane {
         } else {
             info!(instance = %name, "unregistered instance");
         }
-        self.clear_neutron_port_authority(name).await;
+        if !preserve_neutron_authority {
+            self.clear_neutron_port_authority(name).await;
+        }
+    }
+
+    /// Unregister an instance after an explicit ownership detach.
+    pub async fn unregister_instance(&self, name: &str) {
+        self.unregister_instance_with_authority_policy(name, false)
+            .await;
+    }
+
+    /// Unregister runtime links after the Linux interface disappeared while
+    /// retaining Neutron ownership for an authority-aware replacement attach.
+    pub(crate) async fn unregister_instance_after_link_loss(&self, name: &str) {
+        self.unregister_instance_with_authority_policy(name, true)
+            .await;
     }
 
     pub(crate) async fn scrub_orphaned_managed_runtime_serialized(
