@@ -1218,7 +1218,10 @@ fn project_tap_attachment_identity_loss(
     ifname: &str,
     deleted_ifindex: Option<u32>,
 ) -> bool {
-    if neutron_tc_health_projection_blocked(runtime) {
+    let continuing_tap_loss_projection = runtime.pending_generation.is_none()
+        && runtime.authority_state == "runtime_reconcile_requires_full_resync"
+        && runtime.wal_status == "tap_attachment_identity_lost";
+    if neutron_tc_health_projection_blocked(runtime) && !continuing_tap_loss_projection {
         return false;
     }
 
@@ -1235,6 +1238,9 @@ fn project_tap_attachment_identity_loss(
                     (Some(_), None) => false,
                     (None, _) => true,
                 }
+                && runtime.port_statuses.get(&port.port_id).is_none_or(|status| {
+                    status.reason.as_deref() != Some("tap_attachment_identity_lost")
+                })
         })
         .map(|port| port.port_id.clone())
         .collect::<Vec<_>>();
@@ -1361,10 +1367,14 @@ fn build_recreated_port_replay_request(
     ifname: &str,
     new_ifindex: u32,
 ) -> Option<(String, NeutronSnapshotRequest)> {
+    let identity_loss_state = (runtime.authority_state
+        == "runtime_reconcile_requires_full_resync"
+        && runtime.wal_status == "tap_attachment_identity_lost")
+        || (runtime.authority_state == "ready" && runtime.wal_status == "commit_written");
     if new_ifindex == 0
         || runtime.pending_generation.is_some()
-        || runtime.authority_state != "runtime_reconcile_requires_full_resync"
-        || runtime.wal_status != "tap_attachment_identity_lost"
+        || !identity_loss_state
+        || runtime.desired_hash != runtime.applied_desired_hash
     {
         return None;
     }
@@ -8093,6 +8103,120 @@ mod tests {
             52,
         )
         .is_none());
+    }
+
+    #[test]
+    fn simultaneous_tap_losses_invalidate_each_acl_port_without_false_ready() {
+        let mut first = managed_with_ifindex("first-port", "tap-first", 51);
+        first.managed_domains = vec!["acl".to_string()];
+        let mut second = managed_with_ifindex("second-port", "tap-second", 52);
+        second.managed_domains = vec!["acl".to_string()];
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            applied_desired_hash: Some("host-hash".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ports: BTreeMap::from([
+                (first.port_id.clone(), first.clone()),
+                (second.port_id.clone(), second.clone()),
+            ]),
+            port_statuses: BTreeMap::from([
+                (
+                    first.port_id.clone(),
+                    ready_status(&first.port_id, &first.ifname, 42),
+                ),
+                (
+                    second.port_id.clone(),
+                    ready_status(&second.port_id, &second.ifname, 42),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        assert!(project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-first",
+            Some(51),
+        ));
+        assert!(project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-second",
+            Some(52),
+        ));
+
+        for port_id in ["first-port", "second-port"] {
+            let status = runtime.port_statuses.get(port_id).unwrap();
+            assert_eq!(status.status, "degraded");
+            assert_eq!(
+                status.reason.as_deref(),
+                Some("tap_attachment_identity_lost")
+            );
+        }
+    }
+
+    #[test]
+    fn remaining_lost_tap_can_replay_after_another_port_recovers() {
+        let mut snapshot_port = port("second-port", "tap-second", true);
+        snapshot_port.ifindex = Some(52);
+        snapshot_port.managed_domains = vec!["acl".to_string()];
+        snapshot_port.acl = Some(ready_acl(Vec::new()));
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: Some(2),
+            generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            host: Some("compute-1".to_string()),
+            ports: vec![snapshot_port],
+        };
+        let mut managed_port = managed_with_ifindex("second-port", "tap-second", 52);
+        managed_port.managed_domains = vec!["acl".to_string()];
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            applied_desired_hash: Some("host-hash".to_string()),
+            authority_state: "runtime_reconcile_requires_full_resync".to_string(),
+            wal_status: "tap_attachment_identity_lost".to_string(),
+            ports: BTreeMap::from([("second-port".to_string(), managed_port)]),
+            port_statuses: BTreeMap::from([(
+                "second-port".to_string(),
+                port_runtime_status(
+                    "second-port",
+                    "tap-second",
+                    42,
+                    Some("host-hash".to_string()),
+                    vec!["acl".to_string()],
+                    "degraded",
+                    Some("tap_attachment_identity_lost".to_string()),
+                    vec![domain_status_with_action(
+                        "acl",
+                        "degraded",
+                        Some("tap_attachment_identity_lost".to_string()),
+                        Some("bypass".to_string()),
+                    )],
+                ),
+            )]),
+            ..Default::default()
+        };
+        let mut cache = BTreeMap::new();
+        update_applied_port_snapshot_cache(
+            &mut cache,
+            &snapshot,
+            &ApplyScope::FullHost,
+            &runtime.ports,
+        );
+
+        runtime.authority_state = "ready".to_string();
+        runtime.wal_status = "commit_written".to_string();
+
+        assert!(build_recreated_port_replay_request(
+            &runtime,
+            &cache,
+            "tap-second",
+            72,
+        )
+        .is_some());
     }
 
     fn tc_health_projection_fixture(
