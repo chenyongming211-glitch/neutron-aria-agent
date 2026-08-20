@@ -175,6 +175,9 @@ def main():
         'assert after_entries[-2].get("type")=="delete_intent"',
         'assert after_entries[-1].get("type")=="snapshot_commit"',
         '"blocked_checkpoint_visible":True',
+        'restart_datapath_clean_guarded "${label}-startup-recovery" target',
+        'assert body.get("status")=="not_found"',
+        '"startup_forward_recovery":True',
     )
     isolated_transaction_missing = [
         term for term in isolated_transaction_required

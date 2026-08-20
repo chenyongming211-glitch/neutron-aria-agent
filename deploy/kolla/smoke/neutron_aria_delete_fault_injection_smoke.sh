@@ -1218,8 +1218,8 @@ def load(name):
 response=load("response.json")
 body=response.get("body") or {}
 assert response.get("http_status")==200,response
-assert body.get("status")=="ok",response
-assert body.get("detached") is True,response
+assert body.get("status")=="not_found",response
+assert body.get("detached") is False,response
 status=load("status.json")
 assert not any(row.get("port_id")==port_id for row in status.get("managed_ports") or []),status
 assert ifname not in set(status.get("active_instances") or []),status
@@ -1333,7 +1333,8 @@ for resource in ("groups","policies"):
     assert owner_prefix not in payload,(resource,payload)
 state=load("state-observation.json")
 assert owner_prefix not in (state.get("content") or ""),state
-print(json.dumps({"detached":True,"managed_runtime_absent":True,
+print(json.dumps({"detached":True,"startup_forward_recovery":True,
+                  "idempotent_delete":"not_found","managed_runtime_absent":True,
                   "owned_projection_absent":True,"pinned_tc_links_absent":True,
                   "tap_id":tap_id},sort_keys=True))
 PY
@@ -1360,6 +1361,9 @@ import json,sys
 print(json.load(open(sys.argv[1],encoding="utf-8"))["tap_id"])
 PY
     )"
+    restart_datapath_clean_guarded "${label}-startup-recovery" target \
+        "${WORK_DIR}/${label}-startup-recovery.log"
+    wait_for_uds
     set +e
     delete_target_port_evidence "${retry_directory}"
     retry_rc=$?
