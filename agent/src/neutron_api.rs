@@ -1307,20 +1307,21 @@ fn applied_port_snapshot_from_committed(
     let manages_acl = normalize_managed_domains(&committed.managed_domains)
         .iter()
         .any(|domain| domain == "acl");
+    let committed_ifindex = committed.ifindex.filter(|ifindex| *ifindex != 0)?;
     if !manages_acl
         || !port.eligible
         || port.ifname != committed.ifname
-        || port.ifindex.is_none()
-        || port.ifindex != committed.ifindex
     {
         return None;
     }
+    let mut applied_port = port.clone();
+    applied_port.ifindex = Some(committed_ifindex);
     Some(AppliedPortSnapshot {
         schema_version: snapshot.schema_version,
         generation: snapshot.generation,
         desired_hash: snapshot.desired_hash.clone(),
         host: snapshot.host.clone(),
-        port: port.clone(),
+        port: applied_port,
     })
 }
 
