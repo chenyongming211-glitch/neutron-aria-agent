@@ -8019,6 +8019,7 @@ mod tests {
     #[test]
     fn successful_snapshot_cache_uses_committed_identity_for_logical_candidate() {
         let mut snapshot_port = port("target-port", "tap-target", true);
+        snapshot_port.ifname.clear();
         snapshot_port.ifindex = None;
         snapshot_port.managed_domains = vec!["acl".to_string()];
         snapshot_port.acl = Some(ready_acl(Vec::new()));
@@ -8041,6 +8042,7 @@ mod tests {
             &committed,
         );
 
+        assert_eq!(cache["target-port"].port.ifname, "tap-target");
         assert_eq!(cache["target-port"].port.ifindex, Some(52));
 
         let mut runtime = NeutronRuntimeState {
