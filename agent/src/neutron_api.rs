@@ -8011,6 +8011,63 @@ mod tests {
     }
 
     #[test]
+    fn successful_snapshot_cache_uses_committed_identity_for_logical_candidate() {
+        let mut snapshot_port = port("target-port", "tap-target", true);
+        snapshot_port.ifindex = None;
+        snapshot_port.managed_domains = vec!["acl".to_string()];
+        snapshot_port.acl = Some(ready_acl(Vec::new()));
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: Some(2),
+            generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            host: Some("compute-1".to_string()),
+            ports: vec![snapshot_port],
+        };
+        let mut committed_port = managed_with_ifindex("target-port", "tap-target", 52);
+        committed_port.managed_domains = vec!["acl".to_string()];
+        let committed = BTreeMap::from([("target-port".to_string(), committed_port.clone())]);
+        let mut cache = BTreeMap::new();
+
+        update_applied_port_snapshot_cache(
+            &mut cache,
+            &snapshot,
+            &ApplyScope::FullHost,
+            &committed,
+        );
+
+        assert_eq!(cache["target-port"].port.ifindex, Some(52));
+
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            applied_desired_hash: Some("host-hash".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ports: committed,
+            ..Default::default()
+        };
+        runtime.port_statuses.insert(
+            "target-port".to_string(),
+            ready_status("target-port", "tap-target", 42),
+        );
+        assert!(project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-target",
+            Some(52),
+        ));
+
+        let (_, replay) = build_recreated_port_replay_request(
+            &runtime,
+            &cache,
+            "tap-target",
+            77,
+        )
+        .expect("committed local identity should permit safe tap recreation replay");
+        assert_eq!(replay.ports[0].ifindex, Some(77));
+    }
+
+    #[test]
     fn recreated_tap_replay_requires_exact_committed_snapshot_identity() {
         let mut snapshot_port = port("target-port", "tap-target", true);
         snapshot_port.ifindex = Some(52);
