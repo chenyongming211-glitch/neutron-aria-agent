@@ -1927,6 +1927,7 @@ fn status_v1_reason_requires_full_resync(reason: Option<&str>) -> bool {
         Some("runtime_rebuild_required")
             | Some("acl_restart_replay_requires_resync")
             | Some("tc_acl_link_lost")
+            | Some("tap_attachment_identity_lost")
     )
 }
 
@@ -16208,6 +16209,46 @@ mod tests {
         };
 
         let projection = project_neutron_status_v1(&runtime);
+        assert_eq!(
+            projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+    }
+
+    #[test]
+    fn tap_identity_loss_projects_degraded_full_resync_not_operator() {
+        let mut port = managed_with_ifindex("vm-port", "tap-vm", 52);
+        port.managed_domains = vec!["acl".to_string()];
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("hash-42".to_string()),
+            applied_desired_hash: Some("hash-42".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ports: BTreeMap::from([(port.port_id.clone(), port)]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                ready_status("vm-port", "tap-vm", 42),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-vm",
+            Some(52),
+        ));
+        let projection = project_neutron_status_v1(&runtime);
+
         assert_eq!(
             projection.transaction_state,
             NeutronStatusTransactionState::Classified
