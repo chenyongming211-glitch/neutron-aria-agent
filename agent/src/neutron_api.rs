@@ -4825,6 +4825,7 @@ fn build_blocked_delete_runtime(
     acl_effective_action: &'static str,
 ) -> NeutronRuntimeState {
     let mut blocked = previous.clone();
+    let status_desired_hash = blocked.applied_desired_hash.clone();
     blocked.pending_generation = Some(generation);
     blocked.desired_hash = None;
     blocked.authority_state = "blocked_recovery_required".to_string();
@@ -4857,7 +4858,7 @@ fn build_blocked_delete_runtime(
             &port.port_id,
             &port.ifname,
             generation,
-            None,
+            status_desired_hash,
             port.managed_domains.clone(),
             "blocked",
             Some(reason.to_string()),
@@ -13679,6 +13680,7 @@ mod tests {
             assert_eq!(runtime.desired_hash, None);
             assert_eq!(runtime.authority_state, "blocked_recovery_required");
             let status = runtime.port_statuses.get(&port.port_id).unwrap();
+            assert_eq!(status.desired_hash, previous.applied_desired_hash);
             assert_ne!(status.status, "ready");
             let acl = status
                 .domains
@@ -13688,6 +13690,38 @@ mod tests {
             assert_ne!(acl.status, "ready");
             assert_eq!(acl.effective_action.as_deref(), Some(action));
             assert_ne!(acl.effective_action.as_deref(), Some("enforce"));
+
+            let projected = project_neutron_status_v1(runtime);
+            assert_eq!(
+                projected.transaction_state,
+                NeutronStatusTransactionState::Blocked
+            );
+            assert_eq!(
+                projected.overall_readiness,
+                NeutronStatusOverallReadiness::Blocked
+            );
+            assert_eq!(
+                projected.required_action,
+                NeutronStatusRequiredAction::Operator
+            );
+            assert_eq!(projected.port_statuses.len(), 1);
+            let projected_status = &projected.port_statuses[0];
+            assert_eq!(projected_status.port_id, port.port_id);
+            assert_eq!(projected_status.status, "blocked");
+            assert_eq!(
+                projected_status.desired_hash,
+                previous.applied_desired_hash
+            );
+            let projected_acl = projected_status
+                .domains
+                .iter()
+                .find(|domain| domain.domain == "acl")
+                .expect("Status V1 must retain blocked ACL evidence");
+            assert_eq!(projected_acl.status, NeutronStatusDomainState::Blocked);
+            assert_eq!(
+                projected_acl.effective_action,
+                status_v1_effective_action(Some(action))
+            );
         }
     }
 
