@@ -13653,7 +13653,7 @@ mod tests {
     }
 
     #[test]
-    fn neutron_delete_failure_status_is_phase_aware_and_never_ready_enforce() {
+    fn neutron_wal_delete_failure_status_is_phase_aware_and_never_ready_enforce() {
         let previous = committed_runtime(65);
         let port = previous.ports["committed-port"].clone();
 
