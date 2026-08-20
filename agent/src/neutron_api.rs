@@ -1308,13 +1308,11 @@ fn applied_port_snapshot_from_committed(
         .iter()
         .any(|domain| domain == "acl");
     let committed_ifindex = committed.ifindex.filter(|ifindex| *ifindex != 0)?;
-    if !manages_acl
-        || !port.eligible
-        || port.ifname != committed.ifname
-    {
+    if !manages_acl || !port.eligible || port.port_id != committed.port_id {
         return None;
     }
     let mut applied_port = port.clone();
+    applied_port.ifname = committed.ifname.clone();
     applied_port.ifindex = Some(committed_ifindex);
     Some(AppliedPortSnapshot {
         schema_version: snapshot.schema_version,
