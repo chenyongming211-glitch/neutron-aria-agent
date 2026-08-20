@@ -171,6 +171,10 @@ def main():
         'assert after_row.get("status")=="blocked"',
         'assert after_acl.get("effective_action")=="bypass"',
         '"blocked_status_visible":True',
+        "assert canonical(before_durable_port)==canonical(after_durable_port)",
+        'assert after_entries[-2].get("type")=="delete_intent"',
+        'assert after_entries[-1].get("type")=="snapshot_commit"',
+        '"blocked_checkpoint_visible":True',
     )
     isolated_transaction_missing = [
         term for term in isolated_transaction_required

@@ -1030,7 +1030,8 @@ def committed_identity(path):
     ports=committed.get("ports") or {}
     statuses=committed.get("port_statuses") or {}
     assert port_id in ports,(port_id,committed)
-    return canonical({"port":ports[port_id],"port_status":statuses.get(port_id)}),entries
+    assert port_id in statuses,(port_id,committed)
+    return ports[port_id],statuses[port_id],entries
 
 def owned(root):
     groups=load(root,"groups.json").get("groups") or []
@@ -1076,11 +1077,21 @@ assert after_status.get("authority_state")=="blocked_recovery_required",after_st
 assert after_status.get("desired_hash") is None,after_status
 assert after_status.get("pending_generation") is not None,after_status
 assert after_status.get("applied_desired_hash")==before_status.get("applied_desired_hash"),(before_status,after_status)
-before_durable,before_entries=committed_identity(os.path.join(before,"neutron-snapshot.wal"))
-after_durable,after_entries=committed_identity(os.path.join(after,"neutron-snapshot.wal"))
-assert before_durable==after_durable,(before_durable,after_durable)
-assert after_entries[-1].get("type")=="delete_intent",after_entries[-1]
-assert after_entries[-1].get("port_id")==port_id,after_entries[-1]
+before_durable_port,before_durable_row,before_entries=committed_identity(os.path.join(before,"neutron-snapshot.wal"))
+after_durable_port,after_durable_row,after_entries=committed_identity(os.path.join(after,"neutron-snapshot.wal"))
+before_durable_acl=domain(before_durable_row,"acl")
+after_durable_acl=domain(after_durable_row,"acl")
+assert canonical(before_durable_port)==canonical(after_durable_port),(before_durable_port,after_durable_port)
+assert before_durable_row.get("status")=="ready",before_durable_row
+assert before_durable_acl.get("effective_action")=="enforce",before_durable_acl
+assert after_durable_row.get("status")=="blocked",after_durable_row
+assert after_durable_row.get("reason"),after_durable_row
+assert after_durable_row.get("desired_hash")==before_durable_row.get("desired_hash"),(before_durable_row,after_durable_row)
+assert after_durable_acl.get("status")=="blocked",after_durable_acl
+assert after_durable_acl.get("effective_action")=="bypass",after_durable_acl
+assert after_entries[-2].get("type")=="delete_intent",after_entries[-2:]
+assert after_entries[-2].get("port_id")==port_id,after_entries[-2]
+assert after_entries[-1].get("type")=="snapshot_commit",after_entries[-2:]
 
 tap_config=load(after,"tap-config.json")["value"]
 assert decode_bpftool_int(tap_config[0])==0,tap_config
@@ -1115,7 +1126,8 @@ else:
 
 print(json.dumps({"fixture":os.environ["FIXTURE"],"detached":False,
                   "links_attached":True,"gate_quiesced":True,
-                  "owned_projection":after_owned,"durable_identity_equal":True,
+                  "owned_projection":after_owned,"durable_port_identity_equal":True,
+                  "blocked_checkpoint_visible":True,
                   "managed_port_identity_equal":True,"blocked_status_visible":True,
                   "publication_equal":os.environ["REQUIRE_EQUAL"]=="true"},
                  sort_keys=True))
