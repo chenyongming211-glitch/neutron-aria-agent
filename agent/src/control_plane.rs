@@ -4812,6 +4812,24 @@ impl ControlPlane {
         self.neutron_authorities.read().await.get(instance).cloned()
     }
 
+    pub(crate) async fn neutron_authority_names(&self) -> BTreeSet<String> {
+        self.neutron_authorities
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) async fn active_instance_ifindex(&self, instance: &str) -> Option<u32> {
+        let state = {
+            let instances = self.instances.read().await;
+            instances.get(instance).cloned()
+        }?;
+        let ifindex = state.read().await.ifindex;
+        ifindex
+    }
+
     async fn local_publication_mode_snapshot(
         &self,
         instance: &str,

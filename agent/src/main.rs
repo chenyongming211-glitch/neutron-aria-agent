@@ -320,6 +320,16 @@ impl Config {
         self.mode == AgentMode::Standalone && self.requested_auto_attach()
     }
 
+    fn link_monitor_mode(&self) -> Option<netlink::LinkMonitorMode> {
+        if self.effective_auto_attach() {
+            Some(netlink::LinkMonitorMode::AutoAttach)
+        } else if self.mode == AgentMode::NeutronManaged {
+            Some(netlink::LinkMonitorMode::ManagedOnly)
+        } else {
+            None
+        }
+    }
+
     fn neutron_socket_enabled(&self) -> bool {
         self.mode == AgentMode::NeutronManaged
     }
@@ -1150,12 +1160,14 @@ async fn main() {
     };
 
     // Bind before starting background tasks so we fail before any interfaces are attached.
-    let netlink_task = if config.effective_auto_attach() {
+    let netlink_task = if let Some(link_monitor_mode) = config.link_monitor_mode() {
         let registry_clone = registry.clone();
         Some(tokio::spawn(async move {
             loop {
-                if let Err(e) = netlink::monitor(registry_clone.clone()).await {
-                    warn!(error = %e, "netlink monitor failed; restarting");
+                if let Err(e) =
+                    netlink::monitor(registry_clone.clone(), link_monitor_mode).await
+                {
+                    warn!(mode = ?link_monitor_mode, error = %e, "netlink monitor failed; restarting");
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
@@ -1164,7 +1176,7 @@ async fn main() {
         info!(
             mode = config.mode.as_str(),
             requested_auto_attach = config.requested_auto_attach(),
-            "auto attach disabled; netlink tap monitor not started"
+            "link monitor disabled"
         );
         None
     };

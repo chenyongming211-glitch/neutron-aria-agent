@@ -93,6 +93,18 @@ pub enum TapLifecycleEvent {
     },
 }
 
+pub(crate) fn replaced_ifindex(active_ifindex: Option<u32>, observed_ifindex: u32) -> Option<u32> {
+    active_ifindex
+        .filter(|active| *active != 0 && observed_ifindex != 0 && *active != observed_ifindex)
+}
+
+fn stale_deleted_ifindex(active_ifindex: Option<u32>, deleted_ifindex: Option<u32>) -> bool {
+    matches!(
+        (active_ifindex, deleted_ifindex),
+        (Some(active), Some(deleted)) if active != 0 && deleted != 0 && active != deleted
+    )
+}
+
 impl ManagedAttachMode {
     pub(crate) const fn legacy_acl_migration_authority(
         self,
@@ -732,6 +744,16 @@ impl TapRegistry {
 
     /// Physical link loss preserves Neutron ownership for the replacement tap.
     pub async fn link_deleted(&self, iface: &str, ifindex: Option<u32>) -> Result<(), String> {
+        let active_ifindex = self.control_plane.active_instance_ifindex(iface).await;
+        if stale_deleted_ifindex(active_ifindex, ifindex) {
+            info!(
+                instance = %iface,
+                active_ifindex = ?active_ifindex,
+                deleted_ifindex = ?ifindex,
+                "ignoring stale link deletion after interface replacement"
+            );
+            return Ok(());
+        }
         self.publish_lifecycle(TapLifecycleEvent::Deleted {
             ifname: iface.to_string(),
             ifindex,
@@ -742,7 +764,6 @@ impl TapRegistry {
     /// Attach a new Linux link according to its retained authority and publish
     /// readiness only after its nonzero replacement ifindex is observable.
     pub async fn link_ready(&self, iface: &str) -> Result<(), String> {
-        self.attach(iface).await?;
         let ifindex_path = std::path::Path::new("/sys/class/net")
             .join(iface)
             .join("ifindex");
@@ -754,6 +775,17 @@ impl TapRegistry {
         if ifindex == 0 {
             return Err(format!("replacement ifindex for {} is zero", iface));
         }
+        let active_ifindex = self.control_plane.active_instance_ifindex(iface).await;
+        if let Some(replaced) = replaced_ifindex(active_ifindex, ifindex) {
+            info!(
+                instance = %iface,
+                old_ifindex = replaced,
+                new_ifindex = ifindex,
+                "same-name interface identity changed; invalidating old runtime before attach"
+            );
+            self.link_deleted(iface, Some(replaced)).await?;
+        }
+        self.attach(iface).await?;
         self.publish_lifecycle(TapLifecycleEvent::Ready {
             ifname: iface.to_string(),
             ifindex,
@@ -767,6 +799,24 @@ impl TapRegistry {
         let mut names: Vec<String> = instances.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    pub(crate) async fn neutron_authority_names(&self) -> BTreeSet<String> {
+        self.control_plane.neutron_authority_names().await
+    }
+
+    pub(crate) async fn link_observation_state(
+        &self,
+        iface: &str,
+    ) -> (bool, bool, Option<u32>) {
+        let active = self.instances.read().await.contains_key(iface);
+        let authoritative = self
+            .control_plane
+            .get_neutron_port_authority(iface)
+            .await
+            .is_some();
+        let active_ifindex = self.control_plane.active_instance_ifindex(iface).await;
+        (active, authoritative, active_ifindex)
     }
 
     /// Snapshot of ifname -> (tap_id, state_path) for attached instances.
@@ -911,6 +961,23 @@ mod tests {
             managed_attach_mode_for_link_event(Some(&authority)),
             ManagedAttachMode::NeutronResyncRequired { acl_managed: false }
         );
+    }
+
+    #[test]
+    fn same_name_with_different_ifindex_is_a_replacement() {
+        assert_eq!(replaced_ifindex(Some(52), 77), Some(52));
+        assert_eq!(replaced_ifindex(Some(52), 52), None);
+        assert_eq!(replaced_ifindex(None, 77), None);
+        assert_eq!(replaced_ifindex(Some(0), 77), None);
+        assert_eq!(replaced_ifindex(Some(52), 0), None);
+    }
+
+    #[test]
+    fn stale_delete_cannot_remove_the_replacement_link() {
+        assert!(stale_deleted_ifindex(Some(77), Some(52)));
+        assert!(!stale_deleted_ifindex(Some(52), Some(52)));
+        assert!(!stale_deleted_ifindex(None, Some(52)));
+        assert!(!stale_deleted_ifindex(Some(52), None));
     }
 
     #[derive(Default)]
