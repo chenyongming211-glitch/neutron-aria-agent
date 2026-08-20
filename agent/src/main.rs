@@ -1395,9 +1395,22 @@ mod tests {
         assert_eq!(config.mode, AgentMode::NeutronManaged);
         assert!(!config.requested_auto_attach());
         assert!(!config.effective_auto_attach());
+        assert_eq!(
+            config.link_monitor_mode(),
+            Some(netlink::LinkMonitorMode::ManagedOnly)
+        );
         assert!(config.neutron_socket_enabled());
         assert_eq!(config.neutron_socket_mode, 0o660);
         assert!(!config.neutron_peercred_enforce);
+    }
+
+    #[test]
+    fn startup_mode_standalone_without_auto_attach_has_no_link_monitor() {
+        let config: Config =
+            toml::from_str("mode = \"standalone\"\nauto_attach = false\n").unwrap();
+
+        assert!(!config.effective_auto_attach());
+        assert_eq!(config.link_monitor_mode(), None);
     }
 
     #[test]

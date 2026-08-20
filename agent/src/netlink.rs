@@ -218,3 +218,61 @@ async fn handle_netlink_message(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_only_monitor_handles_only_active_or_authoritative_taps() {
+        assert!(should_process_link_event(
+            LinkMonitorMode::ManagedOnly,
+            true,
+            false,
+            true,
+        ));
+        assert!(should_process_link_event(
+            LinkMonitorMode::ManagedOnly,
+            true,
+            true,
+            false,
+        ));
+        assert!(!should_process_link_event(
+            LinkMonitorMode::ManagedOnly,
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_process_link_event(
+            LinkMonitorMode::ManagedOnly,
+            false,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn auto_attach_monitor_keeps_existing_pattern_behavior() {
+        assert!(should_process_link_event(
+            LinkMonitorMode::AutoAttach,
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_process_link_event(
+            LinkMonitorMode::AutoAttach,
+            false,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn same_name_with_different_ifindex_is_a_replacement() {
+        assert_eq!(replaced_ifindex(Some(52), 77), Some(52));
+        assert_eq!(replaced_ifindex(Some(52), 52), None);
+        assert_eq!(replaced_ifindex(None, 77), None);
+        assert_eq!(replaced_ifindex(Some(0), 77), None);
+        assert_eq!(replaced_ifindex(Some(52), 0), None);
+    }
+}
