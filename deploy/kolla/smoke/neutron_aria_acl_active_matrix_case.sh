@@ -320,7 +320,8 @@ probe_once() {
     if [ "${protocol}" = "tcp" ]; then
         command="printf '%s' '${nonce}' | nc -w ${PROBE_TIMEOUT} '${EGRESS_TARGET_IP}' '${port}'"
     else
-        command="printf '%s' '${nonce}' | nc -u -w ${PROBE_TIMEOUT} '${EGRESS_TARGET_IP}' '${port}'"
+        # BusyBox nc may exit on immediate stdin EOF before reading the UDP echo.
+        command="(printf '%s\\n' '${nonce}'; sleep 1) | nc -u -w ${PROBE_TIMEOUT} '${EGRESS_TARGET_IP}' '${port}'"
     fi
     output="$(guest_exec "${command}" 2>/dev/null | last_nonempty_line || true)"
     [ "${output}" = "${nonce}" ]

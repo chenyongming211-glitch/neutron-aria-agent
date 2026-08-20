@@ -66,6 +66,8 @@ grep -Fq '"${PYTHON_BIN}" "${GUEST_EXEC_FILE}" "${VM_IP}" "$1"' "${CASE_SCRIPT}"
     fail "guest execution must use the selected Python interpreter"
 grep -q 'last_nonempty_line' "${CASE_SCRIPT}" || \
     fail "egress nonce checks must normalize SSH PTY framing"
+grep -Fq 'sleep 1) | nc -u -w' "${CASE_SCRIPT}" || \
+    fail "egress UDP probe must keep stdin open long enough to receive the echo"
 
 binding_line="$(grep -n 'delete_owned_type binding' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
 rule_line="$(grep -n 'delete_owned_type rule' "${CASE_SCRIPT}" | head -1 | cut -d: -f1)"
