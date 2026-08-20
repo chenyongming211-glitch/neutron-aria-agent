@@ -77,6 +77,45 @@ class KollaContainerHealthcheckContractTest(unittest.TestCase):
             self.assertIn("--interval=30s --timeout=5s", content)
             self.assertIn("--start-period=60s --retries=3", content)
 
+    def test_datapath_smoke_healthcheck_follows_isolated_endpoints(self):
+        content = read_repo_file(
+            "deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        )
+        self.assertIn('ARIA_HEALTH_SOCKET_PATH=${SOCKET_PATH}', content)
+        self.assertIn('ARIA_HEALTH_TCP_URL=${HEALTH_TCP_URL}', content)
+        self.assertIn(
+            'HEALTH_TCP_URL="http://${HEALTH_LISTEN_ADDR}/api/v1/health"',
+            content,
+        )
+
+    def test_datapath_smoke_uses_the_kolla_runtime_command(self):
+        content = read_repo_file(
+            "deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        )
+        self.assertIn(
+            'KOLLA_START_COMMAND="${KOLLA_START_COMMAND:-kolla_start}"',
+            content,
+        )
+
+    def test_datapath_smoke_can_defer_health_for_fault_fixtures(self):
+        content = read_repo_file(
+            "deploy/kolla/smoke/aria_datapath_container_smoke.sh"
+        )
+        self.assertIn(
+            'CHECK_CONTAINER_HEALTH="${CHECK_CONTAINER_HEALTH:-true}"',
+            content,
+        )
+        self.assertIn(
+            'if [ "${CHECK_CONTAINER_HEALTH}" = "true" ]; then',
+            content,
+        )
+        self.assertIn("Skipping Docker health gate for fault fixture", content)
+        self.assertIn(
+            'docker run "${docker_run_args[@]}" "${IMAGE}" '
+            '"${KOLLA_START_COMMAND}"',
+            content,
+        )
+
     def test_negative_agent_smoke_waits_past_the_unhealthy_threshold(self):
         content = read_repo_file(
             "deploy/kolla/smoke/neutron_aria_container_smoke.sh"

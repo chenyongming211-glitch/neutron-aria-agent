@@ -404,6 +404,7 @@ import sys
 import time
 
 from neutron_aria.agent.uds_client import LocalClient
+from neutron_aria.agent.state import desired_snapshot_hash
 
 socket_path, port_id, ifname, ifindex, fixture_json = sys.argv[1:6]
 fixture = json.loads(fixture_json)
@@ -469,6 +470,7 @@ snapshot = {
         },
     }],
 }
+snapshot["desired_hash"] = desired_snapshot_hash(snapshot)
 response = client.put_snapshot(snapshot)
 print("direct_snapshot_response=%s" % json.dumps(response, sort_keys=True))
 deadline = time.time() + 15.0

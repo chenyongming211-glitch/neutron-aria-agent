@@ -16,15 +16,19 @@ SOCKET_PATH="${SOCKET_PATH:-/run/aria/aria-agent.sock}"
 STATE_DIR="${STATE_DIR:-/var/lib/aria-agent-smoke}"
 PIN_PATH="${PIN_PATH:-}"
 LISTEN_ADDR="${LISTEN_ADDR:-}"
+HEALTH_LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1:8080}"
+HEALTH_TCP_URL="http://${HEALTH_LISTEN_ADDR}/api/v1/health"
 OVS_BRIDGE="${OVS_BRIDGE:-br-int}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
 START_CONTAINER="${START_CONTAINER:-true}"
 PRIVILEGED="${PRIVILEGED:-true}"
 HOST_PID="${HOST_PID:-true}"
+KOLLA_START_COMMAND="${KOLLA_START_COMMAND:-kolla_start}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
 UDS_READY_RETRIES="${UDS_READY_RETRIES:-20}"
 UDS_READY_INTERVAL="${UDS_READY_INTERVAL:-1}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
+CHECK_CONTAINER_HEALTH="${CHECK_CONTAINER_HEALTH:-true}"
 REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-true}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 FAULT_INJECTION_ENABLED="${FAULT_INJECTION_ENABLED:-}"
@@ -213,6 +217,8 @@ start_container() {
         --restart unless-stopped
         -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS
         -e KOLLA_SERVICE_NAME=aria-datapath
+        -e "ARIA_HEALTH_SOCKET_PATH=${SOCKET_PATH}"
+        -e "ARIA_HEALTH_TCP_URL=${HEALTH_TCP_URL}"
         -v "${CONFIG_DIR}/:/var/lib/kolla/config_files/:ro"
         -v /etc/localtime:/etc/localtime:ro
         -v kolla_logs:/var/log/kolla/:rw
@@ -254,7 +260,7 @@ start_container() {
     fi
 
     echo "Starting independent container: ${SERVICE_NAME}"
-    docker run "${docker_run_args[@]}" "${IMAGE}"
+    docker run "${docker_run_args[@]}" "${IMAGE}" "${KOLLA_START_COMMAND}"
 }
 
 wait_for_socket() {
@@ -444,7 +450,11 @@ start_container
 wait_for_socket
 assert_container_boundary
 check_uds_contract
-wait_for_container_health
+if [ "${CHECK_CONTAINER_HEALTH}" = "true" ]; then
+    wait_for_container_health
+else
+    echo "Skipping Docker health gate for fault fixture"
+fi
 
 docker ps --filter "name=${SERVICE_NAME}" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 docker exec "${SERVICE_NAME}" sh -c 'tail -n 40 /var/log/kolla/aria-datapath/aria-datapath.log' || true
