@@ -7690,6 +7690,185 @@ mod tests {
         assert_eq!(runtime.authority_state, "applying");
     }
 
+    #[test]
+    fn successful_snapshot_cache_tracks_only_committed_acl_ports_by_scope() {
+        let mut first = port("first-port", "tap-first", true);
+        first.ifindex = Some(51);
+        first.managed_domains = vec!["acl".to_string()];
+        first.acl = Some(ready_acl(Vec::new()));
+        let mut second = port("second-port", "tap-second", true);
+        second.ifindex = Some(52);
+        second.managed_domains = vec!["acl".to_string()];
+        second.acl = Some(ready_acl(Vec::new()));
+        let mut uncommitted = port("ignored-port", "tap-ignored", true);
+        uncommitted.ifindex = Some(53);
+        uncommitted.managed_domains = vec!["acl".to_string()];
+        uncommitted.acl = Some(ready_acl(Vec::new()));
+
+        let full = NeutronSnapshotRequest {
+            schema_version: Some(2),
+            generation: 70,
+            desired_hash: Some("hash-70".to_string()),
+            host: Some("compute-1".to_string()),
+            ports: vec![first.clone(), second.clone(), uncommitted],
+        };
+        let committed = BTreeMap::from([
+            (
+                first.port_id.clone(),
+                ManagedNeutronPort {
+                    managed_domains: vec!["acl".to_string()],
+                    ..managed_with_ifindex(&first.port_id, &first.ifname, 51)
+                },
+            ),
+            (
+                second.port_id.clone(),
+                ManagedNeutronPort {
+                    managed_domains: vec!["acl".to_string()],
+                    ..managed_with_ifindex(&second.port_id, &second.ifname, 52)
+                },
+            ),
+        ]);
+        let mut cache = BTreeMap::new();
+
+        update_applied_port_snapshot_cache(
+            &mut cache,
+            &full,
+            &ApplyScope::FullHost,
+            &committed,
+        );
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache["first-port"].generation, 70);
+        assert_eq!(cache["second-port"].port.ifindex, Some(52));
+        assert!(!cache.contains_key("ignored-port"));
+
+        first.ifindex = Some(61);
+        let scoped = NeutronSnapshotRequest {
+            schema_version: Some(2),
+            generation: 71,
+            desired_hash: Some("hash-71".to_string()),
+            host: Some("compute-1".to_string()),
+            ports: vec![first.clone()],
+        };
+        let scoped_committed = BTreeMap::from([(
+            first.port_id.clone(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed_with_ifindex(&first.port_id, &first.ifname, 61)
+            },
+        )]);
+
+        update_applied_port_snapshot_cache(
+            &mut cache,
+            &scoped,
+            &ApplyScope::SinglePort(first.port_id.clone()),
+            &scoped_committed,
+        );
+
+        assert_eq!(cache["first-port"].generation, 71);
+        assert_eq!(cache["first-port"].port.ifindex, Some(61));
+        assert_eq!(cache["second-port"].generation, 70);
+
+        evict_applied_port_snapshot(&mut cache, "first-port");
+        assert!(!cache.contains_key("first-port"));
+        assert!(cache.contains_key("second-port"));
+    }
+
+    #[test]
+    fn recreated_tap_replay_requires_exact_committed_snapshot_identity() {
+        let mut snapshot_port = port("target-port", "tap-target", true);
+        snapshot_port.ifindex = Some(52);
+        snapshot_port.managed_domains = vec!["acl".to_string()];
+        snapshot_port.acl = Some(ready_acl(Vec::new()));
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: Some(2),
+            generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            host: Some("compute-1".to_string()),
+            ports: vec![snapshot_port],
+        };
+        let mut managed_port = managed_with_ifindex("target-port", "tap-target", 52);
+        managed_port.managed_domains = vec!["acl".to_string()];
+        managed_port
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            applied_desired_hash: Some("host-hash".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ports: BTreeMap::from([("target-port".to_string(), managed_port)]),
+            ..Default::default()
+        };
+        runtime.port_statuses.insert(
+            "target-port".to_string(),
+            ready_status("target-port", "tap-target", 42),
+        );
+        let mut cache = BTreeMap::new();
+        update_applied_port_snapshot_cache(
+            &mut cache,
+            &snapshot,
+            &ApplyScope::FullHost,
+            &runtime.ports,
+        );
+        assert!(project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-target",
+            Some(52),
+        ));
+
+        let (port_id, replay) = build_recreated_port_replay_request(
+            &runtime,
+            &cache,
+            "tap-target",
+            77,
+        )
+        .expect("exact committed cache identity should permit one-port replay");
+
+        assert_eq!(port_id, "target-port");
+        assert_eq!(replay.generation, 42);
+        assert_eq!(replay.desired_hash.as_deref(), Some("host-hash"));
+        assert_eq!(replay.ports.len(), 1);
+        assert_eq!(replay.ports[0].ifindex, Some(77));
+
+        let mut stale_cache = cache.clone();
+        stale_cache.get_mut("target-port").unwrap().generation = 41;
+        assert!(build_recreated_port_replay_request(
+            &runtime,
+            &stale_cache,
+            "tap-target",
+            77,
+        )
+        .is_none());
+
+        let mut pending = runtime.clone();
+        pending.pending_generation = Some(43);
+        assert!(build_recreated_port_replay_request(
+            &pending,
+            &cache,
+            "tap-target",
+            77,
+        )
+        .is_none());
+
+        assert!(build_recreated_port_replay_request(
+            &runtime,
+            &cache,
+            "tap-other",
+            77,
+        )
+        .is_none());
+        assert!(build_recreated_port_replay_request(
+            &runtime,
+            &cache,
+            "tap-target",
+            52,
+        )
+        .is_none());
+    }
+
     fn tc_health_projection_fixture(
         status_reason: Option<String>,
         domains: Vec<NeutronDomainStatus>,
