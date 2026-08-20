@@ -161,6 +161,19 @@ flowchart TB
   仅凭 VM 名称推断实际 host；
 - 准备一条不使用被测 port 的独立 OVS 连通性 canary。
 
+#### 当前 VLAN 测试环境的适用边界
+
+当前 RC 现场只提供 VLAN 二层东西向网络。VM 地址由 DHCP agent 分配，VLAN 网关位于
+外部交换机；环境没有 Neutron L3 agent、DNS 服务、浮动 IP 和可验收的南北向流量。
+因此本环境执行结果按以下口径归类：
+
+- same-compute 和 cross-compute 的 VLAN 东西向 IPv4/IPv6、DHCP 地址获取及 IPv6
+  ND 属于正式验收范围；
+- 依赖 L3 agent、DNS、浮动 IP 或南北向路径的用例在本环境标记为 `N/A`，不计为
+  `PASS`、`FAIL` 或待修产品缺陷；
+- `N/A` 只表示当前环境不具备该能力，不删除产品测试计划中的对应通用用例。若未来
+  交付环境引入这些网络能力，应在该环境重新启用相应验收项。
+
 ### 4.2 现场当前 Aria 配置档
 
 现场三台节点在本次复核时配置一致：
