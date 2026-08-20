@@ -7440,6 +7440,112 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tap_delete_invalidates_only_matching_acl_attachment_identity() {
+        let mut target = managed_with_ifindex("target-port", "tap-target", 52);
+        target.managed_domains = vec!["acl".to_string()];
+        target
+            .domain_desired_hashes
+            .insert("acl".to_string(), "target-acl-hash".to_string());
+        let mut other = managed_with_ifindex("other-port", "tap-other", 53);
+        other.managed_domains = vec!["acl".to_string()];
+        other
+            .domain_desired_hashes
+            .insert("acl".to_string(), "other-acl-hash".to_string());
+
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("host-hash".to_string()),
+            applied_desired_hash: Some("host-hash".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ports: BTreeMap::from([
+                (target.port_id.clone(), target.clone()),
+                (other.port_id.clone(), other.clone()),
+            ]),
+            ..Default::default()
+        };
+        for port in [&target, &other] {
+            runtime.port_statuses.insert(
+                port.port_id.clone(),
+                port_runtime_status(
+                    &port.port_id,
+                    &port.ifname,
+                    42,
+                    Some("host-hash".to_string()),
+                    port.managed_domains.clone(),
+                    "ready",
+                    None,
+                    vec![domain_status_with_action(
+                        "acl",
+                        "ready",
+                        None,
+                        Some("enforce".to_string()),
+                    )],
+                ),
+            );
+        }
+
+        assert!(project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-target",
+            Some(52),
+        ));
+
+        let target_after = runtime.ports.get("target-port").unwrap();
+        assert_eq!(target_after.ifindex, Some(52));
+        assert!(!target_after.domain_desired_hashes.contains_key("acl"));
+        let target_status = runtime.port_statuses.get("target-port").unwrap();
+        assert_eq!(target_status.status, "degraded");
+        assert_eq!(
+            target_status.reason.as_deref(),
+            Some("tap_attachment_identity_lost")
+        );
+        assert!(target_status.domains.iter().any(|domain| {
+            domain.domain == "acl"
+                && domain.status == "degraded"
+                && domain.effective_action.as_deref() == Some("bypass")
+        }));
+        assert_eq!(runtime.authority_state, "runtime_reconcile_requires_full_resync");
+        assert_eq!(runtime.wal_status, "tap_attachment_identity_lost");
+
+        assert_eq!(runtime.ports.get("other-port"), Some(&other));
+        assert_eq!(
+            runtime.port_statuses.get("other-port").unwrap().status,
+            "ready"
+        );
+    }
+
+    #[test]
+    fn tap_delete_ignores_stale_ifindex_and_pending_transaction() {
+        let mut port = managed_with_ifindex("target-port", "tap-target", 52);
+        port.managed_domains = vec!["acl".to_string()];
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([(port.port_id.clone(), port.clone())]),
+            ..Default::default()
+        };
+
+        assert!(!project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-target",
+            Some(51),
+        ));
+        assert_eq!(runtime.authority_state, "ready");
+
+        runtime.pending_generation = Some(43);
+        runtime.authority_state = "applying".to_string();
+        assert!(!project_tap_attachment_identity_loss(
+            &mut runtime,
+            "tap-target",
+            Some(52),
+        ));
+        assert_eq!(runtime.authority_state, "applying");
+    }
+
     fn tc_health_projection_fixture(
         status_reason: Option<String>,
         domains: Vec<NeutronDomainStatus>,

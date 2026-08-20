@@ -733,7 +733,7 @@ mod tests {
     use crate::control_plane::{
         managed_acl_ownership_after_detach, managed_acl_promotion_action,
         managed_neutron_authority_confirmation_allowed, ManagedAclPromotionAction,
-        ManagedAclPublicationMode, ManagedProjectionHealth,
+        ManagedAclPublicationMode, ManagedProjectionHealth, NeutronPortAuthority,
     };
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;
@@ -796,6 +796,38 @@ mod tests {
         assert!(registry.matches_pattern("qvo12"));
         assert!(!registry.matches_pattern("tap12"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn link_attach_mode_preserves_neutron_acl_authority() {
+        let authority = NeutronPortAuthority {
+            port_id: "port-vm".to_string(),
+            managed_domains: BTreeSet::from(["acl".to_string()]),
+            generation: 42,
+        };
+
+        assert_eq!(
+            managed_attach_mode_for_link_event(Some(&authority)),
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true }
+        );
+        assert_eq!(
+            managed_attach_mode_for_link_event(None),
+            ManagedAttachMode::StandaloneRestoreAfterTcAttach
+        );
+    }
+
+    #[test]
+    fn link_attach_mode_keeps_non_acl_neutron_port_quiesced() {
+        let authority = NeutronPortAuthority {
+            port_id: "port-qos".to_string(),
+            managed_domains: BTreeSet::from(["qos".to_string()]),
+            generation: 43,
+        };
+
+        assert_eq!(
+            managed_attach_mode_for_link_event(Some(&authority)),
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: false }
+        );
     }
 
     #[derive(Default)]
