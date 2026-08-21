@@ -244,6 +244,9 @@ class AriaUpgradeControlTest(unittest.TestCase):
             "UPPERCASE:v0.9@sha256:" + "a" * 64,
             "agent@sha256:" + "A" * 64,
             "agent@sha256:" + "a" * 63,
+            "registry.example:5000/repo..name/image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/repo___name/image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/repo._name/image:tag@sha256:" + "a" * 64,
         ):
             malformed = manifest()
             malformed["images"][0]["identity"] = invalid

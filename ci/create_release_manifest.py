@@ -14,7 +14,7 @@ from pathlib import Path
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
-IMAGE_COMPONENT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
+IMAGE_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:(?:__|[._]|-+)[a-z0-9]+)*$")
 RUNTIME_COMPATIBILITY_FIELDS = {
     "schema_version": int,
     "uds_schema_min": int,

@@ -209,6 +209,7 @@ class ReleaseGovernanceTest(unittest.TestCase):
         valid = (
             "registry.example/aria-datapath:v0.9@sha256:" + "a" * 64,
             "registry.example:5000/team/image:tag@sha256:" + "b" * 64,
+            "registry.example:5000/repo__name/image--name:tag_name@sha256:" + "c" * 64,
         )
         invalid = (
             ":@sha256:" + "a" * 64,
@@ -220,6 +221,10 @@ class ReleaseGovernanceTest(unittest.TestCase):
             "registry.example:5000/team/image::tag@sha256:" + "a" * 64,
             "registry.example:5000/team/image:@sha256:" + "a" * 64,
             "registry.example:5000/team/image:tag@sha256:" + "a" * 64 + "/",
+            "registry.example:5000/repo..name/image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/repo___name/image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/repo._name/image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/-repo/image:tag@sha256:" + "a" * 64,
         )
         for identity in valid:
             with self.subTest(identity=identity):

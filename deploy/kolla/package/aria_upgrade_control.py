@@ -34,7 +34,7 @@ REQUIRED_COMPATIBILITY = {
     "ebpf_abi_hash": str,
     "map_schema_hash": str,
 }
-IMAGE_COMPONENT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
+IMAGE_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:(?:__|[._]|-+)[a-z0-9]+)*$")
 REQUIRED_IMAGES = ("neutron-aria-agent", "aria-datapath")
 UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 
