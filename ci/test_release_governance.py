@@ -565,6 +565,15 @@ class ReleaseGovernanceTest(unittest.TestCase):
             workflow.index("- name: Create release archive"),
             workflow.index("- name: Create release manifest and checksums"),
         )
+
+        reproducibility = (
+            ROOT / "ci/check_release_reproducibility.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('AGENT_IMAGE_IDENTITY="${agent_image_identity}"', reproducibility)
+        self.assertIn(
+            'DATAPATH_IMAGE_IDENTITY="${datapath_image_identity}"',
+            reproducibility,
+        )
         release_block = workflow[workflow.index("  release:") : workflow.index("  deep-audit:")]
         for required_job in (
             "fast-contracts",
