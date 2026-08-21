@@ -69,6 +69,10 @@ class CiLaneContractTests(unittest.TestCase):
             "python3 -m unittest ci.test_public_release_hygiene",
             fast_contracts,
         )
+        self.assertIn(
+            "python3 -m unittest ci.test_aria_upgrade_control",
+            fast_contracts,
+        )
 
     def test_javascript_actions_use_pinned_node24_releases(self):
         self.assertEqual(self.source.count(CHECKOUT_NODE24), 9)

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Classify an Aria runtime upgrade without changing host state."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import re
@@ -34,23 +32,26 @@ REQUIRED_COMPATIBILITY = {
     "ebpf_abi_hash": str,
     "map_schema_hash": str,
 }
-IMAGE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}$")
+IMAGE_IDENTITY_RE = re.compile(
+    r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*"
+    r"(?::[a-z0-9][a-z0-9._-]*)?@sha256:[0-9a-f]{64}$"
+)
 REQUIRED_IMAGES = ("neutron-aria-agent", "aria-datapath")
 UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 
 
-def load_manifest(path: Path) -> dict:
+def load_manifest(path):
     """Load one release manifest as a JSON object."""
     try:
         manifest = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise ValueError(f"manifest cannot be loaded: {error}") from error
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be a JSON object")
     return manifest
 
 
-def _valid_compatibility(manifest: object) -> dict | None:
+def _valid_compatibility(manifest):
     if not isinstance(manifest, dict):
         return None
     compatibility = manifest.get("runtime_compatibility")
@@ -79,10 +80,15 @@ def _valid_compatibility(manifest: object) -> dict | None:
     return compatibility
 
 
-def _image_identities(manifest: object) -> dict[str, str] | None:
+def is_valid_image_identity(identity):
+    """Return true only for a conservative named immutable image reference."""
+    return isinstance(identity, str) and IMAGE_IDENTITY_RE.fullmatch(identity) is not None
+
+
+def _image_identities(manifest):
     if not isinstance(manifest, dict) or not isinstance(manifest.get("images"), list):
         return None
-    identities: dict[str, str] = {}
+    identities = {}
     for image in manifest["images"]:
         if not isinstance(image, dict):
             return None
@@ -90,7 +96,7 @@ def _image_identities(manifest: object) -> dict[str, str] | None:
         identity = image.get("identity")
         if not isinstance(name, str) or not isinstance(identity, str):
             return None
-        if name in identities or not IMAGE_IDENTITY_RE.fullmatch(identity):
+        if name in identities or not is_valid_image_identity(identity):
             return None
         identities[name] = identity
     if not all(name in identities for name in REQUIRED_IMAGES):
@@ -98,13 +104,11 @@ def _image_identities(manifest: object) -> dict[str, str] | None:
     return identities
 
 
-def _unknown() -> UpgradeClassification:
+def _unknown():
     return UpgradeClassification("planned_maintenance", ("unknown_compatibility",))
 
 
-def classify_upgrade(
-    current: dict, candidate: dict, force_maintenance: bool = False
-) -> UpgradeClassification:
+def classify_upgrade(current, candidate, force_maintenance=False):
     """Choose a deterministic path from two immutable release manifests."""
     if force_maintenance:
         return UpgradeClassification("planned_maintenance", ("operator_forced",))
@@ -135,6 +139,26 @@ def classify_upgrade(
     datapath_changed = (
         current_images["aria-datapath"] != candidate_images["aria-datapath"]
     )
+    if agent_changed and datapath_changed:
+        return UpgradeClassification(
+            "planned_maintenance", ("joint_agent_datapath_change",)
+        )
+    if (
+        current_compatibility["uds_schema_min"]
+        > candidate_compatibility["uds_schema_max"]
+        or candidate_compatibility["uds_schema_min"]
+        > current_compatibility["uds_schema_max"]
+    ):
+        return UpgradeClassification(
+            "planned_maintenance", ("uds_schema_incompatible",)
+        )
+    if (
+        current_compatibility["maintenance_gate_capable"]
+        != candidate_compatibility["maintenance_gate_capable"]
+    ):
+        return UpgradeClassification(
+            "planned_maintenance", ("maintenance_gate_capability_changed",)
+        )
     if agent_changed and not datapath_changed:
         return UpgradeClassification("hot_agent", ("agent_only",))
     if datapath_changed:
@@ -142,25 +166,36 @@ def classify_upgrade(
     return UpgradeClassification("hot_agent", ("no_runtime_change",))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    command = parser.add_subparsers(dest="command", required=True)
+    command = parser.add_subparsers(dest="command")
     classify = command.add_parser("classify", help="print a read-only upgrade path")
     classify.add_argument("--current", type=Path, required=True)
     classify.add_argument("--candidate", type=Path, required=True)
     classify.add_argument("--force-maintenance", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def _print_result(result):
+    print(json.dumps(
+        {"path": result.path, "reasons": list(result.reasons)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ))
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.command != "classify":
+        _print_result(_unknown())
+        return 0
     try:
         current = load_manifest(args.current)
         candidate = load_manifest(args.candidate)
         result = classify_upgrade(current, candidate, args.force_maintenance)
-    except ValueError:
+    except (OSError, ValueError, RecursionError):
         result = _unknown()
-    print(json.dumps({"path": result.path, "reasons": list(result.reasons)}, sort_keys=True))
+    _print_result(result)
     return 0
 
 

@@ -8,6 +8,7 @@ import os
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -198,6 +199,27 @@ class ReleaseGovernanceTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     generator.load_runtime_compatibility(path)
 
+    def test_manifest_generator_and_classifier_share_conservative_image_contract(self):
+        generator = load_manifest_generator()
+        control_path = ROOT / "deploy" / "kolla" / "package" / "aria_upgrade_control.py"
+        spec = importlib.util.spec_from_file_location("aria_upgrade_control", control_path)
+        control = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(control)
+        valid = "registry.example/aria-datapath:v0.9@sha256:" + "a" * 64
+        invalid = (
+            ":@sha256:" + "a" * 64,
+            "UPPERCASE:v0.9@sha256:" + "a" * 64,
+            "aria-datapath@sha256:" + "A" * 64,
+            "aria-datapath@sha256:" + "a" * 63,
+        )
+        self.assertTrue(generator.is_valid_image_identity(valid))
+        self.assertTrue(control.is_valid_image_identity(valid))
+        for identity in invalid:
+            with self.subTest(identity=identity):
+                self.assertFalse(generator.is_valid_image_identity(identity))
+                self.assertFalse(control.is_valid_image_identity(identity))
+
     def test_stage2_bundle_stages_all_manifest_hash_sources(self):
         builder = ROOT / "deploy/kolla/package/build_stage2_acl_bundle.sh"
         runtime_bin = Path(sys.executable).parent
@@ -265,6 +287,43 @@ class ReleaseGovernanceTest(unittest.TestCase):
             payload = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertIn("ebpf_abi_hash", payload["runtime_compatibility"])
             self.assertIn("map_schema_hash", payload["runtime_compatibility"])
+            bundle = temp / "out" / "neutron-aria-stage2-acl-kolla-bundle.tgz"
+            self.assertTrue(bundle.is_file())
+            with tarfile.open(bundle, "r:gz") as archive:
+                members = {member.name.lstrip("./"): member for member in archive.getmembers()}
+                for required in (
+                    "deploy/kolla/package/aria_upgrade_control.py",
+                    "release/runtime-compatibility.json",
+                    "abi/src/lib.rs",
+                    "ebpf/src/maps.rs",
+                    "release-manifest.json",
+                    "SHA256SUMS",
+                ):
+                    self.assertIn(required, members)
+                def read_member(name):
+                    handle = archive.extractfile(members[name])
+                    self.assertIsNotNone(handle)
+                    return handle.read()
+                packaged_manifest = json.loads(read_member("release-manifest.json"))
+                packaged_compatibility = read_member("release/runtime-compatibility.json")
+                packaged_abi = read_member("abi/src/lib.rs")
+                packaged_maps = read_member("ebpf/src/maps.rs")
+            self.assertEqual(
+                hashlib.sha256(packaged_compatibility).hexdigest(),
+                packaged_manifest["contracts"]["runtime_compatibility_sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256(packaged_abi).hexdigest(),
+                packaged_manifest["runtime_compatibility"]["ebpf_abi_hash"],
+            )
+            map_hasher = hashlib.sha256()
+            for content in (packaged_abi, packaged_maps):
+                map_hasher.update(struct.pack(">Q", len(content)))
+                map_hasher.update(content)
+            self.assertEqual(
+                map_hasher.hexdigest(),
+                packaged_manifest["runtime_compatibility"]["map_schema_hash"],
+            )
 
     def test_manifest_generator_rejects_invalid_source_commit(self):
         generator = ROOT / "ci" / "create_release_manifest.py"

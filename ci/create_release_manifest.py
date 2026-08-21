@@ -15,7 +15,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 IMAGE_IDENTITY_RE = re.compile(
-    r"^[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}$"
+    r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*"
+    r"(?::[a-z0-9][a-z0-9._-]*)?@sha256:[0-9a-f]{64}$"
 )
 RUNTIME_COMPATIBILITY_FIELDS = {
     "schema_version": int,
@@ -76,6 +77,11 @@ def load_runtime_compatibility(path: Path) -> dict[str, object]:
         elif expected_type is str and not value:
             raise ValueError(f"runtime compatibility {key} must not be empty")
     return payload
+
+
+def is_valid_image_identity(identity: object) -> bool:
+    """Return true only for a conservative named immutable image reference."""
+    return isinstance(identity, str) and IMAGE_IDENTITY_RE.fullmatch(identity) is not None
 
 
 def parse_named(values: list[str], label: str) -> list[tuple[str, str]]:
@@ -168,7 +174,7 @@ def build_manifest(
 
     image_records: list[dict[str, str]] = []
     for name, identity in images:
-        if not IMAGE_IDENTITY_RE.fullmatch(identity):
+        if not is_valid_image_identity(identity):
             raise ValueError(
                 f"image identity must end with @sha256:<64 lowercase hex>: {name}"
             )

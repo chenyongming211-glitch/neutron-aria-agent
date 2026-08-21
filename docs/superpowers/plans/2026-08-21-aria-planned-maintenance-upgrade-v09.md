@@ -76,7 +76,7 @@ The legacy profile requires two canonical host snapshots with equal desired hash
 
 The current exact-owner detach installer introduces the first gate-capable ABI; every later incompatible upgrade uses the joint transaction.
 
-- [ ] **Step 4: Run the existing health contract**
+- [x] **Step 4: Run the existing health contract**
 
 Run: `python3 -m unittest ci.test_kolla_container_healthchecks`
 
@@ -97,7 +97,7 @@ Expected: PASS and continued assertions that degraded/bypass are Docker unhealth
 - `UpgradeClassification.path` is exactly `hot_agent`, `hot_datapath`, or `planned_maintenance`.
 - `UpgradeClassification.reasons` is a sorted tuple of stable reason codes.
 
-- [ ] **Step 1: Write failing manifest-field tests**
+- [x] **Step 1: Write failing manifest-field tests**
 
 Assert that generated manifests contain these values from `runtime-compatibility.json`:
 
@@ -122,17 +122,17 @@ The generator also emits `release_version`, `ebpf_abi_hash`, and
 and `map_schema_hash` from length-delimited bytes of `abi/src/lib.rs` plus
 `ebpf/src/maps.rs`; do not accept caller-supplied hash strings.
 
-- [ ] **Step 2: Run the focused tests and observe failure**
+- [x] **Step 2: Run the focused tests and observe failure**
 
 Run: `python3 -m unittest ci.test_release_governance ci.test_aria_upgrade_control`
 
 Expected: FAIL because compatibility data and classifier are absent.
 
-- [ ] **Step 3: Extend `build_manifest()` without deriving ABI from filenames**
+- [x] **Step 3: Extend `build_manifest()` without deriving ABI from filenames**
 
 Read and validate the compatibility JSON, copy it under `runtime_compatibility`, and include its SHA-256 under `contracts`. Missing, boolean-as-integer, negative, or unknown required fields must fail manifest generation.
 
-- [ ] **Step 4: Implement deterministic classification**
+- [x] **Step 4: Implement deterministic classification**
 
 Use this decision order:
 
@@ -145,8 +145,14 @@ DATAPATH_KEYS = (
 
 if force_maintenance:
     return UpgradeClassification("planned_maintenance", ("operator_forced",))
+if agent_changed and datapath_changed:
+    return UpgradeClassification("planned_maintenance", ("joint_agent_datapath_change",))
+if uds_ranges_are_disjoint(current, candidate):
+    return UpgradeClassification("planned_maintenance", ("uds_schema_incompatible",))
+if current["maintenance_gate_capable"] != candidate["maintenance_gate_capable"]:
+    return UpgradeClassification("planned_maintenance", ("maintenance_gate_capability_changed",))
 if any(current[key] != candidate[key] for key in DATAPATH_KEYS):
-    return UpgradeClassification("planned_maintenance", tuple(changed_keys))
+    return UpgradeClassification("planned_maintenance", tuple(sorted(changed_keys)))
 if agent_changed and not datapath_changed:
     return UpgradeClassification("hot_agent", ("agent_only",))
 if datapath_changed:
@@ -159,7 +165,12 @@ Unknown or malformed compatibility data must classify as `planned_maintenance`, 
 image identities in the two manifests; missing required image identities are
 unknown compatibility and therefore select planned maintenance.
 
-- [ ] **Step 5: Add a read-only dry-run command**
+The approved design governs this task summary: all joint agent and datapath
+releases use planned maintenance, regardless of otherwise compatible datapath
+ABI. UDS ranges must overlap, and maintenance-gate capability transitions are
+planned maintenance.
+
+- [x] **Step 5: Add a read-only dry-run command**
 
 Run interface:
 
@@ -171,13 +182,13 @@ python3 aria_upgrade_control.py classify \
 
 It prints one bounded JSON object and never calls Docker.
 
-- [ ] **Step 6: Run governance and classifier tests**
+- [x] **Step 6: Run governance and classifier tests**
 
 Run: `python3 -m unittest ci.test_release_governance ci.test_aria_upgrade_control`
 
 Expected: PASS for compatible agent-only, incompatible map ABI, unknown manifest, and forced-maintenance cases.
 
-- [ ] **Step 7: Commit the D1 gate**
+- [x] **Step 7: Commit the D1 gate**
 
 ```bash
 git add release/runtime-compatibility.json ci/create_release_manifest.py \
