@@ -14,6 +14,9 @@ Those documents remain useful as descriptions of the current RC implementation.
 This design defines the next implementation contract. It does not claim that
 all maintenance APIs and probes described below already exist.
 
+The v0.9 implementation profile in section 1.2 is normative for the first
+implementation. Later optimizations must not silently widen that profile.
+
 ## 1. Objective
 
 Aria is an enhancement of the existing OVS datapath. A planned Aria upgrade
@@ -50,6 +53,34 @@ and must be implemented explicitly:
 - one coordinator for a joint datapath and Python-agent release;
 - progress-aware full-resync and apply barriers;
 - rollback that remains in maintenance until current Neutron state is rebuilt.
+
+### 1.2 v0.9 Implementation Profile
+
+The first implementation deliberately uses the smallest mechanism that closes
+the upgrade safety contract:
+
+- maintenance activation is host-wide for the ACL domain; no port leaves
+  bypass before the complete host generation is staged and verified;
+- Docker health remains readiness-based, so `degraded`, `blocked`, and
+  maintenance `bypass` are visibly `unhealthy`; `/livez` is added for separate
+  process supervision and diagnosis, not as the Docker health authority;
+- the legacy Neutron profile does not require `revision_number`; convergence
+  uses an RPC subscription plus two complete inventory reads with the same
+  canonical desired hash and no event-buffer overflow;
+- replacing the Python container may stop the old writer after quiesce. The
+  old in-memory event buffer is never transferred to the new container;
+- one joint host coordinator upgrades `aria_datapath` and
+  `neutron_aria_agent`; the two existing component installers remain internal
+  primitives and are not independent operator entry points for an
+  incompatible joint release;
+- v0.9 exposes phase, generation, desired hash, port counts, and
+  `last_progress_at`; detailed rule-level progress metrics are deferred until
+  evidence shows they are needed.
+
+This profile intentionally defers per-port early activation, cross-container
+event-buffer transfer, a Neutron snapshot watermark API, and blue-green
+datapaths. These are optimizations, not prerequisites for the safe v0.9
+maintenance path.
 
 ## 2. Non-Negotiable Invariants
 
@@ -103,6 +134,25 @@ managed_domain_contract_version
 The classifier must compare manifests, not infer compatibility from only one
 ELF file hash. An operator may force the more conservative maintenance path,
 but may not force an incompatible candidate into the hot path.
+
+### 3.1 First-Adoption Bootstrap
+
+The first release containing the maintenance gate cannot ask the previous eBPF
+program to open a gate that does not exist in its ABI. That one adoption is a
+documented bootstrap exception:
+
+1. use the current proven hash-aware installer to stop the Python writer and
+   quiesce/detach only exact Aria-owned managed ports;
+2. verify OVS forwarding and OVS/OVS-agent identity continuously;
+3. install the gate-capable datapath and agent from one CI release manifest;
+4. run authoritative full-resync, verify the complete host generation, and
+   record the node as `maintenance_gate_capable=true`;
+5. require every later incompatible or joint upgrade to use the transaction
+   described by this document.
+
+The bootstrap path is not a second permanent installer contract and must be
+removed from normal operator instructions after all supported nodes are gate
+capable.
 
 ## 4. Alternatives And Decision
 
@@ -334,6 +384,12 @@ The host-level domain gate is preferred over sequential per-port delete:
 - future QoS, Mirror, and observability domains are not disabled merely because
   ACL enters maintenance.
 
+The eBPF implementation uses one shared managed-runtime gate consulted before
+per-tap ACL and conntrack configuration. When the ACL maintenance bit is set,
+both ACL and its conntrack path are neutral while QoS, Mirror, and observability
+retain their own feature state. Changing this shared map layout is an eBPF ABI
+change and therefore always selects the maintenance path.
+
 At the packet path, an ACL maintenance gate returns pass to the existing OVS
 path. It must not skip unrelated modules that are still declared active.
 
@@ -385,19 +441,20 @@ full-resync confirms or advances the generation before the operation commits.
 Do not wait for `resync_interval`. The coordinator requests one explicit
 full-resync operation and receives its operation identity.
 
-The preferred consistency algorithm is:
+The v0.9 consistency algorithm is:
 
 1. subscribe to RPC and buffer events;
-2. read the complete host-effective Neutron inventory;
-3. build a candidate snapshot with object revisions;
-4. merge buffered events by maximum trusted revision;
-5. if there is a revision gap, overflow, unsupported event, or foreign-host
-   ambiguity, discard the candidate and repeat full-resync;
-6. require a stable desired hash or a trusted revision watermark before apply.
+2. read the complete host-effective Neutron inventory and compute canonical
+   desired hash A;
+3. merge or classify buffered events without assuming a revision number;
+4. read the complete inventory again and compute canonical desired hash B;
+5. require A == B and no buffer overflow, unsupported event, or foreign-host
+   ambiguity;
+6. otherwise discard the candidate and repeat the bounded double-read cycle.
 
 The future optimal Neutron interface is a host-effective snapshot endpoint
 that returns one transactionally consistent object set plus a watermark. Until
-that exists, RPC buffering plus a second hash-stability read is the fallback.
+that exists, RPC buffering plus the second hash-stability read is normative.
 
 New, deleted, or migrated ports during the maintenance window are handled by
 this authoritative rebuild. The post-upgrade managed-port set is not required
@@ -409,14 +466,12 @@ Submit one `generation + desired_hash` using the asynchronous accepted model.
 The datapath writes candidate maps and hooks behind the inactive bank while the
 ACL maintenance gate remains bypass.
 
-Apply progress must expose:
+The v0.9 apply progress contract exposes:
 
 ```text
 phase
 ports_done
 ports_total
-rules_done
-rules_total
 last_progress_at
 accepted_generation
 applied_generation
@@ -424,24 +479,24 @@ pending_generation
 desired_hash
 ```
 
+Rule-level progress is optional and must not block the first implementation.
+
 The coordinator uses a no-progress timeout and a bounded absolute maintenance
 deadline. A fixed short HTTP timeout is not an apply-failure signal. As long as
 the same generation/hash continues making progress, it is not resubmitted.
 
-### Phase 8: Activate Per Port
+### Phase 8: Activate The Host ACL Generation
 
-A port may leave maintenance bypass only after its complete ingress and egress
-generation is staged and validated. Activation switches the port's active bank
-and then clears its ACL maintenance gate.
+The v0.9 host-level ACL maintenance gate may be cleared only after every port in
+the authoritative host snapshot has complete ingress and egress state staged
+and validated for the same generation and desired hash. Activation switches
+the complete staged generation, verifies both directions, and then clears the
+host ACL maintenance gate.
 
-A failed port remains `degraded + bypass`. Successfully staged ports may become
-`ready + enforce`; one bad port does not keep every VM on the host in bypass.
-This preserves per-port failure isolation while preventing mixed old/new policy
-inside any single port.
-
-Host readiness remains non-ready until every requested port has a terminal and
-truthful result. Product status must expose the count and IDs of bypass ports
-without placing an unbounded port list in the Neutron heartbeat summary.
+If any requested port cannot be staged, the host remains `degraded + bypass`.
+No successfully staged port is activated early in v0.9. This avoids a second
+per-port exception protocol underneath the host gate and makes rollback and
+crash recovery deterministic.
 
 ### Phase 9: Verify And Commit
 
@@ -450,8 +505,7 @@ Commit succeeds only when:
 - `pending_generation` is empty;
 - `accepted_generation == applied_generation`;
 - applied desired hash equals the authoritative desired hash;
-- every requested port is terminal `ready/enforce` or explicit
-  `degraded/bypass`;
+- every requested port is terminal `ready/enforce` for the same generation;
 - no unowned hook was changed;
 - candidate image, binary, eBPF, config, and schema identities match;
 - OVS and OVS-agent identities are unchanged;
@@ -464,11 +518,8 @@ immutable completed record.
 
 ## 9. Health And Readiness Semantics
 
-The current implementation makes both Docker health checks depend on datapath
-`/readyz`. This causes a planned resync or maintenance bypass to mark both
-containers unhealthy even when both processes are alive and OVS is forwarding.
-
-The target contract separates three concepts:
+The target contract exposes three distinct concepts while keeping Docker
+health strict:
 
 | Probe/state | Meaning | Maintenance result |
 | --- | --- | --- |
@@ -476,17 +527,19 @@ The target contract separates three concepts:
 | `/readyz` | ACL state is fully classified and enforcement-ready | HTTP 503 |
 | `/status` | Detailed maintenance, generation, port, and error evidence | HTTP 200 with `maintenance_bypass` |
 
-Docker `HEALTHCHECK` uses liveness. Monitoring and Neutron status use readiness
-and detailed status separately.
+Docker `HEALTHCHECK` continues to use strict readiness. Therefore a recognized
+maintenance bypass is intentionally `unhealthy` in `docker ps`, while `/livez`
+still proves that the process and local API are responsive. Monitoring and
+release automation must consume both signals instead of treating Docker health
+as proof that OVS forwarding failed.
 
 `aria_datapath` liveness requires the Rust process, main loop, TCP health
 endpoint, UDS listener, and bounded status response. It does not require ACL
 enforcement.
 
 `neutron_aria_agent` liveness requires its own service-loop heartbeat to be
-fresh. It reports datapath reachability and ACL readiness as dependent state,
-but it does not become Docker unhealthy merely because the datapath is in a
-recognized maintenance operation.
+fresh. It reports datapath reachability and ACL readiness as dependent state.
+Its Docker health is nevertheless unhealthy while the ACL domain is bypassed.
 
 Expected maintenance status is:
 
@@ -515,10 +568,16 @@ POST /api/v1/admin/maintenance/exit
 POST /api/v1/admin/maintenance/abort
 ```
 
-The existing Neutron routes remain owned by the non-root Python agent identity.
-Admin routes require root peer credentials or a dedicated release-manager
-identity. The Neutron service identity cannot silently open a maintenance
+The v0.9 admin routes are served only on
+`/run/aria/aria-admin.sock`, owned by `root:root` with mode `0600`. The existing
+Neutron routes remain on `/run/aria/aria-agent.sock`, owned by the non-root
+Python agent identity. The Neutron service identity cannot open a maintenance
 bypass outside the approved upgrade transaction.
+
+While maintenance is active, a normal Neutron mutation is fenced. Only a
+full-host snapshot carrying the matching `maintenance_operation_id` may stage
+candidate state. Port-scoped snapshots and delete routes remain blocked until
+the host generation is activated or the operation is rolled back.
 
 `enter`, `exit`, and `abort` are compare-and-swap operations over
 `operation_id`, generation, desired hash, and current phase. Repeating the same
@@ -536,7 +595,7 @@ changing runtime state.
 | Candidate agent cannot start | Datapath stays live in maintenance bypass | Restore old agent or repair candidate |
 | Neutron source unavailable | Stay maintenance bypass | Retry source/full-resync |
 | RPC buffer overflow or revision gap | Do not activate candidate policy | Repeat authoritative full-resync |
-| Shadow apply fails on one port | Failed port remains bypass | Activate only terminal successful ports; retry failed port |
+| Shadow apply fails on one port | Entire host ACL gate remains bypass | Retry or roll back the complete host generation |
 | Generation/hash mismatch | Block activation | Investigate identity; rebuild snapshot |
 | Rollback candidate fails | Stay maintenance bypass, writer paused | Preserve ledger and require operator recovery |
 | OVS identity changes | Mark upgrade failed; do not manipulate OVS | Escalate as external failure |
@@ -555,7 +614,7 @@ confirm or re-enter ACL maintenance bypass
   -> negotiate old UDS/schema contract
   -> authoritative full-resync from current Neutron state
   -> shadow apply
-  -> per-port activation
+  -> atomic host ACL generation activation
   -> verify OVS invariant
   -> commit rollback
 ```
@@ -619,7 +678,7 @@ belong in the Aria status API and dedicated CLI, not `neutron agent-show`.
 
 - add datapath `/livez`;
 - add Python service-loop heartbeat evidence;
-- make Docker health liveness-based;
+- keep Docker health strict and readiness-based;
 - preserve `/readyz` as strict ACL readiness;
 - expose recognized maintenance status.
 
@@ -632,7 +691,10 @@ belong in the Aria status API and dedicated CLI, not `neutron agent-show`.
 
 ### Stage U3: Agent Quiesce And Full-Resync Barrier
 
-- add writer pause and bounded RPC buffering;
+- fence normal writers by maintenance operation identity;
+- use the stop-container fallback for the old v0.9 writer after bypass is
+  proven; do not transfer its in-memory event buffer;
+- subscribe the new agent before its authoritative inventory reads;
 - add explicit full-resync trigger and progress identity;
 - add overflow/gap fallback and second-read hash stability;
 - prevent periodic and RPC writers from racing the upgrade.
@@ -660,8 +722,8 @@ The design is implemented only when all of the following pass:
    restart datapath or OVS.
 2. Datapath-affecting upgrades enter one explicit ACL bypass transaction before
    stopping the old datapath.
-3. Container liveness remains healthy during a recognized maintenance bypass,
-   while ACL readiness truthfully remains non-ready.
+3. `/livez` remains successful during a recognized maintenance bypass, while
+   `/readyz` and Docker health truthfully remain unhealthy.
 4. Stopping either Aria container never causes an Aria-attributable OVS canary
    interruption.
 5. A new datapath cannot reactivate old ACL before authoritative full-resync.
@@ -671,8 +733,8 @@ The design is implemented only when all of the following pass:
    rejected.
 8. Full-resync and apply use progress-aware convergence without duplicate
    generations caused by a short client timeout.
-9. A failed port remains explicit bypass without preventing successful ports
-   from enforcing complete generations.
+9. A failed port prevents host activation; no port enforces the new generation
+   until the complete host generation is staged and verified.
 10. Rollback starts in maintenance bypass and rebuilds from current Neutron
     state rather than blindly activating stale pins.
 11. OVS/OVS-agent identities, `br-int`, business ports, and ofports remain
@@ -687,4 +749,7 @@ The design is implemented only when all of the following pass:
 - no automatic reactivation after a stale maintenance lease;
 - no requirement for zero ACL enforcement gap in the current maintenance path;
 - no blue-green duplicate datapath in the current release;
+- no per-port early activation under the host maintenance gate in v0.9;
+- no cross-container transfer of an in-memory RPC event buffer in v0.9;
+- no dependency on Neutron `revision_number` in the legacy profile;
 - no QoS or Mirror policy implementation as part of this upgrade work.
