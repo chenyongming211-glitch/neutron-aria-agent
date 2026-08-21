@@ -871,6 +871,43 @@ def run_acl_enforcement_gap_smoke_test():
     )])
 
 
+def check_tap_recreate_identity_smoke_contract():
+    print("==> checking tap-recreate identity smoke contract")
+    source = read_text(bash_path(
+        "deploy", "kolla", "smoke",
+        "neutron_aria_tap_recreate_identity_smoke.sh",
+    ))
+    required = [
+        "old_ifindex",
+        "new_ifindex",
+        "status.jsonl",
+        "tc-ingress.txt",
+        "tc-egress.txt",
+        "acl-probe.log",
+        "desired_hash",
+        "ovs-canary.log",
+        "identity_false_ready_samples",
+        "single_port_replay_seen",
+    ]
+    missing = [token for token in required if token not in source]
+    if missing:
+        raise SystemExit(
+            "ERROR: tap-recreate identity smoke lost required evidence: %s"
+            % ", ".join(missing)
+        )
+    forbidden = [
+        "docker restart neutron_openvswitch_agent",
+        "systemctl restart openvswitch",
+        "systemctl restart neutron-openvswitch-agent",
+    ]
+    present = [token for token in forbidden if token in source]
+    if present:
+        raise SystemExit(
+            "ERROR: tap-recreate identity smoke may not restart OVS: %s"
+            % ", ".join(present)
+        )
+
+
 def run_plugin_policy_rollback_test():
     bash = shutil.which("bash")
     if not bash:
@@ -963,6 +1000,7 @@ def run_fast_contracts():
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
     run_acl_enforcement_gap_smoke_test()
+    check_tap_recreate_identity_smoke_contract()
     run_plugin_policy_rollback_test()
     run_transaction_state_smoke_test()
     run_db_crud_adminrc_test()

@@ -30,13 +30,13 @@
 - Produces: `TapLifecycleEvent::{Deleted, Ready}` and `TapRegistry::subscribe_lifecycle()`.
 - Produces: authority-preserving link-loss detach distinct from explicit Neutron detach.
 
-- [ ] **Step 1: Write failing unit tests** for event ordering, old/new ifindex payloads, preserved Neutron authority, and standalone behavior without authority.
-- [ ] **Step 2: Commit the RED tests** and trigger GitHub Actions; expect compile/test failure because lifecycle interfaces do not exist.
-- [ ] **Step 3: Add the bounded broadcast channel and lifecycle event types.**
-- [ ] **Step 4: Split physical link loss from explicit detach** so only explicit detach clears Neutron authority.
-- [ ] **Step 5: Make replacement attach authority-aware** and publish `Ready` only after quiesced attach succeeds.
-- [ ] **Step 6: Route netlink handlers through the lifecycle methods** and retain the 60-second scan as a loss-recovery safety net.
-- [ ] **Step 7: Run GitHub Actions** and require all TapRegistry/netlink tests to pass.
+- [x] **Step 1: Write failing unit tests** for event ordering, old/new ifindex payloads, preserved Neutron authority, and standalone behavior without authority.
+- [x] **Step 2: Commit the RED tests** and trigger GitHub Actions; expect compile/test failure because lifecycle interfaces do not exist.
+- [x] **Step 3: Add the bounded broadcast channel and lifecycle event types.**
+- [x] **Step 4: Split physical link loss from explicit detach** so only explicit detach clears Neutron authority.
+- [x] **Step 5: Make replacement attach authority-aware** and publish `Ready` only after quiesced attach succeeds.
+- [x] **Step 6: Route netlink handlers through the lifecycle methods** and retain the 60-second scan as a loss-recovery safety net.
+- [x] **Step 7: Run GitHub Actions** and require all TapRegistry/netlink tests to pass.
 
 ### Task 2: Immediate Neutron Status Invalidation
 
@@ -47,13 +47,13 @@
 - Consumes: `TapLifecycleEvent::Deleted { ifname, ifindex }`.
 - Produces: `project_tap_attachment_identity_loss(...) -> bool`.
 
-- [ ] **Step 1: Write failing pure tests** proving a matching delete changes only the target port to `degraded/bypass`, removes its ACL domain hash, retains its old ifindex, and sets `runtime_reconcile_requires_full_resync`.
-- [ ] **Step 2: Add tests** for stale old-ifindex events, unrelated ports, pending generation, and stronger recovery states.
-- [ ] **Step 3: Commit the RED tests** and trigger GitHub Actions.
-- [ ] **Step 4: Implement the pure projection** with reason `tap_attachment_identity_lost`.
-- [ ] **Step 5: Add the lifecycle consumer task** under the existing apply lock and append a snapshot commit to the Neutron WAL.
-- [ ] **Step 6: Publish invalidated RAM state even when WAL append fails**, while recording the durability failure authority.
-- [ ] **Step 7: Run GitHub Actions** and require status/transaction tests to pass.
+- [x] **Step 1: Write failing pure tests** proving a matching delete changes only the target port to `degraded/bypass`, removes its ACL domain hash, retains its old ifindex, and sets `runtime_reconcile_requires_full_resync`.
+- [x] **Step 2: Add tests** for stale old-ifindex events, unrelated ports, pending generation, and stronger recovery states.
+- [x] **Step 3: Commit the RED tests** and trigger GitHub Actions.
+- [x] **Step 4: Implement the pure projection** with reason `tap_attachment_identity_lost`.
+- [x] **Step 5: Add the lifecycle consumer task** under the existing apply lock and append a snapshot commit to the Neutron WAL.
+- [x] **Step 6: Publish invalidated RAM state even when WAL append fails**, while recording the durability failure authority.
+- [x] **Step 7: Run GitHub Actions** and require status/transaction tests to pass.
 
 ### Task 3: Safe In-Process Scoped Replay
 
@@ -64,13 +64,13 @@
 - Consumes: `TapLifecycleEvent::Ready { ifname, ifindex }`.
 - Produces: process-local applied port snapshot cache and `replay_recreated_port(...)`.
 
-- [ ] **Step 1: Write failing tests** for full-host cache replacement, scoped cache update, and delete eviction.
-- [ ] **Step 2: Write failing replay tests** for exact generation/hash success and rejection on cache miss, pending generation, identity mismatch, stale event, or unchanged ifindex.
-- [ ] **Step 3: Commit the RED tests** and trigger GitHub Actions.
-- [ ] **Step 4: Add the non-persistent cache** to `NeutronApiState` and update it only after a successful durable snapshot commit.
-- [ ] **Step 5: Build a one-port snapshot from the exact cache entry**, replace only its ifindex, and pass it through existing SinglePort admission/apply/commit code.
-- [ ] **Step 6: Keep all unsafe cases degraded** and log a bounded fallback reason without retry loops.
-- [ ] **Step 7: Run GitHub Actions** and require scoped planner, transaction, WAL, and behavior tests to pass.
+- [x] **Step 1: Write failing tests** for full-host cache replacement, scoped cache update, and delete eviction.
+- [x] **Step 2: Write failing replay tests** for exact generation/hash success and rejection on cache miss, pending generation, identity mismatch, stale event, or unchanged ifindex.
+- [x] **Step 3: Commit the RED tests** and trigger GitHub Actions.
+- [x] **Step 4: Add the non-persistent cache** to `NeutronApiState` and update it only after a successful durable snapshot commit.
+- [x] **Step 5: Build a one-port snapshot from the exact cache entry**, replace only its ifindex, and pass it through existing SinglePort admission/apply/commit code.
+- [x] **Step 6: Keep all unsafe cases degraded** and log a bounded fallback reason without retry loops.
+- [x] **Step 7: Run GitHub Actions** and require scoped planner, transaction, WAL, and behavior tests to pass.
 
 ### Task 4: Regression Evidence and Documentation
 
@@ -83,10 +83,9 @@
 - Consumes: the exact GitHub Actions `aria-agent` and eBPF artifact hashes.
 - Produces: deterministic field evidence bound to the candidate commit and artifact hashes.
 
-- [ ] **Step 1: Add a static smoke contract check** requiring old/new ifindex, status timeline, TC ingress/egress identities, ACL probe, generation/hash, and OVS canary evidence.
-- [ ] **Step 2: Implement the smoke script** with cleanup traps and no OVS mutation commands.
-- [ ] **Step 3: Build the exact candidate in GitHub Actions** and record workflow, commit, and SHA-256 values.
-- [ ] **Step 4: Deploy only Aria candidate artifacts** to the test compute nodes; do not restart OVS/ovs-agent.
-- [ ] **Step 5: Run at least three tap recreation cycles** and require no false-ready sample plus zero OVS canary loss.
-- [ ] **Step 6: Record evidence and close REVIEW-ACL-124** only after the field gate passes.
-
+- [x] **Step 1: Add a static smoke contract check** requiring old/new ifindex, status timeline, TC ingress/egress identities, ACL probe, generation/hash, and OVS canary evidence.
+- [x] **Step 2: Implement the smoke script** with cleanup traps and no OVS mutation commands.
+- [x] **Step 3: Build the exact candidate in GitHub Actions** and record workflow, commit, and SHA-256 values.
+- [x] **Step 4: Deploy only Aria candidate artifacts** to the test compute nodes; do not restart OVS/ovs-agent.
+- [x] **Step 5: Run at least three tap recreation cycles** and require no false-ready sample plus zero OVS canary loss.
+- [x] **Step 6: Record evidence and close REVIEW-ACL-124** only after the field gate passes.
