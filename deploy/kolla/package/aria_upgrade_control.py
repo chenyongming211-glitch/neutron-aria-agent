@@ -47,20 +47,18 @@ REQUIRED_IMAGES = ("neutron-aria-agent", "aria-datapath")
 UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 
 ALLOWED = {
-    "preflight": ("bypass_preparing", "failed_before_mutation", "quiescing"),
+    "preflight": ("quiescing", "failed_before_mutation"),
     "quiescing": ("bypass_preparing",),
     "bypass_preparing": ("bypass_confirmed",),
-    "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass", "rollback"),
-    "datapath_upgrading": ("datapath_live", "maintenance_bypass", "rollback"),
-    "datapath_live": ("agent_upgrading", "maintenance_bypass", "rollback"),
-    "agent_upgrading": (
-        "full_resync", "maintenance_bypass", "rollback", "agent_buffering",
-    ),
-    "agent_buffering": ("full_resync",),
-    "full_resync": ("shadow_apply", "maintenance_bypass", "rollback"),
-    "shadow_apply": ("activating", "maintenance_bypass", "rollback"),
-    "activating": ("verifying", "maintenance_bypass", "rollback"),
-    "verifying": ("committed", "maintenance_bypass", "rollback"),
+    "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
+    "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
+    "datapath_live": ("agent_upgrading", "maintenance_bypass"),
+    "agent_upgrading": ("agent_buffering", "maintenance_bypass"),
+    "agent_buffering": ("full_resync", "maintenance_bypass"),
+    "full_resync": ("shadow_apply", "maintenance_bypass"),
+    "shadow_apply": ("activating", "maintenance_bypass"),
+    "activating": ("verifying", "maintenance_bypass"),
+    "verifying": ("committed", "maintenance_bypass"),
     "maintenance_bypass": ("full_resync", "rollback"),
     "rollback": ("full_resync", "maintenance_bypass"),
 }
@@ -86,6 +84,7 @@ AUDIT_RESULTS = frozenset(
 )
 MAX_AUDIT_INTEGER = (1 << 63) - 1
 TERMINAL_PHASES = ("committed", "failed_before_mutation")
+SAFE_EXACT_RESUME_PHASES = ("quiescing", "agent_buffering")
 REQUIRED_LEDGER_FIELDS = (
     "schema_version",
     "operation_id",
@@ -116,8 +115,17 @@ REQUIRED_LEDGER_FIELDS = (
 EVIDENCE_FIELDS = frozenset(REQUIRED_LEDGER_FIELDS) | frozenset(
     ("generation", "desired_hash")
 )
-IMMUTABLE_LEDGER_FIELDS = frozenset(
-    ("schema_version", "operation_id", "host", "phase", "started_at")
+COORDINATOR_LEDGER_FIELDS = frozenset(
+    (
+        "schema_version", "operation_id", "host", "phase", "started_at",
+        "last_progress_at", "upgrade_class", "last_error", "recovery_action",
+    )
+)
+EXTERNAL_EVIDENCE_FIELDS = EVIDENCE_FIELDS - COORDINATOR_LEDGER_FIELDS
+UPGRADE_CLASSES = frozenset(("planned_maintenance",))
+SAFE_EVIDENCE_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
+RFC3339_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
 LEGAL_PHASES = frozenset(ALLOWED) | frozenset(
     phase for destinations in ALLOWED.values() for phase in destinations
@@ -156,18 +164,23 @@ class UpgradeLedger(object):
         operations_dir=DEFAULT_OPERATIONS_DIR,
         lock_path=DEFAULT_LOCK_PATH,
         owner_uid=0,
+        trusted_gid=0,
         audit_sink=None,
         clock=None,
     ):
         self.operations_dir = Path(operations_dir)
         self.lock_path = Path(lock_path)
         self.owner_uid = owner_uid
+        self.trusted_gid = trusted_gid
         self.audit_sink = audit_sink
         self.clock = clock or time.time
         self._lock_fd = None
+        self._lock_anchor_fd = None
+        self._lock_parent_fd = None
         self._operations_fd = None
         self._state = None
         self._path = None
+        self._durability_uncertain = False
 
     @property
     def state(self):
@@ -190,11 +203,18 @@ class UpgradeLedger(object):
                     os.close(self._lock_fd)
                     self._lock_fd = None
         finally:
+            if self._lock_parent_fd is not None:
+                os.close(self._lock_parent_fd)
+                self._lock_parent_fd = None
+            if self._lock_anchor_fd is not None:
+                os.close(self._lock_anchor_fd)
+                self._lock_anchor_fd = None
             if self._operations_fd is not None:
                 os.close(self._operations_fd)
                 self._operations_fd = None
             self._state = None
             self._path = None
+            self._durability_uncertain = False
 
     def begin(self, operation_id, host=None, upgrade_class=None, evidence=None):
         """Create or idempotently reopen an operation in ``preflight``."""
@@ -209,6 +229,10 @@ class UpgradeLedger(object):
                         "this ledger already owns another operation"
                     )
                 self._fsync_operations_dir()
+                state = self._read_ledger(self._path, operation_id)
+                self._set_current(self._path, state)
+                self._durability_uncertain = False
+                self._validate_lock_binding()
                 return self.state
 
             pending = self._pending_ledgers()
@@ -226,12 +250,14 @@ class UpgradeLedger(object):
                 state = self._read_ledger(path, operation_id)
                 self._fsync_operations_dir()
                 self._set_current(path, state)
+                self._durability_uncertain = False
+                self._validate_lock_binding()
                 return self.state
 
             if not isinstance(host, str) or not host:
                 raise ValueError("host must be a non-empty string")
-            if not isinstance(upgrade_class, str) or not upgrade_class:
-                raise ValueError("upgrade_class must be a non-empty string")
+            if upgrade_class not in UPGRADE_CLASSES:
+                raise ValueError("upgrade_class is not recognized")
             if evidence is None:
                 evidence = {}
             if not isinstance(evidence, dict):
@@ -268,6 +294,7 @@ class UpgradeLedger(object):
             self._merge_evidence(state, evidence)
             self._write_ledger(path, state)
             self._set_current(path, state)
+            self._validate_lock_binding()
             return self.state
         except Exception:
             if acquired_here:
@@ -276,6 +303,12 @@ class UpgradeLedger(object):
 
     def transition(self, expected_phase, next_phase, evidence=None):
         """Atomically compare the current phase and persist one legal edge."""
+        return self._transition(expected_phase, next_phase, evidence, "success")
+
+    def _transition(
+        self, expected_phase, next_phase, evidence=None, result="success",
+        internal=None,
+    ):
         self._require_current()
         self._state = self._read_ledger(
             self._path, self._state["operation_id"]
@@ -294,6 +327,7 @@ class UpgradeLedger(object):
             )
         next_state = copy.deepcopy(self._state)
         self._merge_evidence(next_state, evidence or {})
+        self._merge_internal(next_state, internal or {})
         next_state["phase"] = next_phase
         next_state["last_progress_at"] = self.clock()
         try:
@@ -303,7 +337,8 @@ class UpgradeLedger(object):
             self._audit(old_phase, next_phase, evidence, "persistence_failed")
             raise
         self._state = next_state
-        self._audit(old_phase, next_phase, evidence, "success")
+        self._audit(old_phase, next_phase, evidence, result)
+        self._validate_lock_binding()
         return self.state
 
     def fail(self, expected_phase, error, evidence=None):
@@ -324,15 +359,23 @@ class UpgradeLedger(object):
             )
         if not isinstance(error, str):
             error = str(error)
-        merged = dict(evidence or {})
-        merged["last_error"] = error[:4096]
+        internal = {"last_error": error[:4096]}
         if expected_phase == "preflight":
-            return self.transition(expected_phase, "failed_before_mutation", merged)
+            return self._transition(
+                expected_phase, "failed_before_mutation", evidence, "failed", internal
+            )
         if "maintenance_bypass" in ALLOWED.get(expected_phase, ()):
-            merged.setdefault("recovery_action", "operator_action_required")
-            return self.transition(expected_phase, "maintenance_bypass", merged)
-        merged.setdefault("recovery_action", "resume_exact_phase")
-        return self._update_same_phase(merged, "failed", expected_phase)
+            internal["recovery_action"] = "operator_action_required"
+            return self._transition(
+                expected_phase, "maintenance_bypass", evidence, "failed", internal
+            )
+        if expected_phase == "maintenance_bypass":
+            internal["recovery_action"] = "operator_action_required"
+        else:
+            internal["recovery_action"] = "resume_exact_phase"
+        return self._update_same_phase(
+            evidence or {}, "failed", expected_phase, internal
+        )
 
     def commit(self, evidence=None):
         """Commit only the final verified phase."""
@@ -360,25 +403,32 @@ class UpgradeLedger(object):
             state = self._read_ledger(path, operation_id)
             self._fsync_operations_dir()
             self._set_current(path, state)
+            self._durability_uncertain = False
             phase = state["phase"]
             if phase in TERMINAL_PHASES:
+                self._validate_lock_binding()
                 return self.state
             if phase == "maintenance_bypass":
                 if state.get("recovery_action") == "operator_action_required":
+                    self._validate_lock_binding()
                     return self.state
                 return self._update_same_phase(
+                    {}, "recovered", phase,
                     {"recovery_action": "operator_action_required"},
-                    "recovered",
-                    phase,
+                )
+            if phase in SAFE_EXACT_RESUME_PHASES:
+                return self._update_same_phase(
+                    {}, "recovered", phase,
+                    {"recovery_action": "resume_exact_phase"},
                 )
             if "maintenance_bypass" in ALLOWED.get(phase, ()):
-                return self.transition(
-                    phase,
-                    "maintenance_bypass",
+                return self._transition(
+                    phase, "maintenance_bypass", {}, "recovered",
                     {"recovery_action": "operator_action_required"},
                 )
             return self._update_same_phase(
-                {"recovery_action": "resume_exact_phase"}, "recovered", phase
+                {}, "recovered", phase,
+                {"recovery_action": "resume_exact_phase"},
             )
         except Exception:
             if acquired_here:
@@ -397,6 +447,7 @@ class UpgradeLedger(object):
 
     def _acquire_lock(self):
         if self._lock_fd is not None:
+            self._validate_lock_binding()
             return
         self._state = None
         self._path = None
@@ -406,6 +457,7 @@ class UpgradeLedger(object):
             raise UpgradeLedgerTrustError("lock directory has no trusted anchor")
         anchor_fd = self._open_anchor_directory(anchor, "lock directory anchor")
         parent_fd = None
+        fd = None
         try:
             parent_stat = self._stat_directory_at(
                 anchor_fd, parent.name, "lock directory", missing_ok=False
@@ -471,14 +523,83 @@ class UpgradeLedger(object):
                     if error.errno in (errno.EACCES, errno.EAGAIN):
                         raise UpgradeLedgerLocked("another upgrade owns the host lock")
                     raise
+                self._lock_fd = fd
+                self._lock_anchor_fd = anchor_fd
+                self._lock_parent_fd = parent_fd
+                fd = None
+                anchor_fd = None
+                parent_fd = None
+                self._validate_lock_binding()
             except Exception:
-                os.close(fd)
+                if fd is not None:
+                    os.close(fd)
+                    fd = None
                 raise
+        except Exception:
+            if self._lock_fd is not None:
+                self.close()
+            raise
         finally:
+            if fd is not None:
+                os.close(fd)
             if parent_fd is not None:
                 os.close(parent_fd)
-            os.close(anchor_fd)
-        self._lock_fd = fd
+            if anchor_fd is not None:
+                os.close(anchor_fd)
+
+    def _validate_lock_binding(self):
+        if (
+            self._lock_fd is None
+            or self._lock_anchor_fd is None
+            or self._lock_parent_fd is None
+        ):
+            raise UpgradeLedgerError("host lock is not fully pinned")
+        parent = self.lock_path.parent
+        anchor = parent.parent
+        self._validate_lock_directory_stat(os.fstat(self._lock_parent_fd))
+        self._validate_directory_binding(
+            self._lock_anchor_fd,
+            parent.name,
+            self._lock_parent_fd,
+            "lock directory",
+        )
+        fresh_anchor_fd = self._open_anchor_directory(
+            anchor, "lock directory anchor"
+        )
+        try:
+            pinned_anchor = os.fstat(self._lock_anchor_fd)
+            fresh_anchor = os.fstat(fresh_anchor_fd)
+            if (pinned_anchor.st_dev, pinned_anchor.st_ino) != (
+                fresh_anchor.st_dev, fresh_anchor.st_ino,
+            ):
+                raise UpgradeLedgerTrustError("lock directory anchor binding changed")
+        finally:
+            os.close(fresh_anchor_fd)
+        try:
+            path_stat = os.stat(
+                self.lock_path.name,
+                dir_fd=self._lock_parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise UpgradeLedgerTrustError(
+                "lock file cannot be revalidated: %s" % error
+            )
+        file_stat = os.fstat(self._lock_fd)
+        self._validate_lock_file_stat(file_stat)
+        self._validate_lock_file_stat(path_stat)
+        if (file_stat.st_dev, file_stat.st_ino) != (
+            path_stat.st_dev, path_stat.st_ino,
+        ):
+            raise UpgradeLedgerTrustError("lock file binding changed")
+
+    def _validate_lock_file_stat(self, file_stat):
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != self.owner_uid:
+            raise UpgradeLedgerTrustError("lock file has untrusted ownership or type")
+        if stat.S_IMODE(file_stat.st_mode) != 0o600:
+            raise UpgradeLedgerTrustError("lock file mode must be 0600")
+        if file_stat.st_nlink != 1:
+            raise UpgradeLedgerTrustError("lock file must have exactly one link")
 
     def _ensure_operations_dir(self):
         release = self.operations_dir.parent
@@ -604,30 +725,42 @@ class UpgradeLedger(object):
             os.close(anchor_fd)
 
     def _open_anchor_directory(self, path, label):
-        try:
-            expected_stat = os.lstat(str(path))
-        except OSError as error:
-            raise UpgradeLedgerTrustError("%s cannot be inspected: %s" % (label, error))
-        if not stat.S_ISDIR(expected_stat.st_mode):
-            raise UpgradeLedgerTrustError("%s must not be a symlink" % label)
+        path = Path(path)
+        if not path.is_absolute():
+            raise UpgradeLedgerTrustError("%s must be an absolute path" % label)
         flags = os.O_RDONLY
         if hasattr(os, "O_DIRECTORY"):
             flags |= os.O_DIRECTORY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        directory_fd = None
         try:
-            directory_fd = os.open(str(path), flags)
+            directory_fd = os.open(os.path.sep, flags)
+            root_stat = os.fstat(directory_fd)
+            if not stat.S_ISDIR(root_stat.st_mode):
+                raise UpgradeLedgerTrustError("filesystem root is not a directory")
+            for component in path.parts[1:]:
+                expected_stat = self._stat_directory_at(
+                    directory_fd, component, label, missing_ok=False
+                )
+                child_fd = self._open_directory_at(
+                    directory_fd, component, expected_stat, label
+                )
+                parent_fd = directory_fd
+                directory_fd = child_fd
+                os.close(parent_fd)
+            result = directory_fd
+            directory_fd = None
+            return result
+        except UpgradeLedgerError:
+            raise
         except OSError as error:
-            raise UpgradeLedgerTrustError("%s cannot be opened safely: %s" % (label, error))
-        opened_stat = os.fstat(directory_fd)
-        if (
-            not stat.S_ISDIR(opened_stat.st_mode)
-            or (opened_stat.st_dev, opened_stat.st_ino)
-            != (expected_stat.st_dev, expected_stat.st_ino)
-        ):
-            os.close(directory_fd)
-            raise UpgradeLedgerTrustError("%s changed while it was opened" % label)
-        return directory_fd
+            raise UpgradeLedgerTrustError(
+                "%s cannot be opened safely: %s" % (label, error)
+            )
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
 
     def _stat_directory_at(self, parent_fd, name, label, missing_ok):
         try:
@@ -652,8 +785,13 @@ class UpgradeLedger(object):
             raise UpgradeLedgerTrustError("lock directory must be a directory")
         if directory_stat.st_uid != self.owner_uid:
             raise UpgradeLedgerTrustError("lock directory owner is not trusted")
-        if stat.S_IMODE(directory_stat.st_mode) & 0o002:
+        directory_mode = stat.S_IMODE(directory_stat.st_mode)
+        if directory_mode & 0o002:
             raise UpgradeLedgerTrustError("lock directory must not be world writable")
+        if directory_mode & 0o020 and directory_stat.st_gid != self.trusted_gid:
+            raise UpgradeLedgerTrustError(
+                "group-writable lock directory group is not trusted"
+            )
 
     def _open_directory_at(self, parent_fd, name, expected_stat, label):
         flags = os.O_RDONLY
@@ -665,15 +803,18 @@ class UpgradeLedger(object):
             directory_fd = os.open(name, flags, dir_fd=parent_fd)
         except OSError as error:
             raise UpgradeLedgerTrustError("%s cannot be opened safely: %s" % (label, error))
-        opened_stat = os.fstat(directory_fd)
-        if (
-            not stat.S_ISDIR(opened_stat.st_mode)
-            or (opened_stat.st_dev, opened_stat.st_ino)
-            != (expected_stat.st_dev, expected_stat.st_ino)
-        ):
+        try:
+            opened_stat = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(opened_stat.st_mode)
+                or (opened_stat.st_dev, opened_stat.st_ino)
+                != (expected_stat.st_dev, expected_stat.st_ino)
+            ):
+                raise UpgradeLedgerTrustError("%s changed while it was opened" % label)
+            return directory_fd
+        except Exception:
             os.close(directory_fd)
-            raise UpgradeLedgerTrustError("%s changed while it was opened" % label)
-        return directory_fd
+            raise
 
     def _validate_directory_binding(self, parent_fd, name, directory_fd, label):
         bound_stat = self._stat_directory_at(
@@ -703,6 +844,27 @@ class UpgradeLedger(object):
         directory_stat = os.fstat(self._operations_fd)
         self._validate_directory_stat(directory_stat, "operations directory")
         os.fsync(self._operations_fd)
+        self._validate_operations_binding()
+
+    def _validate_operations_binding(self):
+        if self._operations_fd is None:
+            raise UpgradeLedgerError("operations directory is not pinned")
+        fresh_fd = self._open_anchor_directory(
+            self.operations_dir, "operations directory path"
+        )
+        try:
+            pinned_stat = os.fstat(self._operations_fd)
+            fresh_stat = os.fstat(fresh_fd)
+            self._validate_directory_stat(pinned_stat, "operations directory")
+            self._validate_directory_stat(fresh_stat, "operations directory")
+            if (pinned_stat.st_dev, pinned_stat.st_ino) != (
+                fresh_stat.st_dev, fresh_stat.st_ino,
+            ):
+                raise UpgradeLedgerTrustError(
+                    "operations directory path binding changed"
+                )
+        finally:
+            os.close(fresh_fd)
 
     def _ledger_name(self, path):
         path = Path(path)
@@ -808,8 +970,98 @@ class UpgradeLedger(object):
         if not isinstance(evidence, dict):
             raise ValueError("evidence must be a JSON object")
         for key, value in evidence.items():
-            if key in EVIDENCE_FIELDS and key not in IMMUTABLE_LEDGER_FIELDS:
-                state[key] = copy.deepcopy(value)
+            if key in COORDINATOR_LEDGER_FIELDS or key not in EXTERNAL_EVIDENCE_FIELDS:
+                continue
+            state[key] = copy.deepcopy(self._validate_evidence_value(key, value))
+
+    def _merge_internal(self, state, evidence):
+        if not isinstance(evidence, dict):
+            raise UpgradeLedgerError("internal evidence must be a JSON object")
+        for key, value in evidence.items():
+            if key not in ("last_error", "recovery_action"):
+                raise UpgradeLedgerError("internal ledger field is not coordinator-owned")
+            if value is not None and not isinstance(value, str):
+                raise UpgradeLedgerError("internal ledger value must be a string")
+            state[key] = value
+
+    def _validate_evidence_value(self, field, value):
+        if field == "affected_domains":
+            if (
+                not isinstance(value, list)
+                or len(value) > 64
+                or any(
+                    not isinstance(item, str)
+                    or SAFE_EVIDENCE_STRING_RE.fullmatch(item) is None
+                    for item in value
+                )
+            ):
+                raise ValueError("affected_domains must be safe string identities")
+            return value
+        if field in ("old_image_ids", "candidate_image_ids"):
+            if not isinstance(value, dict) or len(value) > len(REQUIRED_IMAGES):
+                raise ValueError("image identities must be a component mapping")
+            for component, identity in value.items():
+                if component not in REQUIRED_IMAGES or not self._valid_image_identity(
+                    identity
+                ):
+                    raise ValueError("image identity is not immutable or recognized")
+            return value
+        if field in (
+            "old_manifest_hash", "candidate_manifest_hash", "old_config_hash",
+            "candidate_config_hash", "pre_desired_hash", "desired_hash",
+        ):
+            if value is not None and self._audit_digest(value) is None:
+                raise ValueError("%s must be a sha256 digest" % field)
+            return value
+        if field in (
+            "pre_accepted_generation", "pre_applied_generation", "generation",
+            "ovs_vswitchd_pid",
+        ):
+            if value is not None and self._audit_nonnegative_integer(value) is None:
+                raise ValueError("%s must be a bounded nonnegative integer" % field)
+            return value
+        if field == "pre_managed_port_ids":
+            if (
+                not isinstance(value, list)
+                or len(value) > 8192
+                or any(
+                    not isinstance(item, str)
+                    or SAFE_EVIDENCE_STRING_RE.fullmatch(item) is None
+                    for item in value
+                )
+            ):
+                raise ValueError("pre_managed_port_ids must be safe string identities")
+            return value
+        if field == "maintenance_token":
+            if value is not None and (
+                not isinstance(value, str) or not 1 <= len(value) <= 4096
+            ):
+                raise ValueError("maintenance_token must be a bounded string")
+            return value
+        if field in ("ovs_agent_container_id", "br_int_uuid"):
+            if value is not None and (
+                not isinstance(value, str)
+                or SAFE_EVIDENCE_STRING_RE.fullmatch(value) is None
+            ):
+                raise ValueError("%s must be a safe identity" % field)
+            return value
+        if field == "ovs_agent_started_at":
+            if value is not None and (
+                not isinstance(value, str) or RFC3339_RE.fullmatch(value) is None
+            ):
+                raise ValueError("ovs_agent_started_at must be an RFC3339 timestamp")
+            return value
+        raise ValueError("evidence field has no validation schema")
+
+    def _valid_image_identity(self, value):
+        return (
+            isinstance(value, str)
+            and len(value) <= 512
+            and (
+                AUDIT_IMAGE_ID_RE.fullmatch(value) is not None
+                or is_valid_image_identity(value)
+            )
+        )
 
     def _write_ledger(self, path, state):
         if self._operations_fd is None:
@@ -847,11 +1099,25 @@ class UpgradeLedger(object):
             if fd is None:
                 raise UpgradeLedgerError("temporary ledger name space is exhausted")
             os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as output:
-                fd = None
+            with os.fdopen(fd, "wb", closefd=False) as output:
                 output.write(payload)
                 output.flush()
                 os.fsync(output.fileno())
+            temporary_stat = os.stat(
+                temporary_name,
+                dir_fd=self._operations_fd,
+                follow_symlinks=False,
+            )
+            opened_stat = os.fstat(fd)
+            self._validate_file_stat(temporary_stat)
+            self._validate_file_stat(opened_stat)
+            if (temporary_stat.st_dev, temporary_stat.st_ino) != (
+                opened_stat.st_dev, opened_stat.st_ino,
+            ):
+                raise UpgradeLedgerTrustError(
+                    "temporary ledger changed before rename"
+                )
+            self._durability_uncertain = True
             os.rename(
                 temporary_name,
                 name,
@@ -860,6 +1126,12 @@ class UpgradeLedger(object):
             )
             temporary_name = None
             self._fsync_operations_dir()
+            durable_state = self._read_ledger(path, state["operation_id"])
+            if durable_state != state:
+                raise UpgradeLedgerTrustError(
+                    "durable ledger content changed after rename"
+                )
+            self._durability_uncertain = False
         finally:
             if fd is not None:
                 os.close(fd)
@@ -876,6 +1148,7 @@ class UpgradeLedger(object):
     def _require_current(self):
         if self._lock_fd is None or self._state is None or self._path is None:
             raise UpgradeLedgerError("no operation is currently owned")
+        self._validate_lock_binding()
 
     def _refresh_after_write_failure(self):
         try:
@@ -885,7 +1158,7 @@ class UpgradeLedger(object):
         except UpgradeLedgerError:
             pass
 
-    def _update_same_phase(self, evidence, result, expected_phase):
+    def _update_same_phase(self, evidence, result, expected_phase, internal=None):
         self._require_current()
         self._state = self._read_ledger(
             self._path, self._state["operation_id"]
@@ -898,6 +1171,7 @@ class UpgradeLedger(object):
             )
         next_state = copy.deepcopy(self._state)
         self._merge_evidence(next_state, evidence)
+        self._merge_internal(next_state, internal or {})
         next_state["last_progress_at"] = self.clock()
         try:
             self._write_ledger(self._path, next_state)
@@ -907,6 +1181,7 @@ class UpgradeLedger(object):
             raise
         self._state = next_state
         self._audit(old_phase, old_phase, evidence, result)
+        self._validate_lock_binding()
         return self.state
 
     def _audit_operation_id(self, value):
@@ -947,20 +1222,13 @@ class UpgradeLedger(object):
         if not isinstance(value, dict):
             return {}
         identities = {}
-        for component in sorted(value, key=lambda item: str(item))[:16]:
-            if not isinstance(component, str):
-                continue
-            if IMAGE_COMPONENT_RE.fullmatch(component) is None:
+        for component in REQUIRED_IMAGES:
+            if component not in value:
                 continue
             identity = value[component]
-            if not isinstance(identity, str):
+            if not self._valid_image_identity(identity):
                 continue
-            if (
-                AUDIT_IMAGE_ID_RE.fullmatch(identity) is None
-                and not is_valid_image_identity(identity)
-            ):
-                continue
-            identities[component] = identity[:256]
+            identities[component] = identity
         return identities
 
     def _audit(self, old_phase, new_phase, evidence, result):
@@ -993,17 +1261,21 @@ class UpgradeLedger(object):
         }
         line = json.dumps(record, sort_keys=True, separators=(",", ":"))
         if len(line.encode("utf-8")) > MAX_AUDIT_BYTES:
-            record["old_image_ids"] = "<truncated>"
-            record["candidate_image_ids"] = "<truncated>"
+            record["old_image_ids"] = {}
+            record["candidate_image_ids"] = {}
             line = json.dumps(record, sort_keys=True, separators=(",", ":"))
         if len(line.encode("utf-8")) > MAX_AUDIT_BYTES:
             record = {
-                key: "<truncated>"
-                for key in (
-                    "operation_id", "host", "old_phase", "new_phase",
-                    "elapsed_ms", "generation", "desired_hash", "old_image_ids",
-                    "candidate_image_ids", "result",
-                )
+                "operation_id": None,
+                "host": None,
+                "old_phase": None,
+                "new_phase": None,
+                "elapsed_ms": 0,
+                "generation": None,
+                "desired_hash": None,
+                "old_image_ids": {},
+                "candidate_image_ids": {},
+                "result": None,
             }
             line = json.dumps(record, sort_keys=True, separators=(",", ":"))
         if self.audit_sink is not None:
