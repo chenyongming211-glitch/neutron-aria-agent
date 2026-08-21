@@ -577,12 +577,12 @@ and end timestamps. It never hides the gap by reporting ACL ready.
 Recommended order:
 
 ```text
-ostack2 canary
+compute-1 canary
   -> functional ACL and rollback gate
   -> observation window
-ostack4 second node
+compute-2 second node
   -> repeat gate
-ostack3 final node
+compute-3 final node
   -> repeat gate
 ```
 
