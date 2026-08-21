@@ -3730,31 +3730,41 @@ async fn apply_snapshot_runtime_transaction(
         let port_id = port.port_id.clone();
         let ifname = port.ifname.clone();
         let purge_started = Instant::now();
-        if let Err(e) = purge_neutron_acl_transactionally(state, &port.ifname, &port.port_id).await {
-            let reason = format!("neutron_acl_purge_failed:{}", e.details);
-            warn!(port_id = %port.port_id, ifname = %port.ifname, error = %e.details,
-                "keeping attached Neutron interface quiesced after ACL purge failure");
-            next_statuses.insert(
-                port.port_id.clone(),
-                port_runtime_status(
-                    &port.port_id,
-                    &port.ifname,
-                    generation,
-                    requested_hash.clone(),
-                    port.managed_domains.clone(),
-                    "error",
-                    Some(reason.clone()),
-                    domain_statuses_for(&port.managed_domains, "error", Some(reason.clone())),
-                ),
+        if detached_port_cleanup_requires_acl_purge(read_ifindex(&port.ifname).is_some()) {
+            if let Err(e) =
+                purge_neutron_acl_transactionally(state, &port.ifname, &port.port_id).await
+            {
+                let reason = format!("neutron_acl_purge_failed:{}", e.details);
+                warn!(port_id = %port.port_id, ifname = %port.ifname, error = %e.details,
+                    "keeping attached Neutron interface quiesced after ACL purge failure");
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "error",
+                        Some(reason.clone()),
+                        domain_statuses_for(&port.managed_domains, "error", Some(reason.clone())),
+                    ),
+                );
+                results.push(NeutronPortApplyResult {
+                    port_id: port.port_id,
+                    ifname: port.ifname,
+                    action: "detach".to_string(),
+                    status: "error".to_string(),
+                    reason: Some(reason),
+                });
+                continue;
+            }
+        } else {
+            info!(
+                port_id = %port.port_id,
+                ifname = %port.ifname,
+                "skipping ACL purge because the detached interface is already absent"
             );
-            results.push(NeutronPortApplyResult {
-                port_id: port.port_id,
-                ifname: port.ifname,
-                action: "detach".to_string(),
-                status: "error".to_string(),
-                reason: Some(reason),
-            });
-            continue;
         }
         let purge_ms = elapsed_ms(purge_started);
         let detach_started = Instant::now();
@@ -15559,6 +15569,25 @@ mod tests {
     fn detached_port_cleanup_skips_acl_purge_only_after_interface_disappears() {
         assert!(detached_port_cleanup_requires_acl_purge(true));
         assert!(!detached_port_cleanup_requires_acl_purge(false));
+    }
+
+    #[test]
+    fn neutron_snapshot_detach_uses_detached_interface_purge_gate() {
+        let source = include_str!("neutron_api.rs");
+        let detach_block = source
+            .split_once("for port in detach {")
+            .expect("snapshot detach loop")
+            .1
+            .split_once("for port in update {")
+            .expect("snapshot update loop")
+            .0;
+
+        assert!(
+            detach_block.contains(
+                "detached_port_cleanup_requires_acl_purge(read_ifindex(&port.ifname).is_some())"
+            ),
+            "full-snapshot detach must skip ACL purge only after the interface disappears"
+        );
     }
 
     #[test]
