@@ -488,6 +488,20 @@ class UpgradeLedgerTest(unittest.TestCase):
         )
         path.chmod(0o600)
 
+    def directory_name_for_fd(self, fd, directories):
+        descriptor_stat = os.fstat(fd)
+        if not stat.S_ISDIR(descriptor_stat.st_mode):
+            return None
+        for name, path in directories:
+            if not path.exists():
+                continue
+            path_stat = path.stat()
+            if (path_stat.st_dev, path_stat.st_ino) == (
+                descriptor_stat.st_dev, descriptor_stat.st_ino,
+            ):
+                return name
+        return None
+
     def test_allowed_transition_table_is_the_reviewed_contract(self):
         control = self.control()
         self.assertEqual(
@@ -537,6 +551,145 @@ class UpgradeLedgerTest(unittest.TestCase):
                 self.assertIn(field, state)
             ledger.close()
 
+    def test_first_begin_fsyncs_created_directory_parents_in_order(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            release = temp / "aria-release"
+            operations = release / "operations"
+            directories = (
+                ("workspace", temp),
+                ("aria-release", release),
+                ("operations", operations),
+            )
+            directory_fsyncs = []
+            real_fsync = control.os.fsync
+
+            def record_fsync(fd):
+                name = self.directory_name_for_fd(fd, directories)
+                if name is not None:
+                    directory_fsyncs.append(name)
+                return real_fsync(fd)
+
+            ledger = control.UpgradeLedger(
+                operations_dir=operations,
+                lock_path=temp / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            with mock.patch.object(control.os, "fsync", side_effect=record_fsync):
+                self.begin(ledger)
+            self.assertEqual(
+                ["workspace", "aria-release", "operations"], directory_fsyncs
+            )
+            self.assertEqual("preflight", json.loads(
+                (operations / (self.operation() + ".json")).read_text(encoding="utf-8")
+            )["phase"])
+            ledger.close()
+
+    def test_first_begin_directory_fsync_failures_never_leave_partial_ledger(self):
+        control = self.control()
+        for failed_directory in ("workspace", "aria-release", "operations"):
+            with self.subTest(failed_directory=failed_directory):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp = Path(temp_dir)
+                    release = temp / "aria-release"
+                    operations = release / "operations"
+                    directories = (
+                        ("workspace", temp),
+                        ("aria-release", release),
+                        ("operations", operations),
+                    )
+                    real_fsync = control.os.fsync
+
+                    def fail_selected_directory(fd):
+                        name = self.directory_name_for_fd(fd, directories)
+                        if name == failed_directory:
+                            raise OSError("directory fsync crash: " + name)
+                        return real_fsync(fd)
+
+                    ledger = control.UpgradeLedger(
+                        operations_dir=operations,
+                        lock_path=temp / "aria-release.lock",
+                        owner_uid=os.getuid(),
+                    )
+                    with mock.patch.object(
+                        control.os, "fsync", side_effect=fail_selected_directory
+                    ):
+                        with self.assertRaisesRegex(
+                            OSError, "directory fsync crash: " + failed_directory
+                        ):
+                            self.begin(ledger)
+                    ledger_path = operations / (self.operation() + ".json")
+                    if ledger_path.exists():
+                        state = json.loads(ledger_path.read_text(encoding="utf-8"))
+                        self.assertEqual(self.operation(), state["operation_id"])
+                        self.assertEqual("preflight", state["phase"])
+                    else:
+                        self.assertFalse(ledger_path.exists())
+                    ledger.close()
+
+    def test_retry_after_directory_fsync_failure_reestablishes_durability(self):
+        control = self.control()
+        for failed_directory in ("workspace", "aria-release", "operations"):
+            with self.subTest(failed_directory=failed_directory):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp = Path(temp_dir)
+                    release = temp / "aria-release"
+                    operations = release / "operations"
+                    directories = (
+                        ("workspace", temp),
+                        ("aria-release", release),
+                        ("operations", operations),
+                    )
+                    real_fsync = control.os.fsync
+                    failure_injected = [False]
+
+                    def fail_selected_directory_once(fd):
+                        name = self.directory_name_for_fd(fd, directories)
+                        if name == failed_directory and not failure_injected[0]:
+                            failure_injected[0] = True
+                            raise OSError("directory fsync crash: " + name)
+                        return real_fsync(fd)
+
+                    first = control.UpgradeLedger(
+                        operations_dir=operations,
+                        lock_path=temp / "aria-release.lock",
+                        owner_uid=os.getuid(),
+                    )
+                    with mock.patch.object(
+                        control.os, "fsync", side_effect=fail_selected_directory_once
+                    ):
+                        with self.assertRaisesRegex(
+                            OSError, "directory fsync crash: " + failed_directory
+                        ):
+                            self.begin(first)
+                    first.close()
+
+                    retry_fsyncs = []
+
+                    def record_retry_fsync(fd):
+                        name = self.directory_name_for_fd(fd, directories)
+                        if name is not None:
+                            retry_fsyncs.append(name)
+                        return real_fsync(fd)
+
+                    retry = control.UpgradeLedger(
+                        operations_dir=operations,
+                        lock_path=temp / "aria-release.lock",
+                        owner_uid=os.getuid(),
+                    )
+                    with mock.patch.object(
+                        control.os, "fsync", side_effect=record_retry_fsync
+                    ):
+                        state = self.begin(retry)
+                    self.assertEqual("preflight", state["phase"])
+                    self.assertIn(
+                        failed_directory,
+                        retry_fsyncs,
+                        "retry must durably reestablish the failed directory entry",
+                    )
+                    retry.close()
+
     def test_duplicate_operation_is_idempotent_and_conflicting_operation_is_rejected(self):
         control = self.control()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -558,6 +711,35 @@ class UpgradeLedgerTest(unittest.TestCase):
             self.assertFalse(
                 (temp / "operations" / (self.operation("2") + ".json")).exists()
             )
+
+    def test_reacquired_closed_instance_discards_stale_cached_operation(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            reused = self.new_ledger(control, temp)
+            cached = self.begin(reused)
+            reused.close()
+
+            finisher = self.new_ledger(control, temp)
+            finisher.recover(self.operation())
+            finisher.fail("preflight", "finished before mutation")
+            finisher.close()
+
+            pending = self.new_ledger(control, temp)
+            self.begin(pending, self.operation("2"))
+            pending.close()
+
+            with self.assertRaises(control.UpgradeLedgerConflict):
+                self.begin(reused)
+            self.assertNotEqual(
+                cached,
+                self.read_ledger(temp),
+                "the first operation must have been durably advanced",
+            )
+            fresh = self.new_ledger(control, temp)
+            fresh.recover(self.operation("2"))
+            fresh.close()
+            reused.close()
 
     def test_host_lock_is_exclusive_and_nonblocking(self):
         control = self.control()
@@ -655,6 +837,32 @@ class UpgradeLedgerTest(unittest.TestCase):
             fresh.recover(self.operation())
             fresh.close()
             failed.close()
+
+    def test_nested_failed_workflows_do_not_release_a_preowned_lock(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            owner = self.new_ledger(control, temp)
+            self.begin(owner)
+
+            with self.assertRaises(control.UpgradeLedgerConflict):
+                self.begin(owner, self.operation("2"))
+            contender = self.new_ledger(control, temp)
+            with self.assertRaises(control.UpgradeLedgerLocked):
+                self.begin(contender, self.operation("2"))
+            contender.close()
+
+            with self.assertRaises(control.UpgradeLedgerConflict):
+                owner.recover(self.operation("2"))
+            contender = self.new_ledger(control, temp)
+            with self.assertRaises(control.UpgradeLedgerLocked):
+                self.begin(contender, self.operation("2"))
+            contender.close()
+
+            owner.close()
+            released = self.new_ledger(control, temp)
+            released.recover(self.operation())
+            released.close()
 
     def test_hard_linked_lock_file_is_rejected(self):
         control = self.control()
@@ -1041,6 +1249,66 @@ class UpgradeLedgerTest(unittest.TestCase):
             )
             self.assertLessEqual(len(line.encode("utf-8")), control.MAX_AUDIT_BYTES)
             self.assertNotIn("do-not-log", line)
+
+    def test_audit_redacts_nested_secrets_and_snapshot_bodies_from_image_fields(self):
+        control = self.control()
+        records = []
+        secret_values = (
+            "old-auth-secret",
+            "old-password-secret",
+            "old-snapshot-secret",
+            "candidate-authorization-secret",
+            "candidate-maintenance-secret",
+            "candidate-body-secret",
+        )
+        nested_old = {
+            "aria-datapath": {
+                "auth_token": secret_values[0],
+                "password": secret_values[1],
+                "snapshot": {"body": secret_values[2]},
+            },
+        }
+        nested_candidate = {
+            "neutron-aria-agent": {
+                "authorization": secret_values[3],
+                "maintenance_token": secret_values[4],
+                "snapshot_body": secret_values[5],
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp, records.append)
+            evidence = self.evidence()
+            evidence["old_image_ids"] = nested_old
+            evidence["candidate_image_ids"] = nested_candidate
+            ledger.begin(
+                self.operation(),
+                host="compute-1",
+                upgrade_class="planned_maintenance",
+                evidence=evidence,
+            )
+            ledger.transition("preflight", "bypass_preparing", {})
+            ledger.close()
+        self.assertTrue(records)
+        for line in records:
+            record = json.loads(line)
+            self.assertEqual(
+                {
+                    "operation_id", "host", "old_phase", "new_phase", "elapsed_ms",
+                    "generation", "desired_hash", "old_image_ids",
+                    "candidate_image_ids", "result",
+                },
+                set(record),
+            )
+            self.assertLessEqual(len(line.encode("utf-8")), control.MAX_AUDIT_BYTES)
+            lowered = line.lower()
+            for secret in secret_values:
+                self.assertNotIn(secret, line)
+            for sensitive_name in (
+                "auth_token", "password", "authorization", "maintenance_token",
+                "snapshot", "snapshot_body", "body",
+            ):
+                self.assertNotIn(sensitive_name, lowered)
 
 
 if __name__ == "__main__":
