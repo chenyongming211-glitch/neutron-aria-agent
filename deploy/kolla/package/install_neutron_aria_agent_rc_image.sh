@@ -13,6 +13,9 @@ CONFIG_PATH="${CONFIG_PATH:-/etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
 CANDIDATE_CONFIG_SOURCE="${CANDIDATE_CONFIG_SOURCE:-}"
 ROLLBACK_CONFIG_SOURCE="${ROLLBACK_CONFIG_SOURCE:-}"
 READY_TIMEOUT="${READY_TIMEOUT:-90}"
+RUNTIME_STATE_SOURCE="${RUNTIME_STATE_SOURCE:-/var/lib/neutron-aria-agent/state}"
+CONTAINER_STATE_DIR="${CONTAINER_STATE_DIR:-/var/lib/neutron-aria-agent/state}"
+RUNTIME_STATE_NEEDS_SEED=false
 
 log() {
     printf '[neutron-aria-agent-rc] %s\n' "$*"
@@ -72,6 +75,51 @@ validate_image_id() {
     case "${1#sha256:}" in
         *[!0-9a-f]*) die "$2 must use lowercase hexadecimal" ;;
     esac
+}
+
+validate_absolute_path() {
+    case "$1" in
+        /*) ;;
+        *) die "$2 must be an absolute path" ;;
+    esac
+    case "$1" in
+        *$'\n'*|*$'\r'*) die "$2 contains an invalid newline" ;;
+    esac
+}
+
+discover_runtime_state() {
+    local mounted_source
+    mounted_source="$(docker inspect -f \
+        '{{range .Mounts}}{{if eq .Destination "/var/lib/neutron-aria-agent/state"}}{{.Source}}{{end}}{{end}}' \
+        "${SERVICE_NAME}")"
+    if [ -n "${mounted_source}" ]; then
+        RUNTIME_STATE_SOURCE="${mounted_source}"
+        RUNTIME_STATE_NEEDS_SEED=false
+    else
+        RUNTIME_STATE_NEEDS_SEED=true
+    fi
+    validate_absolute_path "${RUNTIME_STATE_SOURCE}" RUNTIME_STATE_SOURCE
+    validate_absolute_path "${CONTAINER_STATE_DIR}" CONTAINER_STATE_DIR
+}
+
+seed_runtime_state() {
+    local parent_dir staging_dir
+    [ "${RUNTIME_STATE_NEEDS_SEED}" = "true" ] || return 0
+    [ ! -e "${RUNTIME_STATE_SOURCE}" ] || {
+        log "refusing to replace unowned runtime state: ${RUNTIME_STATE_SOURCE}"
+        return 1
+    }
+    parent_dir="$(dirname "${RUNTIME_STATE_SOURCE}")"
+    staging_dir="${RUNTIME_STATE_SOURCE}.candidate.$$"
+    mkdir -p "${parent_dir}"
+    mkdir "${staging_dir}"
+    if ! docker cp "${SERVICE_NAME}:${CONTAINER_STATE_DIR}/." "${staging_dir}"; then
+        rm -rf -- "${staging_dir}"
+        return 1
+    fi
+    chown -R "${AGENT_UID}:${AGENT_GID}" "${staging_dir}"
+    chmod 0700 "${staging_dir}"
+    mv "${staging_dir}" "${RUNTIME_STATE_SOURCE}"
 }
 
 record_non_interference_baseline() {
@@ -137,6 +185,7 @@ create_service_container() {
         -v /etc/localtime:/etc/localtime:ro \
         -v kolla_logs:/var/log/kolla/:rw \
         -v /run/aria:/run/aria:rw \
+        -v "${RUNTIME_STATE_SOURCE}:${CONTAINER_STATE_DIR}:rw" \
         "${image}" kolla_start >/dev/null
 }
 
@@ -154,6 +203,8 @@ DATAPATH_ID=${DATAPATH_ID}
 DATAPATH_STARTED=${DATAPATH_STARTED}
 OVS_AGENT_ID=${OVS_AGENT_ID}
 OVS_AGENT_STARTED=${OVS_AGENT_STARTED}
+RUNTIME_STATE_SOURCE=${RUNTIME_STATE_SOURCE}
+CONTAINER_STATE_DIR=${CONTAINER_STATE_DIR}
 EOF
     chmod 0600 "${path}"
 }
@@ -170,6 +221,8 @@ read_state() {
     validate_image_id "${BACKUP_IMAGE_ID}" BACKUP_IMAGE_ID
     validate_name "${BACKUP_CONTAINER}"
     validate_name "${SERVICE_HOSTNAME}"
+    validate_absolute_path "${RUNTIME_STATE_SOURCE}" RUNTIME_STATE_SOURCE
+    validate_absolute_path "${CONTAINER_STATE_DIR}" CONTAINER_STATE_DIR
 }
 
 restore_failed_install() {
@@ -178,8 +231,9 @@ restore_failed_install() {
         docker rm -f "${SERVICE_NAME}" >/dev/null 2>&1 || failed=1
     fi
     if container_exists "${BACKUP_CONTAINER}"; then
-        docker rename "${BACKUP_CONTAINER}" "${SERVICE_NAME}" >/dev/null 2>&1 || failed=1
+        docker rm "${BACKUP_CONTAINER}" >/dev/null 2>&1 || failed=1
         cp -a "${STATE_DIR}/config.before" "${CONFIG_PATH}" || failed=1
+        create_service_container "${SERVICE_NAME}" "${BACKUP_IMAGE_ID}" || failed=1
         docker start "${SERVICE_NAME}" >/dev/null 2>&1 || failed=1
     else
         failed=1
@@ -228,14 +282,22 @@ install_candidate() {
     BACKUP_IMAGE_ID="$(docker inspect -f '{{.Image}}' "${SERVICE_NAME}")"
     BACKUP_IMAGE_REF="$(docker inspect -f '{{.Config.Image}}' "${SERVICE_NAME}")"
     BACKUP_CONTAINER="${SERVICE_NAME}_pre_rc_$(date +%Y%m%d%H%M%S)"
+    AGENT_UID="$(docker exec "${SERVICE_NAME}" id -u neutron)"
+    AGENT_GID="$(docker exec "${SERVICE_NAME}" id -g neutron)"
     validate_name "${SERVICE_HOSTNAME}"
     validate_image_id "${BACKUP_IMAGE_ID}" BACKUP_IMAGE_ID
     validate_image_ref "${BACKUP_IMAGE_REF}"
     validate_name "${BACKUP_CONTAINER}"
+    discover_runtime_state
     record_non_interference_baseline
     write_state "${STATE_FILE}.pending"
 
     docker stop "${SERVICE_NAME}" >/dev/null
+    if ! seed_runtime_state; then
+        docker start "${SERVICE_NAME}" >/dev/null 2>&1 || true
+        rm -f "${STATE_FILE}.pending"
+        die "failed to preserve neutron-aria-agent runtime state"
+    fi
     docker rename "${SERVICE_NAME}" "${BACKUP_CONTAINER}" >/dev/null
     if ! cp -a "${STATE_DIR}/config.candidate" "${CONFIG_PATH}" ||
        ! create_service_container "${SERVICE_NAME}" "${IMAGE_REF}" ||
