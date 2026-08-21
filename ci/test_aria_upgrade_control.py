@@ -1998,6 +1998,24 @@ class UpgradeLedgerTest(unittest.TestCase):
             self.assertIsNone(progressed["last_error"])
             recovered.close()
 
+    def test_recovered_preflight_failure_preserves_fresh_error(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            first = self.new_ledger(control, temp)
+            self.begin(first)
+            first.close()
+
+            recovered = self.new_ledger(control, temp)
+            state = recovered.recover(self.operation())
+            self.assertEqual("resume_exact_phase", state["recovery_action"])
+            failed = recovered.fail("preflight", "preflight rejected")
+            self.assertEqual("failed_before_mutation", failed["phase"])
+            self.assertIsNone(failed["recovery_action"])
+            self.assertEqual("preflight rejected", failed["last_error"])
+            self.assertEqual(failed, self.read_ledger(temp))
+            recovered.close()
+
     def test_any_durable_exact_resume_directive_clears_on_legal_progress(self):
         control = self.control()
         with tempfile.TemporaryDirectory() as temp_dir:

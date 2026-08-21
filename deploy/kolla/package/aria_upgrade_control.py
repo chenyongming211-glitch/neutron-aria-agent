@@ -330,10 +330,10 @@ class UpgradeLedger(object):
             )
         next_state = copy.deepcopy(self._state)
         self._merge_evidence(next_state, evidence)
-        self._merge_internal(next_state, internal or {})
         next_state["phase"] = next_phase
         next_state["last_progress_at"] = self.clock()
         self._derive_transition_metadata(next_state, old_phase, next_phase)
+        self._merge_internal(next_state, internal or {})
         try:
             self._write_ledger(self._path, next_state)
         except Exception:
