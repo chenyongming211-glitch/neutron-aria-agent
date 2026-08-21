@@ -8269,6 +8269,30 @@ class StatusContractV2RetryOrchestrationRedTestCase(unittest.TestCase):
         self.assertEqual(prepared["generation"], action["generation"])
         self.assertEqual(prepared["desired_hash"], action["remote_desired_hash"])
 
+    def test_v3_exact_pending_identity_keeps_v2_retry_capability(self):
+        state_store = InMemorySnapshotStateStore()
+        snapshot = {"host": "compute-1", "ports": []}
+        prepared = state_store.prepare_snapshot(snapshot)
+        status = self._partial(
+            "first-generation-durable-partial",
+            prepared["desired_hash"],
+        )
+        status.update({
+            "status_schema_version": 3,
+            "status_contract_hash": "v0.9-neutron-status-3",
+        })
+
+        action = self._sync(
+            state_store=state_store,
+        )._remote_pending_action(
+            snapshot,
+            status,
+            prepared["desired_hash"],
+        )
+
+        self.assertEqual("retry_snapshot", action["action"])
+        self.assertEqual("v2", action["status_contract"])
+
     def test_v2_changed_desired_state_recovers_only_positive_baseline(self):
         positive_store = InMemorySnapshotStateStore()
         positive_prepared = positive_store.prepare_snapshot_at_generation(

@@ -2813,7 +2813,10 @@ class SnapshotSynchronizer(object):
         )
         if identity == (1, "v0.9-neutron-status-1"):
             return "v1"
-        if identity == (2, "v0.9-neutron-status-2"):
+        if identity in (
+            (2, "v0.9-neutron-status-2"),
+            (3, "v0.9-neutron-status-3"),
+        ):
             return "v2"
         if any(item is not None for item in identity):
             return "unknown"
