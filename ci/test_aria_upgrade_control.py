@@ -16,6 +16,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_PATH = ROOT / "deploy" / "kolla" / "package" / "aria_upgrade_control.py"
+AGENT_STATE_PATH = (
+    ROOT / "openstack" / "neutron_aria" / "neutron_aria" / "agent" / "state.py"
+)
 COMPATIBILITY = {
     "schema_version": 1,
     "uds_schema_min": 1,
@@ -434,6 +437,15 @@ class UpgradeLedgerTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def agent_state(self):
+        spec = importlib.util.spec_from_file_location(
+            "neutron_aria_agent_state_for_ledger_test", AGENT_STATE_PATH
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
         spec.loader.exec_module(module)
         return module
 
@@ -1857,6 +1869,144 @@ class UpgradeLedgerTest(unittest.TestCase):
                     evidence=self.evidence(),
                 )
             ledger.close()
+
+    def test_actual_agent_desired_hash_is_accepted_and_audited_verbatim(self):
+        control = self.control()
+        agent_state = self.agent_state()
+        desired_hash = agent_state.desired_snapshot_hash(
+            {
+                "schema_version": 1,
+                "generation": 19,
+                "ports": [
+                    {"port_id": "port-b", "ifname": "tap-b"},
+                    {"port_id": "port-a", "ifname": "tap-a"},
+                ],
+            }
+        )
+        self.assertRegex(desired_hash, r"^[0-9a-f]{64}$")
+        records = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            ledger = self.new_ledger(control, temp, records.append)
+            evidence = self.evidence()
+            evidence["pre_desired_hash"] = desired_hash
+            state = ledger.begin(
+                self.operation(),
+                host="compute-1",
+                upgrade_class="planned_maintenance",
+                evidence=evidence,
+            )
+            self.assertEqual(desired_hash, state["pre_desired_hash"])
+            state = ledger.transition(
+                "preflight",
+                "quiescing",
+                {"desired_hash": desired_hash, "generation": 19},
+            )
+            self.assertEqual(desired_hash, state["desired_hash"])
+            self.assertEqual(desired_hash, json.loads(records[-1])["desired_hash"])
+            ledger.close()
+
+    def test_transition_derives_recovery_metadata_from_destination_phase(self):
+        control = self.control()
+        for destination in ("full_resync", "rollback"):
+            with self.subTest(destination=destination):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp = Path(temp_dir).resolve()
+                    ledger = self.new_ledger(control, temp)
+                    self.begin(ledger)
+                    ledger.transition("preflight", "quiescing", {})
+                    ledger.transition("quiescing", "bypass_preparing", {})
+                    ledger.transition("bypass_preparing", "bypass_confirmed", {})
+                    bypass = ledger.transition(
+                        "bypass_confirmed", "maintenance_bypass", {}
+                    )
+                    self.assertEqual(
+                        "operator_action_required", bypass["recovery_action"]
+                    )
+                    failed = ledger.fail("maintenance_bypass", "candidate failed")
+                    self.assertEqual(
+                        "operator_action_required", failed["recovery_action"]
+                    )
+                    self.assertEqual("candidate failed", failed["last_error"])
+                    progressed = ledger.transition(
+                        "maintenance_bypass", destination, {}
+                    )
+                    self.assertIsNone(progressed["recovery_action"])
+                    self.assertIsNone(progressed["last_error"])
+                    ledger.close()
+
+    def test_leaving_recovered_exact_phases_clears_recovery_metadata(self):
+        control = self.control()
+        edges = (
+            ("quiescing", "bypass_preparing"),
+            ("agent_buffering", "full_resync"),
+        )
+        for stale_phase, next_phase in edges:
+            with self.subTest(stale_phase=stale_phase):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp = Path(temp_dir).resolve()
+                    first = self.new_ledger(control, temp)
+                    self.begin(first)
+                    stale = self.read_ledger(temp)
+                    stale["phase"] = stale_phase
+                    stale["last_error"] = "stale failure"
+                    self.write_ledger(temp, stale)
+                    first.close()
+
+                    recovered = self.new_ledger(control, temp)
+                    state = recovered.recover(self.operation())
+                    self.assertEqual("resume_exact_phase", state["recovery_action"])
+                    self.assertEqual("stale failure", state["last_error"])
+                    progressed = recovered.transition(stale_phase, next_phase, {})
+                    self.assertIsNone(progressed["recovery_action"])
+                    self.assertIsNone(progressed["last_error"])
+                    recovered.close()
+
+    def test_commit_clears_stale_recovery_metadata(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            stale = self.read_ledger(temp)
+            stale["phase"] = "verifying"
+            stale["last_error"] = "old verification failure"
+            stale["recovery_action"] = "resume_exact_phase"
+            self.write_ledger(temp, stale)
+            committed = ledger.commit({})
+            self.assertEqual("committed", committed["phase"])
+            self.assertIsNone(committed["last_error"])
+            self.assertIsNone(committed["recovery_action"])
+            ledger.close()
+
+    def test_falsey_non_object_evidence_is_rejected_without_mutation(self):
+        control = self.control()
+        for method, evidence in (
+            ("transition", []),
+            ("transition", ""),
+            ("fail", []),
+            ("fail", ""),
+            ("commit", 0),
+        ):
+            with self.subTest(method=method, evidence=evidence):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp = Path(temp_dir).resolve()
+                    ledger = self.new_ledger(control, temp)
+                    self.begin(ledger)
+                    if method == "commit":
+                        state = self.read_ledger(temp)
+                        state["phase"] = "verifying"
+                        self.write_ledger(temp, state)
+                    before = self.read_ledger(temp)
+                    with self.assertRaises(ValueError):
+                        if method == "transition":
+                            ledger.transition("preflight", "quiescing", evidence)
+                        elif method == "fail":
+                            ledger.fail("preflight", "failed", evidence)
+                        else:
+                            ledger.commit(evidence)
+                    self.assertEqual(before, self.read_ledger(temp))
+                    ledger.close()
 
     def test_second_failure_in_maintenance_bypass_preserves_operator_action(self):
         control = self.control()

@@ -69,6 +69,7 @@ MAX_LEDGER_BYTES = 1024 * 1024
 MAX_AUDIT_BYTES = 4096
 OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 AUDIT_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 AUDIT_HOST_LABEL_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
 )
@@ -309,6 +310,8 @@ class UpgradeLedger(object):
         self, expected_phase, next_phase, evidence=None, result="success",
         internal=None,
     ):
+        if evidence is None:
+            evidence = {}
         self._require_current()
         self._state = self._read_ledger(
             self._path, self._state["operation_id"]
@@ -326,10 +329,11 @@ class UpgradeLedger(object):
                 "transition %s -> %s is not allowed" % (old_phase, next_phase)
             )
         next_state = copy.deepcopy(self._state)
-        self._merge_evidence(next_state, evidence or {})
+        self._merge_evidence(next_state, evidence)
         self._merge_internal(next_state, internal or {})
         next_state["phase"] = next_phase
         next_state["last_progress_at"] = self.clock()
+        self._derive_transition_metadata(next_state, old_phase, next_phase)
         try:
             self._write_ledger(self._path, next_state)
         except Exception:
@@ -374,12 +378,30 @@ class UpgradeLedger(object):
         else:
             internal["recovery_action"] = "resume_exact_phase"
         return self._update_same_phase(
-            evidence or {}, "failed", expected_phase, internal
+            evidence if evidence is not None else {},
+            "failed", expected_phase, internal,
         )
 
     def commit(self, evidence=None):
         """Commit only the final verified phase."""
-        return self.transition("verifying", "committed", evidence or {})
+        return self.transition(
+            "verifying", "committed", evidence if evidence is not None else {}
+        )
+
+    def _derive_transition_metadata(self, state, old_phase, next_phase):
+        if next_phase == "maintenance_bypass":
+            state["recovery_action"] = "operator_action_required"
+            return
+        if (
+            old_phase == "maintenance_bypass"
+            or next_phase == "committed"
+            or (
+                old_phase in SAFE_EXACT_RESUME_PHASES
+                and self._state.get("recovery_action") == "resume_exact_phase"
+            )
+        ):
+            state["recovery_action"] = None
+            state["last_error"] = None
 
     def recover(self, operation_id):
         """Reopen stale state without automatically activating old ACL state."""
@@ -1214,7 +1236,10 @@ class UpgradeLedger(object):
         return None
 
     def _audit_digest(self, value):
-        if isinstance(value, str) and AUDIT_IMAGE_ID_RE.fullmatch(value) is not None:
+        if isinstance(value, str) and (
+            AUDIT_IMAGE_ID_RE.fullmatch(value) is not None
+            or RAW_SHA256_RE.fullmatch(value) is not None
+        ):
             return value
         return None
 
