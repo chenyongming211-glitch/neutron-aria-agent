@@ -214,17 +214,17 @@ git commit -m "feat(kolla): classify Aria runtime upgrades"
 - Ledger path: `/var/lib/aria-release/operations/<operation_id>.json`, root-owned mode `0600`.
 - Lock path: `/run/lock/aria-release.lock` acquired with `fcntl.flock(LOCK_EX | LOCK_NB)`.
 
-- [ ] **Step 1: Write crash-boundary and idempotency tests**
+- [x] **Step 1: Write crash-boundary and idempotency tests**
 
 Cover duplicate operation ID, conflicting operation ID, invalid transition, stale ledger recovery, write-before-rename failure, and directory-fsync failure. Verify the previous valid ledger remains parseable.
 
-- [ ] **Step 2: Run the focused tests and observe failure**
+- [x] **Step 2: Run the focused tests and observe failure**
 
 Run: `python3 -m unittest ci.test_aria_upgrade_control.UpgradeLedgerTest`
 
 Expected: FAIL because ledger classes do not exist.
 
-- [ ] **Step 3: Implement strict phase transitions**
+- [x] **Step 3: Implement strict phase transitions**
 
 The allowed edge table is a constant. `transition(expected_phase, next_phase, evidence)` uses compare-and-swap semantics and rejects skipped or backward phases except the explicit `rollback` edge.
 
@@ -247,21 +247,21 @@ ALLOWED = {
 }
 ```
 
-- [ ] **Step 4: Implement atomic persistence**
+- [x] **Step 4: Implement atomic persistence**
 
 Write canonical JSON to a same-directory temp file, `flush`, `os.fsync`, `os.rename`, then `fsync` the directory. Reject symlinks and non-root-owned existing state.
 
-- [ ] **Step 5: Add bounded audit output**
+- [x] **Step 5: Add bounded audit output**
 
 Each transition logs operation ID, host, old phase, new phase, elapsed milliseconds, generation, desired hash, image IDs, and result. It never logs environment variables, auth tokens, or snapshot bodies.
 
-- [ ] **Step 6: Run ledger tests**
+- [x] **Step 6: Run ledger tests**
 
 Run: `python3 -m unittest ci.test_aria_upgrade_control.UpgradeLedgerTest`
 
 Expected: PASS including simulated crashes.
 
-- [ ] **Step 7: Commit the D2 gate**
+- [x] **Step 7: Commit the D2 gate**
 
 ```bash
 git add deploy/kolla/package/aria_upgrade_control.py ci/test_aria_upgrade_control.py
