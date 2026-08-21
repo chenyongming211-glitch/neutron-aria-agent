@@ -690,6 +690,194 @@ class UpgradeLedgerTest(unittest.TestCase):
                     )
                     retry.close()
 
+    def test_existing_release_symlink_redirect_is_rejected(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            target = temp / "trusted-target"
+            operations = target / "operations"
+            operations.mkdir(parents=True, mode=0o700)
+            target.chmod(0o700)
+            (temp / "aria-release").symlink_to(target, target_is_directory=True)
+            ledger = control.UpgradeLedger(
+                operations_dir=temp / "aria-release" / "operations",
+                lock_path=temp / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            try:
+                with self.assertRaises(control.UpgradeLedgerTrustError):
+                    self.begin(ledger)
+                self.assertFalse(
+                    (operations / (self.operation() + ".json")).exists()
+                )
+            finally:
+                ledger.close()
+
+    def test_release_component_replacement_does_not_follow_redirect(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            release = temp / "aria-release"
+            release.mkdir(mode=0o700)
+            displaced = temp / "aria-release.displaced"
+            target = temp / "redirect-target"
+            target.mkdir(mode=0o700)
+            operations = release / "operations"
+            real_mkdir = control.os.mkdir
+            real_path_mkdir = Path.mkdir
+            replaced = [False]
+
+            def replace_release(path):
+                if Path(path).name == "operations" and not replaced[0]:
+                    release.rename(displaced)
+                    release.symlink_to(target, target_is_directory=True)
+                    replaced[0] = True
+
+            def replace_before_os_mkdir(path, mode=0o777, **kwargs):
+                replace_release(path)
+                return real_mkdir(path, mode, **kwargs)
+
+            def replace_before_path_mkdir(path, mode=0o777, parents=False, exist_ok=False):
+                replace_release(path)
+                return real_path_mkdir(path, mode, parents, exist_ok)
+
+            ledger = control.UpgradeLedger(
+                operations_dir=operations,
+                lock_path=temp / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            try:
+                with mock.patch.object(
+                    control.os,
+                    "mkdir",
+                    side_effect=replace_before_os_mkdir,
+                ), mock.patch.object(
+                    Path, "mkdir", side_effect=replace_before_path_mkdir, autospec=True
+                ), mock.patch.object(
+                    control.os, "rmdir", side_effect=OSError("cleanup crash")
+                ), mock.patch.object(
+                    Path, "rmdir", side_effect=OSError("cleanup crash"), autospec=True
+                ):
+                    with self.assertRaises(control.UpgradeLedgerTrustError):
+                        self.begin(ledger)
+                self.assertFalse(
+                    (target / "operations").exists(),
+                    "a replaced release component must never redirect child creation",
+                )
+            finally:
+                ledger.close()
+
+    def test_lock_directory_intermediate_symlink_redirect_is_rejected(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            target = temp / "lock-target"
+            locks = target / "locks"
+            locks.mkdir(parents=True, mode=0o700)
+            target.chmod(0o700)
+            (temp / "redirect").symlink_to(target, target_is_directory=True)
+            ledger = control.UpgradeLedger(
+                operations_dir=temp / "operations",
+                lock_path=temp / "redirect" / "locks" / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            try:
+                with self.assertRaises(control.UpgradeLedgerTrustError):
+                    self.begin(ledger)
+                self.assertFalse((locks / "aria-release.lock").exists())
+            finally:
+                ledger.close()
+
+    def test_cleanup_failed_retry_fsyncs_the_complete_managed_chain(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            release = temp / "aria-release"
+            operations = release / "operations"
+            directories = (
+                ("workspace", temp),
+                ("aria-release", release),
+                ("operations", operations),
+            )
+            real_fsync = control.os.fsync
+
+            def fail_workspace_fsync(fd):
+                if self.directory_name_for_fd(fd, directories) == "workspace":
+                    raise OSError("workspace fsync crash")
+                return real_fsync(fd)
+
+            first = control.UpgradeLedger(
+                operations_dir=operations,
+                lock_path=temp / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            with mock.patch.object(
+                control.os, "fsync", side_effect=fail_workspace_fsync
+            ), mock.patch.object(
+                control.os, "rmdir", side_effect=OSError("cleanup crash")
+            ), mock.patch.object(
+                Path, "rmdir", side_effect=OSError("cleanup crash"), autospec=True
+            ):
+                with self.assertRaisesRegex(OSError, "workspace fsync crash"):
+                    self.begin(first)
+            first.close()
+            self.assertTrue(release.is_dir())
+
+            confirmed = []
+
+            def record_fsync(fd):
+                name = self.directory_name_for_fd(fd, directories)
+                if name is not None:
+                    confirmed.append(name)
+                return real_fsync(fd)
+
+            retry = control.UpgradeLedger(
+                operations_dir=operations,
+                lock_path=temp / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            with mock.patch.object(control.os, "fsync", side_effect=record_fsync):
+                self.begin(retry)
+            retry.close()
+            self.assertTrue(
+                all(name in confirmed for name in ("workspace", "aria-release", "operations")),
+                "retry must confirm every managed directory entry: %r" % confirmed,
+            )
+
+    def test_successful_directory_cleanup_is_parent_fsynced(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            release = temp / "aria-release"
+            operations = release / "operations"
+            directories = (("workspace", temp), ("aria-release", release))
+            real_fsync = control.os.fsync
+            workspace_attempts = [0]
+
+            def fail_first_workspace_fsync(fd):
+                if self.directory_name_for_fd(fd, directories) == "workspace":
+                    workspace_attempts[0] += 1
+                    if workspace_attempts[0] == 1:
+                        raise OSError("workspace fsync crash")
+                return real_fsync(fd)
+
+            ledger = control.UpgradeLedger(
+                operations_dir=operations,
+                lock_path=temp / "aria-release.lock",
+                owner_uid=os.getuid(),
+            )
+            with mock.patch.object(
+                control.os, "fsync", side_effect=fail_first_workspace_fsync
+            ):
+                with self.assertRaisesRegex(OSError, "workspace fsync crash"):
+                    self.begin(ledger)
+            ledger.close()
+            self.assertFalse(release.exists())
+            self.assertGreaterEqual(
+                workspace_attempts[0], 2,
+                "removing an unconfirmed directory must fsync its parent",
+            )
+
     def test_duplicate_operation_is_idempotent_and_conflicting_operation_is_rejected(self):
         control = self.control()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1110,6 +1298,49 @@ class UpgradeLedgerTest(unittest.TestCase):
             self.assertEqual(self.operation(), state["operation_id"])
             ledger.close()
 
+    def test_cached_begin_repairs_post_rename_directory_fsync_failure(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            real_fsync = control.os.fsync
+            failed = [False]
+
+            def fail_first_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode) and not failed[0]:
+                    failed[0] = True
+                    raise OSError("post-rename directory fsync crash")
+                return real_fsync(fd)
+
+            with mock.patch.object(
+                control.os, "fsync", side_effect=fail_first_directory_fsync
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "post-rename directory fsync crash"
+                ):
+                    ledger.transition("preflight", "bypass_preparing", {})
+            self.assertEqual("bypass_preparing", ledger.state["phase"])
+            self.assertEqual("bypass_preparing", self.read_ledger(temp)["phase"])
+
+            directory_fsyncs = []
+
+            def record_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    directory_fsyncs.append(os.fstat(fd).st_ino)
+                return real_fsync(fd)
+
+            with mock.patch.object(
+                control.os, "fsync", side_effect=record_directory_fsync
+            ):
+                reopened = self.begin(ledger)
+            self.assertEqual("bypass_preparing", reopened["phase"])
+            self.assertTrue(
+                directory_fsyncs,
+                "cached begin must repair uncertain post-rename durability",
+            )
+            ledger.close()
+
     def test_existing_symlink_wrong_owner_and_wrong_mode_are_rejected(self):
         control = self.control()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1142,11 +1373,15 @@ class UpgradeLedgerTest(unittest.TestCase):
             self.begin(ledger)
             ledger.close()
             path = temp / "operations" / (self.operation() + ".json")
-            real_lstat = control.os.lstat
+            real_stat = control.os.stat
 
-            def ledger_with_untrusted_owner(candidate):
-                result = real_lstat(candidate)
-                if Path(candidate) == path:
+            def ledger_with_untrusted_owner(candidate, *args, **kwargs):
+                result = real_stat(candidate, *args, **kwargs)
+                if (
+                    candidate == path.name
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
                     values = list(result)
                     values[4] = os.getuid() + 1
                     return os.stat_result(values)
@@ -1154,7 +1389,7 @@ class UpgradeLedgerTest(unittest.TestCase):
 
             reopened = self.new_ledger(control, temp)
             with mock.patch.object(
-                control.os, "lstat", side_effect=ledger_with_untrusted_owner
+                control.os, "stat", side_effect=ledger_with_untrusted_owner
             ):
                 with self.assertRaises(control.UpgradeLedgerTrustError):
                     reopened.recover(self.operation())
@@ -1309,6 +1544,81 @@ class UpgradeLedgerTest(unittest.TestCase):
                 "snapshot", "snapshot_body", "body",
             ):
                 self.assertNotIn(sensitive_name, lowered)
+
+    def test_audit_scalar_fields_use_strict_field_specific_schemas(self):
+        control = self.control()
+        records = []
+        secrets = (
+            "token-generation-secret",
+            "password-desired-secret",
+            "snapshot-pre-desired-secret",
+            "authorization: bearer host-secret",
+            "body-next-phase-secret",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp, records.append)
+            evidence = self.evidence()
+            evidence["pre_desired_hash"] = secrets[2]
+            ledger.begin(
+                self.operation(),
+                host=secrets[3],
+                upgrade_class="planned_maintenance",
+                evidence=evidence,
+            )
+            ledger.transition(
+                "preflight", "bypass_preparing", {"generation": secrets[0]}
+            )
+            with self.assertRaises(control.UpgradeLedgerTransitionError):
+                ledger.transition(
+                    "bypass_preparing",
+                    secrets[4],
+                    {"desired_hash": secrets[1]},
+                )
+            ledger.close()
+
+        self.assertGreaterEqual(len(records), 2)
+        fallback_record = json.loads(records[-2])
+        invalid_record = json.loads(records[-1])
+        self.assertIsNone(fallback_record["host"])
+        self.assertIsNone(fallback_record["generation"])
+        self.assertIsNone(fallback_record["desired_hash"])
+        self.assertEqual("preflight", fallback_record["old_phase"])
+        self.assertEqual("bypass_preparing", fallback_record["new_phase"])
+        self.assertEqual("success", fallback_record["result"])
+        self.assertIsNone(invalid_record["host"])
+        self.assertIsNone(invalid_record["desired_hash"])
+        self.assertIsNone(invalid_record["new_phase"])
+        self.assertEqual("invalid_transition", invalid_record["result"])
+        for line in records:
+            record = json.loads(line)
+            self.assertEqual(
+                {
+                    "operation_id", "host", "old_phase", "new_phase", "elapsed_ms",
+                    "generation", "desired_hash", "old_image_ids",
+                    "candidate_image_ids", "result",
+                },
+                set(record),
+            )
+            self.assertLessEqual(len(line.encode("utf-8")), control.MAX_AUDIT_BYTES)
+            for secret in secrets:
+                self.assertNotIn(secret, line)
+
+    def test_audit_hostname_requires_valid_dns_labels(self):
+        control = self.control()
+        records = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp, records.append)
+            ledger.begin(
+                self.operation(),
+                host="bad..host",
+                upgrade_class="planned_maintenance",
+                evidence=self.evidence(),
+            )
+            ledger.transition("preflight", "bypass_preparing", {})
+            ledger.close()
+        self.assertIsNone(json.loads(records[-1])["host"])
 
 
 if __name__ == "__main__":

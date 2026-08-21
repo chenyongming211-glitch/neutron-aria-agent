@@ -10,8 +10,8 @@ import logging
 import os
 import re
 import stat
-import tempfile
 import time
+import uuid
 from collections import namedtuple
 from pathlib import Path
 
@@ -71,9 +71,20 @@ MAX_LEDGER_BYTES = 1024 * 1024
 MAX_AUDIT_BYTES = 4096
 OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 AUDIT_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-AUDIT_SENSITIVE_KEY_RE = re.compile(
-    r"(?:auth|authorization|token|password|secret|snapshot|body)", re.IGNORECASE
+AUDIT_HOST_LABEL_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
 )
+AUDIT_RESULTS = frozenset(
+    (
+        "compare_and_swap_rejected",
+        "failed",
+        "invalid_transition",
+        "persistence_failed",
+        "recovered",
+        "success",
+    )
+)
+MAX_AUDIT_INTEGER = (1 << 63) - 1
 TERMINAL_PHASES = ("committed", "failed_before_mutation")
 REQUIRED_LEDGER_FIELDS = (
     "schema_version",
@@ -154,6 +165,7 @@ class UpgradeLedger(object):
         self.audit_sink = audit_sink
         self.clock = clock or time.time
         self._lock_fd = None
+        self._operations_fd = None
         self._state = None
         self._path = None
 
@@ -178,6 +190,9 @@ class UpgradeLedger(object):
                     os.close(self._lock_fd)
                     self._lock_fd = None
         finally:
+            if self._operations_fd is not None:
+                os.close(self._operations_fd)
+                self._operations_fd = None
             self._state = None
             self._path = None
 
@@ -193,6 +208,7 @@ class UpgradeLedger(object):
                     raise UpgradeLedgerConflict(
                         "this ledger already owns another operation"
                     )
+                self._fsync_operations_dir()
                 return self.state
 
             pending = self._pending_ledgers()
@@ -206,9 +222,9 @@ class UpgradeLedger(object):
                 )
 
             path = self._ledger_path(operation_id)
-            if path.exists() or path.is_symlink():
+            if self._ledger_exists(path):
                 state = self._read_ledger(path, operation_id)
-                self._fsync_directory(self.operations_dir)
+                self._fsync_operations_dir()
                 self._set_current(path, state)
                 return self.state
 
@@ -339,10 +355,10 @@ class UpgradeLedger(object):
                     % conflicts[0]["operation_id"]
                 )
             path = self._ledger_path(operation_id)
-            if not path.exists() and not path.is_symlink():
+            if not self._ledger_exists(path):
                 raise UpgradeLedgerError("operation ledger does not exist")
             state = self._read_ledger(path, operation_id)
-            self._fsync_directory(self.operations_dir)
+            self._fsync_operations_dir()
             self._set_current(path, state)
             phase = state["phase"]
             if phase in TERMINAL_PHASES:
@@ -385,99 +401,215 @@ class UpgradeLedger(object):
         self._state = None
         self._path = None
         parent = self.lock_path.parent
-        if not parent.exists():
-            raise UpgradeLedgerTrustError("lock directory does not exist")
-        if parent.is_symlink() or not parent.is_dir():
-            raise UpgradeLedgerTrustError("lock directory is not a trusted directory")
-        existed = self.lock_path.exists() or self.lock_path.is_symlink()
-        if existed and self.lock_path.is_symlink():
-            raise UpgradeLedgerTrustError("lock path must not be a symlink")
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        anchor = parent.parent
+        if anchor == parent or not parent.name:
+            raise UpgradeLedgerTrustError("lock directory has no trusted anchor")
+        anchor_fd = self._open_anchor_directory(anchor, "lock directory anchor")
+        parent_fd = None
         try:
-            fd = os.open(str(self.lock_path), flags, 0o600)
-        except OSError as error:
-            raise UpgradeLedgerTrustError("lock file cannot be opened: %s" % error)
-        try:
-            file_stat = os.fstat(fd)
-            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != self.owner_uid:
-                raise UpgradeLedgerTrustError("lock file has untrusted ownership or type")
-            if file_stat.st_nlink != 1:
-                raise UpgradeLedgerTrustError("lock file must have exactly one link")
-            if existed and stat.S_IMODE(file_stat.st_mode) != 0o600:
-                raise UpgradeLedgerTrustError("lock file mode must be 0600")
-            if not existed:
-                os.fchmod(fd, 0o600)
+            parent_stat = self._stat_directory_at(
+                anchor_fd, parent.name, "lock directory", missing_ok=False
+            )
+            self._validate_lock_directory_stat(parent_stat)
+            parent_fd = self._open_directory_at(
+                anchor_fd, parent.name, parent_stat, "lock directory"
+            )
+            self._validate_directory_binding(
+                anchor_fd, parent.name, parent_fd, "lock directory"
+            )
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                path_stat = os.stat(
+                    self.lock_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
             except OSError as error:
-                if error.errno in (errno.EACCES, errno.EAGAIN):
-                    raise UpgradeLedgerLocked("another upgrade owns the host lock")
+                if error.errno == errno.ENOENT:
+                    path_stat = None
+                else:
+                    raise UpgradeLedgerTrustError(
+                        "lock file cannot be inspected: %s" % error
+                    )
+            if path_stat is not None and not stat.S_ISREG(path_stat.st_mode):
+                raise UpgradeLedgerTrustError("lock path must be a regular file")
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                fd = os.open(
+                    self.lock_path.name, flags, 0o600, dir_fd=parent_fd
+                )
+            except OSError as error:
+                raise UpgradeLedgerTrustError("lock file cannot be opened: %s" % error)
+            try:
+                file_stat = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or file_stat.st_uid != self.owner_uid
+                ):
+                    raise UpgradeLedgerTrustError(
+                        "lock file has untrusted ownership or type"
+                    )
+                if file_stat.st_nlink != 1:
+                    raise UpgradeLedgerTrustError(
+                        "lock file must have exactly one link"
+                    )
+                if path_stat is not None:
+                    if stat.S_IMODE(file_stat.st_mode) != 0o600:
+                        raise UpgradeLedgerTrustError("lock file mode must be 0600")
+                    if (file_stat.st_dev, file_stat.st_ino) != (
+                        path_stat.st_dev, path_stat.st_ino,
+                    ):
+                        raise UpgradeLedgerTrustError(
+                            "lock file changed while it was opened"
+                        )
+                else:
+                    os.fchmod(fd, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as error:
+                    if error.errno in (errno.EACCES, errno.EAGAIN):
+                        raise UpgradeLedgerLocked("another upgrade owns the host lock")
+                    raise
+            except Exception:
+                os.close(fd)
                 raise
-        except Exception:
-            os.close(fd)
-            raise
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+            os.close(anchor_fd)
         self._lock_fd = fd
 
     def _ensure_operations_dir(self):
-        missing = []
-        cursor = self.operations_dir
-        while not cursor.exists() and not cursor.is_symlink():
-            missing.append(cursor)
-            parent = cursor.parent
-            if parent == cursor:
-                raise UpgradeLedgerTrustError(
-                    "operations directory has no existing trusted parent"
-                )
-            cursor = parent
-
-        self._validate_directory(cursor)
-        for directory in reversed(missing):
-            parent = directory.parent
-            self._validate_directory(parent)
-            try:
-                directory.mkdir(mode=0o700)
-            except OSError as error:
-                raise UpgradeLedgerTrustError(
-                    "release state directory cannot be created: %s" % error
-                )
-            try:
-                os.chmod(str(directory), 0o700)
-                self._validate_directory(directory, require_private=True)
-                self._fsync_directory(parent)
-            except Exception:
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
-                raise
-
-        self._validate_directory(self.operations_dir)
-
-    def _validate_directory(self, path, require_private=False):
+        release = self.operations_dir.parent
+        anchor = release.parent
+        if anchor == release or not release.name or not self.operations_dir.name:
+            raise UpgradeLedgerTrustError(
+                "operations directory has no existing trusted parent"
+            )
+        anchor_fd = self._open_anchor_directory(anchor, "release state anchor")
+        release_fd = None
+        operations_fd = None
+        created_release = False
+        created_operations = False
         try:
-            directory_stat = os.lstat(str(path))
-        except OSError as error:
-            raise UpgradeLedgerTrustError(
-                "release state directory cannot be inspected: %s" % error
+            release_stat = self._stat_directory_at(
+                anchor_fd, release.name, "release state directory", missing_ok=True
             )
-        if not stat.S_ISDIR(directory_stat.st_mode):
-            raise UpgradeLedgerTrustError("release state path must be a directory")
-        if directory_stat.st_uid != self.owner_uid:
-            raise UpgradeLedgerTrustError("release state directory owner is not trusted")
-        if stat.S_IMODE(directory_stat.st_mode) & 0o022:
-            raise UpgradeLedgerTrustError(
-                "release state directory must not be group/world writable"
+            if release_stat is None:
+                os.mkdir(release.name, 0o700, dir_fd=anchor_fd)
+                created_release = True
+                release_stat = self._stat_directory_at(
+                    anchor_fd,
+                    release.name,
+                    "release state directory",
+                    missing_ok=False,
+                )
+            self._validate_directory_stat(
+                release_stat, "release state directory", created_release
             )
-        if require_private and stat.S_IMODE(directory_stat.st_mode) != 0o700:
-            raise UpgradeLedgerTrustError(
-                "new release state directory mode must be 0700"
+            release_fd = self._open_directory_at(
+                anchor_fd,
+                release.name,
+                release_stat,
+                "release state directory",
             )
-        return directory_stat
+            if created_release:
+                os.fchmod(release_fd, 0o700)
+            self._validate_directory_binding(
+                anchor_fd,
+                release.name,
+                release_fd,
+                "release state directory",
+            )
 
-    def _fsync_directory(self, path):
-        expected_stat = self._validate_directory(path)
+            operations_stat = self._stat_directory_at(
+                release_fd,
+                self.operations_dir.name,
+                "operations directory",
+                missing_ok=True,
+            )
+            if operations_stat is None:
+                os.mkdir(self.operations_dir.name, 0o700, dir_fd=release_fd)
+                created_operations = True
+                operations_stat = self._stat_directory_at(
+                    release_fd,
+                    self.operations_dir.name,
+                    "operations directory",
+                    missing_ok=False,
+                )
+            self._validate_directory_stat(
+                operations_stat, "operations directory", created_operations
+            )
+            operations_fd = self._open_directory_at(
+                release_fd,
+                self.operations_dir.name,
+                operations_stat,
+                "operations directory",
+            )
+            if created_operations:
+                os.fchmod(operations_fd, 0o700)
+            self._validate_directory_binding(
+                anchor_fd,
+                release.name,
+                release_fd,
+                "release state directory",
+            )
+            self._validate_directory_binding(
+                release_fd,
+                self.operations_dir.name,
+                operations_fd,
+                "operations directory",
+            )
+
+            os.fsync(anchor_fd)
+            os.fsync(release_fd)
+            self._validate_directory_binding(
+                anchor_fd,
+                release.name,
+                release_fd,
+                "release state directory",
+            )
+            self._validate_directory_binding(
+                release_fd,
+                self.operations_dir.name,
+                operations_fd,
+                "operations directory",
+            )
+            if self._operations_fd is not None:
+                previous_stat = os.fstat(self._operations_fd)
+                current_stat = os.fstat(operations_fd)
+                if (previous_stat.st_dev, previous_stat.st_ino) != (
+                    current_stat.st_dev, current_stat.st_ino,
+                ):
+                    raise UpgradeLedgerTrustError(
+                        "operations directory changed while the lock was held"
+                    )
+                os.close(self._operations_fd)
+            self._operations_fd = operations_fd
+            operations_fd = None
+        except Exception:
+            if created_operations and release_fd is not None:
+                self._cleanup_created_directory(
+                    release_fd, self.operations_dir.name
+                )
+            if created_release:
+                self._cleanup_created_directory(anchor_fd, release.name)
+            raise
+        finally:
+            if operations_fd is not None:
+                os.close(operations_fd)
+            if release_fd is not None:
+                os.close(release_fd)
+            os.close(anchor_fd)
+
+    def _open_anchor_directory(self, path, label):
+        try:
+            expected_stat = os.lstat(str(path))
+        except OSError as error:
+            raise UpgradeLedgerTrustError("%s cannot be inspected: %s" % (label, error))
+        if not stat.S_ISDIR(expected_stat.st_mode):
+            raise UpgradeLedgerTrustError("%s must not be a symlink" % label)
         flags = os.O_RDONLY
         if hasattr(os, "O_DIRECTORY"):
             flags |= os.O_DIRECTORY
@@ -486,23 +618,112 @@ class UpgradeLedger(object):
         try:
             directory_fd = os.open(str(path), flags)
         except OSError as error:
-            raise UpgradeLedgerTrustError(
-                "release state directory cannot be opened safely: %s" % error
-            )
-        try:
-            opened_stat = os.fstat(directory_fd)
-            if (
-                not stat.S_ISDIR(opened_stat.st_mode)
-                or opened_stat.st_uid != self.owner_uid
-                or (opened_stat.st_dev, opened_stat.st_ino)
-                != (expected_stat.st_dev, expected_stat.st_ino)
-            ):
-                raise UpgradeLedgerTrustError(
-                    "release state directory changed during fsync"
-                )
-            os.fsync(directory_fd)
-        finally:
+            raise UpgradeLedgerTrustError("%s cannot be opened safely: %s" % (label, error))
+        opened_stat = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(opened_stat.st_mode)
+            or (opened_stat.st_dev, opened_stat.st_ino)
+            != (expected_stat.st_dev, expected_stat.st_ino)
+        ):
             os.close(directory_fd)
+            raise UpgradeLedgerTrustError("%s changed while it was opened" % label)
+        return directory_fd
+
+    def _stat_directory_at(self, parent_fd, name, label, missing_ok):
+        try:
+            return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            if missing_ok and error.errno == errno.ENOENT:
+                return None
+            raise UpgradeLedgerTrustError("%s cannot be inspected: %s" % (label, error))
+
+    def _validate_directory_stat(self, directory_stat, label, require_private=False):
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise UpgradeLedgerTrustError("%s must be a directory" % label)
+        if directory_stat.st_uid != self.owner_uid:
+            raise UpgradeLedgerTrustError("%s owner is not trusted" % label)
+        if stat.S_IMODE(directory_stat.st_mode) & 0o022:
+            raise UpgradeLedgerTrustError("%s must not be group/world writable" % label)
+        if require_private and stat.S_IMODE(directory_stat.st_mode) != 0o700:
+            raise UpgradeLedgerTrustError("new %s mode must be 0700" % label)
+
+    def _validate_lock_directory_stat(self, directory_stat):
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise UpgradeLedgerTrustError("lock directory must be a directory")
+        if directory_stat.st_uid != self.owner_uid:
+            raise UpgradeLedgerTrustError("lock directory owner is not trusted")
+        if stat.S_IMODE(directory_stat.st_mode) & 0o002:
+            raise UpgradeLedgerTrustError("lock directory must not be world writable")
+
+    def _open_directory_at(self, parent_fd, name, expected_stat, label):
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            directory_fd = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise UpgradeLedgerTrustError("%s cannot be opened safely: %s" % (label, error))
+        opened_stat = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(opened_stat.st_mode)
+            or (opened_stat.st_dev, opened_stat.st_ino)
+            != (expected_stat.st_dev, expected_stat.st_ino)
+        ):
+            os.close(directory_fd)
+            raise UpgradeLedgerTrustError("%s changed while it was opened" % label)
+        return directory_fd
+
+    def _validate_directory_binding(self, parent_fd, name, directory_fd, label):
+        bound_stat = self._stat_directory_at(
+            parent_fd, name, label, missing_ok=False
+        )
+        opened_stat = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(bound_stat.st_mode)
+            or (bound_stat.st_dev, bound_stat.st_ino)
+            != (opened_stat.st_dev, opened_stat.st_ino)
+        ):
+            raise UpgradeLedgerTrustError("%s binding changed" % label)
+
+    def _cleanup_created_directory(self, parent_fd, name):
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except OSError:
+            return
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+
+    def _fsync_operations_dir(self):
+        if self._operations_fd is None:
+            raise UpgradeLedgerError("operations directory is not pinned")
+        directory_stat = os.fstat(self._operations_fd)
+        self._validate_directory_stat(directory_stat, "operations directory")
+        os.fsync(self._operations_fd)
+
+    def _ledger_name(self, path):
+        path = Path(path)
+        if path.parent != self.operations_dir or not path.name:
+            raise UpgradeLedgerTrustError("ledger path escapes operations directory")
+        return path.name
+
+    def _ledger_exists(self, path):
+        if self._operations_fd is None:
+            raise UpgradeLedgerError("operations directory is not pinned")
+        try:
+            os.stat(
+                self._ledger_name(path),
+                dir_fd=self._operations_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            if error.errno == errno.ENOENT:
+                return False
+            raise UpgradeLedgerTrustError("ledger cannot be inspected: %s" % error)
+        return True
 
     def _validate_file_stat(self, file_stat):
         if not stat.S_ISREG(file_stat.st_mode):
@@ -515,8 +736,13 @@ class UpgradeLedger(object):
             raise UpgradeLedgerTrustError("ledger must have exactly one link")
 
     def _read_ledger(self, path, operation_id=None):
+        if self._operations_fd is None:
+            raise UpgradeLedgerError("operations directory is not pinned")
+        name = self._ledger_name(path)
         try:
-            path_stat = os.lstat(str(path))
+            path_stat = os.stat(
+                name, dir_fd=self._operations_fd, follow_symlinks=False
+            )
         except OSError as error:
             raise UpgradeLedgerTrustError("ledger cannot be inspected: %s" % error)
         self._validate_file_stat(path_stat)
@@ -524,7 +750,7 @@ class UpgradeLedger(object):
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
-            fd = os.open(str(path), flags)
+            fd = os.open(name, flags, dir_fd=self._operations_fd)
         except OSError as error:
             raise UpgradeLedgerTrustError("ledger cannot be opened safely: %s" % error)
         try:
@@ -566,7 +792,9 @@ class UpgradeLedger(object):
 
     def _pending_ledgers(self):
         pending = []
-        for name in sorted(os.listdir(str(self.operations_dir))):
+        if self._operations_fd is None:
+            raise UpgradeLedgerError("operations directory is not pinned")
+        for name in sorted(os.listdir(self._operations_fd)):
             if not name.endswith(".json"):
                 continue
             operation_id = name[:-5]
@@ -584,7 +812,10 @@ class UpgradeLedger(object):
                 state[key] = copy.deepcopy(value)
 
     def _write_ledger(self, path, state):
-        if path.exists() or path.is_symlink():
+        if self._operations_fd is None:
+            raise UpgradeLedgerError("operations directory is not pinned")
+        name = self._ledger_name(path)
+        if self._ledger_exists(path):
             self._read_ledger(path, state["operation_id"])
         payload = (
             json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -593,28 +824,48 @@ class UpgradeLedger(object):
         if len(payload) > MAX_LEDGER_BYTES:
             raise ValueError("ledger exceeds the size limit")
         fd = None
-        temporary_path = None
+        temporary_name = None
         try:
-            fd, temporary_path = tempfile.mkstemp(
-                prefix=".%s." % state["operation_id"],
-                suffix=".tmp",
-                dir=str(self.operations_dir),
-            )
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            for unused_attempt in range(128):
+                temporary_name = ".%s.%s.tmp" % (
+                    state["operation_id"], uuid.uuid4().hex,
+                )
+                try:
+                    fd = os.open(
+                        temporary_name,
+                        flags,
+                        0o600,
+                        dir_fd=self._operations_fd,
+                    )
+                    break
+                except OSError as error:
+                    if error.errno != errno.EEXIST:
+                        raise
+            if fd is None:
+                raise UpgradeLedgerError("temporary ledger name space is exhausted")
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as output:
                 fd = None
                 output.write(payload)
                 output.flush()
                 os.fsync(output.fileno())
-            os.rename(temporary_path, str(path))
-            temporary_path = None
-            self._fsync_directory(self.operations_dir)
+            os.rename(
+                temporary_name,
+                name,
+                src_dir_fd=self._operations_fd,
+                dst_dir_fd=self._operations_fd,
+            )
+            temporary_name = None
+            self._fsync_operations_dir()
         finally:
             if fd is not None:
                 os.close(fd)
-            if temporary_path is not None:
+            if temporary_name is not None:
                 try:
-                    os.unlink(temporary_path)
+                    os.unlink(temporary_name, dir_fd=self._operations_fd)
                 except FileNotFoundError:
                     pass
 
@@ -658,20 +909,39 @@ class UpgradeLedger(object):
         self._audit(old_phase, old_phase, evidence, result)
         return self.state
 
-    def _audit_value(self, value):
-        if isinstance(value, str):
-            return value[:256]
-        if isinstance(value, (dict, list, tuple)):
-            return "<redacted>"
-        if value is None or isinstance(value, bool):
+    def _audit_operation_id(self, value):
+        try:
+            return self._validate_operation_id(value)
+        except ValueError:
+            return None
+
+    def _audit_host(self, value):
+        if not isinstance(value, str) or not 1 <= len(value) <= 253:
+            return None
+        labels = value.split(".")
+        if all(AUDIT_HOST_LABEL_RE.fullmatch(label) is not None for label in labels):
             return value
-        if isinstance(value, int):
-            if value.bit_length() > 1024:
-                return "<integer-truncated>"
+        return None
+
+    def _audit_phase(self, value):
+        if isinstance(value, str) and value in LEGAL_PHASES:
             return value
-        if isinstance(value, float):
+        return None
+
+    def _audit_result(self, value):
+        if isinstance(value, str) and value in AUDIT_RESULTS:
             return value
-        return str(value)[:256]
+        return None
+
+    def _audit_nonnegative_integer(self, value):
+        if type(value) is int and 0 <= value <= MAX_AUDIT_INTEGER:
+            return value
+        return None
+
+    def _audit_digest(self, value):
+        if isinstance(value, str) and AUDIT_IMAGE_ID_RE.fullmatch(value) is not None:
+            return value
+        return None
 
     def _audit_image_ids(self, value):
         if not isinstance(value, dict):
@@ -681,8 +951,6 @@ class UpgradeLedger(object):
             if not isinstance(component, str):
                 continue
             if IMAGE_COMPONENT_RE.fullmatch(component) is None:
-                continue
-            if AUDIT_SENSITIVE_KEY_RE.search(component) is not None:
                 continue
             identity = value[component]
             if not isinstance(identity, str):
@@ -703,15 +971,15 @@ class UpgradeLedger(object):
         if isinstance(started_at, (int, float)):
             elapsed_ms = max(0, int((self.clock() - started_at) * 1000))
         record = {
-            "operation_id": self._audit_value(state.get("operation_id")),
-            "host": self._audit_value(state.get("host")),
-            "old_phase": self._audit_value(old_phase),
-            "new_phase": self._audit_value(new_phase),
-            "elapsed_ms": elapsed_ms,
-            "generation": self._audit_value(
+            "operation_id": self._audit_operation_id(state.get("operation_id")),
+            "host": self._audit_host(state.get("host")),
+            "old_phase": self._audit_phase(old_phase),
+            "new_phase": self._audit_phase(new_phase),
+            "elapsed_ms": self._audit_nonnegative_integer(elapsed_ms),
+            "generation": self._audit_nonnegative_integer(
                 evidence.get("generation", state.get("generation"))
             ),
-            "desired_hash": self._audit_value(
+            "desired_hash": self._audit_digest(
                 evidence.get(
                     "desired_hash",
                     state.get("desired_hash", state.get("pre_desired_hash")),
@@ -721,7 +989,7 @@ class UpgradeLedger(object):
             "candidate_image_ids": self._audit_image_ids(
                 state.get("candidate_image_ids", {})
             ),
-            "result": self._audit_value(result),
+            "result": self._audit_result(result),
         }
         line = json.dumps(record, sort_keys=True, separators=(",", ":"))
         if len(line.encode("utf-8")) > MAX_AUDIT_BYTES:
