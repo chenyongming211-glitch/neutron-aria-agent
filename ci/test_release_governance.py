@@ -553,7 +553,7 @@ class ReleaseGovernanceTest(unittest.TestCase):
             "ci/check_release_reproducibility.sh",
             'cp VERSION LICENSE CHANGELOG.md release/',
             '--artifact "firewall-binaries-x86_64.zip=firewall-binaries-x86_64.zip"',
-            "Build manifest-pinned Neutron stage-two ACL Kolla bundle",
+            "Build Neutron stage-two ACL Kolla bundle",
             'AGENT_IMAGE_IDENTITY="${agent_tag}@${agent_id}"',
             'DATAPATH_IMAGE_IDENTITY="${datapath_tag}@${datapath_id}"',
         ):

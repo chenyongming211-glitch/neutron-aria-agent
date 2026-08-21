@@ -338,7 +338,7 @@ jobs:
             IMAGE_TAR="${image_tar}" \
             bash deploy/kolla/package/build_aria_datapath_image.sh
 
-      - name: Build manifest-pinned Neutron stage-two ACL Kolla bundle
+      - name: Build Neutron stage-two ACL Kolla bundle
         if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
         run: |
           set -euo pipefail
