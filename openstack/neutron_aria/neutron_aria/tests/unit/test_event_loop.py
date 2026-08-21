@@ -5548,6 +5548,45 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
 
         self.assertEqual("ready", verdict, details)
 
+    def test_pending_local_candidate_accepts_exact_detached_runtime_evidence(self):
+        scenario = status_scenario("full-classified-ready")
+        snapshot = copy.deepcopy(scenario["request_context"]["snapshot"])
+        candidate = snapshot["ports"][0]
+        candidate.update({
+            "ifname": "",
+            "ifindex": None,
+            "eligible": True,
+            "disposition": "pending_local_validation",
+            "managed_domains": ["acl"],
+        })
+        status = copy.deepcopy(scenario["status"])
+        status["managed_ports"] = []
+        tombstone = status["port_statuses"][0]
+        tombstone["status"] = "detached"
+        tombstone["reason"] = "tap_not_found"
+        for domain in tombstone["domains"]:
+            domain.update({
+                "status": "not_requested",
+                "reason": "tap_not_found",
+                "effective_action": "cleanup",
+                "support_disposition": "not_applicable",
+            })
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+
+        verdict, details = sync._snapshot_status_verdict(
+            snapshot,
+            set(scenario["request_context"]["projected_port_ids"]),
+            status,
+        )
+
+        self.assertEqual("ready", verdict, details)
+
     def test_scoped_empty_projection_is_not_replaced_by_prior_classified_ids(self):
         for commit_method in (
             "commit_scoped_snapshot",

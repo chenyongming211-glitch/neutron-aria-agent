@@ -3110,6 +3110,14 @@ class SnapshotSynchronizer(object):
             validated_port_ids = projected_port_ids
         evidence_port_ids = projected_port_ids
 
+        port_statuses, reason = _unique_row_index(
+            status.get("port_statuses"),
+            "port_id",
+            "port status evidence",
+        )
+        if reason is not None:
+            return "failed", reason
+
         managed_ports, reason = _unique_row_index(
             status.get("managed_ports"),
             "port_id",
@@ -3127,11 +3135,46 @@ class SnapshotSynchronizer(object):
                 "removed scoped ports remain managed: %s" % stale_managed,
             )
         missing_managed = sorted(evidence_port_ids - managed_port_ids)
-        if missing_managed:
+        detached_projected_port_ids = set()
+        unresolved_missing_managed = []
+        for port_id in missing_managed:
+            candidate = snapshot_ports.get(port_id) or {}
+            tombstone = port_statuses.get(port_id)
+            pending_local_detach = bool(
+                is_v1 and
+                candidate.get("eligible") is True and
+                candidate.get("disposition") == "pending_local_validation" and
+                candidate.get("ifname") in (None, "") and
+                candidate.get("ifindex") is None and
+                tombstone is not None and
+                tombstone.get("generation") == expected_generation and
+                tombstone.get("desired_hash") == expected_hash
+            )
+            if not pending_local_detach:
+                unresolved_missing_managed.append(port_id)
+                continue
+            reason = self._v1_detached_tombstone_reason(
+                port_id,
+                tombstone,
+                applied_generation,
+                applied_hash,
+            )
+            if reason is not None:
+                unresolved_missing_managed.append(port_id)
+                continue
+            detached_projected_port_ids.add(port_id)
+        if unresolved_missing_managed:
             return (
                 "failed",
-                "projected ports are not managed: %s" % missing_managed,
+                "projected ports are not managed: %s" %
+                unresolved_missing_managed,
             )
+        active_evidence_port_ids = (
+            evidence_port_ids - detached_projected_port_ids
+        )
+        validated_port_ids = (
+            validated_port_ids - detached_projected_port_ids
+        )
         allows_unaffected_managed_ports = (
             scope.get("type") == "port" or
             (
@@ -3141,7 +3184,7 @@ class SnapshotSynchronizer(object):
         )
         if not allows_unaffected_managed_ports:
             unexpected_managed = sorted(
-                managed_port_ids - evidence_port_ids
+                managed_port_ids - active_evidence_port_ids
             )
             if unexpected_managed:
                 return (
@@ -3149,14 +3192,6 @@ class SnapshotSynchronizer(object):
                     "full-host status retains unprojected managed ports: %s" %
                     unexpected_managed,
                 )
-
-        port_statuses, reason = _unique_row_index(
-            status.get("port_statuses"),
-            "port_id",
-            "port status evidence",
-        )
-        if reason is not None:
-            return "failed", reason
         restart_current_affected_port_ids = (
             restart_affected_port_ids & projected_port_ids
         )
@@ -3219,7 +3254,7 @@ class SnapshotSynchronizer(object):
                 "runtime status is missing for ports %s" % missing_statuses,
             )
         runtime_domains_by_port = {}
-        for port_id in sorted(evidence_port_ids):
+        for port_id in sorted(active_evidence_port_ids):
             managed_port = managed_ports[port_id]
             runtime_port = port_statuses[port_id]
             runtime_domains, reason = _unique_row_index(
