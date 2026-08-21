@@ -2,7 +2,14 @@
 
 ## Status
 
-Approved design baseline for the v0.9 Neutron integration.
+Implemented RC baseline for the v0.9 Neutron integration.
+
+The target maintenance-aware health contract is defined in
+`2026-08-21-aria-planned-maintenance-upgrade-design.md`. The current strict
+Docker-health behavior below remains a description of deployed RC behavior,
+but it is superseded as the target design: Docker health will represent
+liveness, `/readyz` will remain strict ACL readiness, and `/status` will expose
+recognized maintenance bypass.
 
 ## Goal
 

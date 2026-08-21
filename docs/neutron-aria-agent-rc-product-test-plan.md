@@ -110,6 +110,12 @@ E 是否成为发布阻塞项，由本次版本对外声明决定；只要声明
 一个 enforced port degraded 时，Aria 严格健康检查可以失败；但独立 OVS canary 必须继续
 转发，其他 port 仍按各自 domain 状态工作。健康失败不能被解释为 OVS 业务中断。
 
+本计划把 OVS 转发保护定义为所有 P0 故障测试共同适用的硬门禁：Aria 可以保留经过
+证明的 last-known-good ACL，也可以在无法证明可信时进入 bypass；但不得主动重启
+OVS/OVS-agent、删除业务 port、改变 `br-int` 拓扑，或让非策略性 Aria 故障阻断
+OVS 基础转发。显式 ACL deny 和畸形/无可信上下文分片的 fail-close 不计为 Aria
+组件故障。
+
 ## 4. 环境与角色
 
 ### 4.1 现场实测拓扑
@@ -443,7 +449,7 @@ neutron aria-acl-policy-delete "${POLICY_ID}"
 | --- | --- | --- | --- | --- |
 | LIFE-001 Python agent restart | P0 | ACL enforce 时重启 `neutron-aria-agent` | 数据面保持已提交 ACL；恢复后 generation 对齐；OVS canary 无间断 | runtime stability smoke |
 | LIFE-002 Datapath restart | P0 | ACL enforce 时重启 `aria-datapath` | 按可用性优先合同恢复；恢复窗口状态诚实；OVS forwarding 不被阻断 | crash/restart smoke |
-| LIFE-003 Tap recreate | P0 | 在隔离测试 VM 上触发 tap 销毁/重建 | 不信任旧 ifindex；清旧状态并重新 attach；记录实际恢复时间 | tap recreate smoke |
+| LIFE-003 Tap recreate | P0 | 在隔离测试 VM 上至少三次触发同 ifname、不同 ifindex 的 tap 销毁/重建，并持续采样状态和 ACL/OVS 流量 | 旧 identity 丢失后立即取消 `ready/enforce`；新 `iface-id`/ifindex、TC 双方向和 scoped replay 全部验证后才恢复；稳定采样零 false-ready、零 ACL 误放行，OVS canary 无 gap | tap recreate identity smoke |
 | LIFE-004 VM migration | P0 | 将测试 VM 从 node-a 迁移到 node-b，再覆盖 node-c | 源节点清理，目标节点在 binding 生效后接管；无双 host enforce 残留 | VM migration smoke |
 | LIFE-005 Port delete | P0 | 删除有 ACL 的测试 port | binding/status/runtime/TC/Map 清理；重试幂等；其他 port 不受影响 | delete/cleanup smoke |
 | LIFE-006 Compute reboot | P0 | 在维护窗口重启一个测试计算节点 | 容器恢复、WAL replay、full-resync 和 ACL 重新收敛；OVS 由自身机制恢复 | physical reboot runbook |
@@ -472,6 +478,7 @@ neutron aria-acl-policy-delete "${POLICY_ID}"
 | SEC-001 Socket 权限 | P0 | 检查 `/run/aria` 和 UDS owner/group/mode | 非 world-writable；只授权 Python agent 身份 | UDS hardening smoke |
 | SEC-002 Peer credential | P0 | 授权 agent 和未授权本机 client 分别访问 UDS | 授权成功；未授权拒绝并审计；不改变数据面 | peercred profile smoke |
 | SEC-003 日志脱敏 | P0 | 触发 API/UDS/Neutron 错误并扫描日志/evidence | 无密码、token、内部发布标识和完整敏感 payload | log redaction/public scan |
+| SAFE-001 OVS forwarding invariant | P0 | 在独立 OVS canary 持续运行时依次覆盖 Python agent 停止、datapath 停止、UDS/WAL/Map/apply/rollback 故障、TC attach/verifier 失败、tap recreate 和 runtime upgrade/rollback 失败 | Aria 只保留完整 last-known-good ACL 或进入诚实 bypass；canary 无 Aria 引起的 gap；OVS/OVS-agent 身份、`br-int`、业务 port/ofport 不被 Aria 修改；无半策略假 applied | composite OVS non-interference gate + fault evidence |
 | OBS-001 Readiness | P0 | 正常、pending、degraded、blocked、not-requested 分别查询 status/readyz/healthcheck | 正常为 ready/healthy；非收敛状态返回非 ready，不假健康 | composite readiness smoke |
 | OBS-002 Port counters | P1/D | 开启 counters，产生 allow/drop 流量，执行 `port-status-show --counters` | packets/bytes/drop/pps/bps 单调合理；删除对象后按合同清理 | counter sampler/CLI smoke |
 | OBS-003 Drop reason | P1/D | 产生 ACL deny、fragment 和 malformed 测试流量 | reason ID/名称稳定，UNKNOWN 保留数字，不改变 verdict | drop-reason dictionary gate |
@@ -597,6 +604,16 @@ end-to-end convergence time
 
 ### 9.8 LIFE-008/LIFE-009：安全升级与回滚
 
+安全升级的目标协议以
+[`2026-08-21-aria-planned-maintenance-upgrade-design.md`](superpowers/specs/2026-08-21-aria-planned-maintenance-upgrade-design.md)
+为准。升级必须先分类：仅 Python agent 且契约兼容时保留
+last-known-good ACL；datapath、eBPF/Map/WAL ABI 或双容器联合升级时，
+进入显式 `maintenance_bypass`，完成 authoritative full-resync 和 shadow
+apply 后再恢复 enforcement。
+
+下列流程是当前 RC hash-aware installer 基线，在新协议实现前仍需
+继续回归：
+
 升级：
 
 ```text
@@ -614,6 +631,44 @@ preflight
 回滚使用相同边界反向执行，不能仅重命名旧容器覆盖候选 live pins。任一步失败都要
 保留 release ledger；自动恢复失败时保持 Python writer 停止并报告人工恢复步骤。
 
+目标协议还必须增加以下 P0 验收点：
+
+1. Docker health 表示 liveness，`/readyz` 单独表示 ACL readiness。
+2. 识别为合法维护事务时，容器可 healthy，但 ACL 必须显示
+   `maintenance/degraded + bypass`。
+3. 旧 datapath 停止前必须证明 ACL domain gate 已在双方向进入
+   bypass，不能把“容器已停”当作 bypass 证据。
+4. 新 datapath 启动后必须继续保持 bypass，不能在 authoritative
+   full-resync 之前自动激活旧 pin/Map。
+5. 升级窗口内的 RPC 事件必须缓冲或由二次 full-resync 覆盖；
+   gap/overflow 不得带着不完整状态恢复 enforcement。
+6. 回滚恢复旧二进制后，仍需从当前 Neutron 权威状态重建，
+   不得盲目激活升级前的陈旧策略。
+
+### 9.9 SAFE-001：OVS forwarding invariant
+
+`SAFE-001` 不是一次孤立 ping，而是所有 P0 故障场景的共同证据层。执行期间至少
+维护两条带时间戳和 nonce 的独立流量：一条经过目标 managed port，用于判断
+last-known-good/enforce 或 bypass；一条不依赖目标 ACL policy 的 OVS canary，用于
+判断基础转发是否被 Aria 破坏。
+
+每个故障切点必须同时记录：
+
+1. 故障前后 `ovs-vswitchd` PID、OVS-agent container ID/start time。
+2. `br-int`、目标 port、sibling canary port、ofport 和 `external_ids:iface-id`。
+3. Aria status、domain status、`effective_action`、generation/hash 和 TC 双方向 identity。
+4. managed traffic 与 OVS canary 的逐秒结果，不能只记录最终恢复后的汇总。
+5. apply/rollback 无法证明完整时，ACL gate 已关闭且状态不是 `ready/enforce`。
+6. 恢复后 generation/hash/TC identity 收敛，临时 pin/filter/WAL/orphan 已清理。
+
+以下任一情况直接判定 `SAFE-001 FAIL` 并阻断扩大灰度：
+
+- Aria 主动重启、停止或重建 OVS/OVS-agent；
+- Aria 删除业务 port、改变 `br-int` membership/ofport，或删除未证明归属的 hook；
+- Aria 组件故障导致独立 OVS canary 出现可归因的 gap；
+- partial apply、tap identity 丢失或 rollback 未证明时仍显示 `ready/enforce`；
+- 既没有完整 last-known-good ACL，也没有可证明的 bypass。
+
 ## 10. 执行顺序
 
 推荐顺序：
@@ -622,6 +677,7 @@ preflight
 Day 0
   exact candidate + offline install/migration + XDP/TC authority
   API + binding/status matrix + PORT eligibility
+  start continuous OVS forwarding invariant evidence
 
 Day 1
   IPv4 functional + Security Group independence
@@ -642,6 +698,7 @@ Day 5
 
 Day 6
   safe upgrade/rollback + 30-minute soak + final cleanup
+  close continuous OVS forwarding invariant evidence
 ```
 
 高风险测试采用逐节点 canary：先 node-a，稳定后 node-a+node-b，最后三节点。
@@ -666,6 +723,9 @@ ACL 候选版本可验收必须同时满足：
 12. 最终三节点 heartbeat alive，accepted/applied generation 对齐，容器 healthy。
 13. 证据目录通过 schema、敏感词、checksum 和候选身份检查。
 14. 发布负责人签字确认默认关闭项：IPv6、counters、P3 incremental 的最终状态。
+15. `SAFE-001` 在所有适用 P0 故障切点持续 PASS：Aria 仅保留完整
+    last-known-good ACL 或进入诚实 bypass，且没有 Aria 引起的 OVS canary gap、
+    OVS/OVS-agent 身份变化、业务 port 拓扑变化或未授权 hook 清理。
 
 ## 12. 已知边界与发布前修订
 

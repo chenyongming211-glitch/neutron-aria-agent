@@ -181,6 +181,40 @@ Important rules:
 - ACL ready must use `effective_action=enforce`.
 - `accepted_generation` means the snapshot passed schema/authority/WAL checks; it does not by itself mean every feature domain is ready.
 
+### OVS forwarding invariant
+
+Aria is an enhancement of the existing OVS datapath. Failure of an Aria
+control-plane or ACL runtime operation must never be translated into an OVS
+restart, OVS-agent restart, bridge/port removal, or an unowned hook cleanup.
+
+The required failure order is:
+
+1. Keep a complete last-known-good ACL generation when its link, map, tap, and
+   runtime identity remain provably valid.
+2. If that identity or a complete rollback cannot be proven, disable the Aria
+   ACL gate and publish `degraded` or `blocked` with
+   `effective_action=bypass`.
+3. In bypass, packet processing continues to OVS; health may be non-ready, but
+   recovery must not stop OVS or `neutron-openvswitch-agent`.
+4. A two-direction apply is one policy result. A partial ingress/egress result
+   must roll back to a complete old generation or bypass both directions.
+5. Detach and cleanup may remove only objects whose exact Aria ownership is
+   proven. Shared `clsact`, foreign filters, and foreign XDP/TC programs are
+   outside Aria cleanup authority.
+
+This invariant does not turn an explicit ACL deny into pass. It also does not
+weaken fail-closed handling for malformed, overlapping, or authority-less IP
+fragments. Those are packet-policy/security outcomes rather than an Aria
+component outage. OVS, host, physical-link, and external-network failures are
+outside this guarantee.
+
+Planned agent/datapath upgrades use the maintenance transaction defined in
+[`2026-08-21-aria-planned-maintenance-upgrade-design.md`](superpowers/specs/2026-08-21-aria-planned-maintenance-upgrade-design.md).
+The maintenance gate is domain-scoped: an ACL upgrade may bypass ACL without
+silently disabling unrelated QoS, Mirror, trace, or observability ownership.
+Container liveness, ACL readiness, and effective action are separate states;
+a recognized maintenance operation may be live while ACL is non-ready/bypass.
+
 ## UDS Minimum Contract
 
 The Neutron UDS API is local only:
@@ -219,6 +253,10 @@ Minimum tests:
 | Snapshot with ACL apply failure | ACL domain degraded, `effective_action=bypass`, OVS forwarding unaffected. |
 | Neutron communication failure after accepted snapshot | Remains Neutron-managed/degraded; local writes for managed domains stay blocked. |
 | Break-glass, if enabled | Explicit only; writes local override WAL; rejoin defaults to Neutron wins. |
+| Python agent exits while committed kernel ACL identity remains valid | Last-known-good ACL remains active; OVS forwarding and topology are unchanged. |
+| Datapath apply or rollback cannot prove a complete generation | ACL gate is disabled, status is non-ready/bypass, and OVS continues forwarding. |
+| One TC direction applies and the other fails | Restore the complete old generation or bypass both directions; never report a half policy as applied. |
+| Aria detach encounters a foreign filter or shared qdisc | Preserve the foreign/shared object, report conflict/degraded, and leave OVS forwarding unchanged. |
 
 ## Dual-stack ACL identity
 

@@ -2,9 +2,15 @@
 
 ## Status
 
-Approved implementation baseline for the v0.9 Neutron integration. This
-design extends the existing Kolla RC installer. It does not add a daemon,
-change the datapath API, or introduce an alternative deployment controller.
+Implemented RC baseline for the v0.9 Neutron integration.
+
+The next target lifecycle is defined by
+`2026-08-21-aria-planned-maintenance-upgrade-design.md`. In particular, the
+target replaces sequential managed-port detach with an explicit ACL domain
+maintenance gate, separates liveness from readiness, buffers events during the
+maintenance window, and supports a coordinated two-container upgrade. The
+remainder of this document describes the current hash-aware installer rather
+than the final product contract.
 
 ## Problem
 

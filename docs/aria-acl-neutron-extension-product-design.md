@@ -159,13 +159,53 @@ Aria ACL 与 Neutron Security Group 的边界必须硬隔离：
 
 Aria ACL 是 OVS enhancement，不替代 OVS L2 转发。
 
-失败处理原则：
+产品必须满足以下 OVS 转发不变量：
 
-- 没有 ACL 绑定的 port：`not_requested + bypass`。
-- ACL 配置错误：对应 port `degraded + bypass`。
-- apply 失败：对应 port `degraded + bypass`。
-- conntrack 不可用且 policy 要求 stateful：对应 port `degraded + bypass`。
-- Neutron agent 或 Aria agent 异常：不主动破坏 OVS 原有转发。
+> Aria ACL 未请求、未就绪、升级失败、恢复失败或运行状态无法证明可信时，
+> 不得因为 Aria 主动中断 OVS 原有二层转发。Aria 只能继续使用已经证明完整的
+> last-known-good ACL，或者关闭 Aria ACL gate 并进入 bypass。
+
+失败处理遵循“last-known-good 优先，无法证明可信则 bypass”的混合合同：
+
+| 场景 | ACL 行为 | OVS 行为 |
+| --- | --- | --- |
+| 没有 ACL 绑定 | `not_requested + bypass` | 保持原有转发 |
+| ACL 配置错误或不受支持 | `degraded + bypass` | 保持原有转发 |
+| `neutron-aria-agent` 停止，但已提交内核 ACL 身份和状态仍可信 | 保留 last-known-good ACL | OVS 继续按原拓扑转发 |
+| `aria-datapath` 用户态停止，但已提交内核 link/Map 仍可信 | 保留 last-known-good ACL | OVS 继续按原拓扑转发 |
+| 新策略 apply 失败且完整旧 generation 可以恢复 | 回滚到完整旧 generation | 不改变 OVS 拓扑和基础转发 |
+| apply、rollback、Map、WAL、TC identity 或 tap identity 无法证明可信 | 关闭 ACL gate，`degraded/blocked + bypass` | 保持原有转发 |
+| TC/eBPF verifier 或 attach 失败 | 不启用候选 ACL；只清理 Aria 自有对象 | 保持原有转发 |
+| ingress/egress 只成功一个方向 | 回滚完整旧代；无法回滚则整体 bypass | 不允许半策略影响业务 |
+
+实现边界：
+
+- `neutron-aria-agent` 不直接修改 OVSDB、OpenFlow、`br-int` membership 或
+  `binding:vif_type`。
+- Aria 不得把重启、停止或重建 `ovs-vswitchd`、`neutron-openvswitch-agent`
+  作为自身恢复动作。
+- Aria detach/rollback 只能删除经过 program/link/filter identity 证明属于 Aria
+  的对象；不得删除 foreign TC filter、共享 `clsact` 或其他产品的 XDP/TC 程序。
+- inert、未请求或不可信的 TC packet path 必须返回继续转发语义，例如
+  `TC_ACT_OK`，不能因为 status/metrics/trace 失败而丢包。
+- 健康检查可以因为 ACL `degraded/blocked` 返回 unhealthy，但健康失败不能被
+  翻译成停止 OVS、停止 OVS agent 或删除业务 port。
+
+以下情况不属于“ACL 组件故障必须 bypass”：
+
+- 已成功提交的显式 ACL deny；
+- 无可信首片、重叠、畸形或上下文冲突的分片 fail-close；
+- OVS、物理链路、宿主机或外部网络自身故障。
+
+因此，“保证 OVS 正常转发”不等于“任何报文永远放行”，而是保证 Aria 故障
+不会破坏 OVS 原生转发拓扑，并且所有非策略性丢包都必须有明确、可审计的原因。
+
+`neutron_aria_agent` 和 `aria_datapath` 的计划内升级必须遵循
+[`Aria Planned Maintenance Upgrade And Recovery Design`](superpowers/specs/2026-08-21-aria-planned-maintenance-upgrade-design.md)。
+兼容的 Python agent 升级保留可证明的 last-known-good ACL；影响
+datapath/eBPF/Map/WAL ABI 或双容器的升级，则先进入显式 ACL
+maintenance bypass，再通过 Neutron authoritative full-resync 和 shadow
+generation 恢复 enforcement。
 
 ## 4. 组件边界
 
