@@ -321,13 +321,15 @@ check_candidate() {
     [ "$(docker inspect -f '{{.Image}}' "${SERVICE_NAME}")" = "${EXPECTED_IMAGE_ID}" ] ||
         die "running image ID mismatch"
     wait_candidate_ready || die "candidate runtime is not Heartbeat V2 ready"
-    check_non_interference
+    container_running "${DATAPATH_SERVICE}" || die "Aria datapath is not running"
+    container_running "${OVS_AGENT_SERVICE}" || die "Neutron OVS agent is not running"
     log "check passed image=${IMAGE_REF}"
 }
 
 rollback_candidate() {
     [ "$(id -u)" = "0" ] || die "must run as root"
     read_state
+    record_non_interference_baseline
     rollback_name="${SERVICE_NAME}_rollback_$(date +%Y%m%d%H%M%S)"
     validate_name "${rollback_name}"
     container_exists "${rollback_name}" && die "rollback candidate already exists"
