@@ -47,12 +47,16 @@ REQUIRED_IMAGES = ("neutron-aria-agent", "aria-datapath")
 UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 
 ALLOWED = {
-    "preflight": ("bypass_preparing", "failed_before_mutation"),
+    "preflight": ("bypass_preparing", "failed_before_mutation", "quiescing"),
+    "quiescing": ("bypass_preparing",),
     "bypass_preparing": ("bypass_confirmed",),
     "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass", "rollback"),
     "datapath_upgrading": ("datapath_live", "maintenance_bypass", "rollback"),
     "datapath_live": ("agent_upgrading", "maintenance_bypass", "rollback"),
-    "agent_upgrading": ("full_resync", "maintenance_bypass", "rollback"),
+    "agent_upgrading": (
+        "full_resync", "maintenance_bypass", "rollback", "agent_buffering",
+    ),
+    "agent_buffering": ("full_resync",),
     "full_resync": ("shadow_apply", "maintenance_bypass", "rollback"),
     "shadow_apply": ("activating", "maintenance_bypass", "rollback"),
     "activating": ("verifying", "maintenance_bypass", "rollback"),
@@ -172,69 +176,78 @@ class UpgradeLedger(object):
     def begin(self, operation_id, host=None, upgrade_class=None, evidence=None):
         """Create or idempotently reopen an operation in ``preflight``."""
         operation_id = self._validate_operation_id(operation_id)
-        self._acquire_lock()
-        self._ensure_operations_dir()
-        if self._state is not None:
-            if self._state["operation_id"] != operation_id:
-                raise UpgradeLedgerConflict("this ledger already owns another operation")
-            return self.state
+        acquired_here = self._lock_fd is None
+        try:
+            self._acquire_lock()
+            self._ensure_operations_dir()
+            if self._state is not None:
+                if self._state["operation_id"] != operation_id:
+                    raise UpgradeLedgerConflict(
+                        "this ledger already owns another operation"
+                    )
+                return self.state
 
-        pending = self._pending_ledgers()
-        conflicts = [
-            item for item in pending if item["operation_id"] != operation_id
-        ]
-        if conflicts:
-            raise UpgradeLedgerConflict(
-                "pending operation %s owns the host" % conflicts[0]["operation_id"]
-            )
+            pending = self._pending_ledgers()
+            conflicts = [
+                item for item in pending if item["operation_id"] != operation_id
+            ]
+            if conflicts:
+                raise UpgradeLedgerConflict(
+                    "pending operation %s owns the host"
+                    % conflicts[0]["operation_id"]
+                )
 
-        path = self._ledger_path(operation_id)
-        if path.exists() or path.is_symlink():
-            state = self._read_ledger(path, operation_id)
+            path = self._ledger_path(operation_id)
+            if path.exists() or path.is_symlink():
+                state = self._read_ledger(path, operation_id)
+                self._set_current(path, state)
+                return self.state
+
+            if not isinstance(host, str) or not host:
+                raise ValueError("host must be a non-empty string")
+            if not isinstance(upgrade_class, str) or not upgrade_class:
+                raise ValueError("upgrade_class must be a non-empty string")
+            if evidence is None:
+                evidence = {}
+            if not isinstance(evidence, dict):
+                raise ValueError("evidence must be a JSON object")
+
+            now = self.clock()
+            state = {
+                "schema_version": LEDGER_SCHEMA_VERSION,
+                "operation_id": operation_id,
+                "host": host,
+                "phase": "preflight",
+                "started_at": now,
+                "last_progress_at": now,
+                "upgrade_class": upgrade_class,
+                "affected_domains": [],
+                "old_image_ids": {},
+                "candidate_image_ids": {},
+                "old_manifest_hash": None,
+                "candidate_manifest_hash": None,
+                "old_config_hash": None,
+                "candidate_config_hash": None,
+                "pre_accepted_generation": None,
+                "pre_applied_generation": None,
+                "pre_desired_hash": None,
+                "pre_managed_port_ids": [],
+                "maintenance_token": None,
+                "ovs_vswitchd_pid": None,
+                "ovs_agent_container_id": None,
+                "ovs_agent_started_at": None,
+                "br_int_uuid": None,
+                "last_error": None,
+                "recovery_action": None,
+            }
+            self._merge_evidence(state, evidence)
+            self._write_ledger(path, state)
             self._set_current(path, state)
             return self.state
-
-        if not isinstance(host, str) or not host:
-            raise ValueError("host must be a non-empty string")
-        if not isinstance(upgrade_class, str) or not upgrade_class:
-            raise ValueError("upgrade_class must be a non-empty string")
-        if evidence is None:
-            evidence = {}
-        if not isinstance(evidence, dict):
-            raise ValueError("evidence must be a JSON object")
-
-        now = self.clock()
-        state = {
-            "schema_version": LEDGER_SCHEMA_VERSION,
-            "operation_id": operation_id,
-            "host": host,
-            "phase": "preflight",
-            "started_at": now,
-            "last_progress_at": now,
-            "upgrade_class": upgrade_class,
-            "affected_domains": [],
-            "old_image_ids": {},
-            "candidate_image_ids": {},
-            "old_manifest_hash": None,
-            "candidate_manifest_hash": None,
-            "old_config_hash": None,
-            "candidate_config_hash": None,
-            "pre_accepted_generation": None,
-            "pre_applied_generation": None,
-            "pre_desired_hash": None,
-            "pre_managed_port_ids": [],
-            "maintenance_token": None,
-            "ovs_vswitchd_pid": None,
-            "ovs_agent_container_id": None,
-            "ovs_agent_started_at": None,
-            "br_int_uuid": None,
-            "last_error": None,
-            "recovery_action": None,
-        }
-        self._merge_evidence(state, evidence)
-        self._write_ledger(path, state)
-        self._set_current(path, state)
-        return self.state
+        except Exception:
+            if acquired_here:
+                self.close()
+            raise
 
     def transition(self, expected_phase, next_phase, evidence=None):
         """Atomically compare the current phase and persist one legal edge."""
@@ -271,10 +284,18 @@ class UpgradeLedger(object):
     def fail(self, expected_phase, error, evidence=None):
         """Persist a failure without ever reactivating ACL enforcement."""
         self._require_current()
-        if self._state["phase"] != expected_phase:
+        self._state = self._read_ledger(
+            self._path, self._state["operation_id"]
+        )
+        durable_phase = self._state["phase"]
+        if durable_phase != expected_phase:
             raise UpgradeLedgerTransitionError(
                 "phase compare-and-swap failed: expected %s, found %s"
-                % (expected_phase, self._state["phase"])
+                % (expected_phase, durable_phase)
+            )
+        if durable_phase in TERMINAL_PHASES:
+            raise UpgradeLedgerTransitionError(
+                "terminal phase %s is immutable" % durable_phase
             )
         if not isinstance(error, str):
             error = str(error)
@@ -286,7 +307,7 @@ class UpgradeLedger(object):
             merged.setdefault("recovery_action", "operator_action_required")
             return self.transition(expected_phase, "maintenance_bypass", merged)
         merged.setdefault("recovery_action", "resume_exact_phase")
-        return self._update_same_phase(merged, "failed")
+        return self._update_same_phase(merged, "failed", expected_phase)
 
     def commit(self, evidence=None):
         """Commit only the final verified phase."""
@@ -295,39 +316,48 @@ class UpgradeLedger(object):
     def recover(self, operation_id):
         """Reopen stale state without automatically activating old ACL state."""
         operation_id = self._validate_operation_id(operation_id)
-        self._acquire_lock()
-        self._ensure_operations_dir()
-        pending = self._pending_ledgers()
-        conflicts = [
-            item for item in pending if item["operation_id"] != operation_id
-        ]
-        if conflicts:
-            raise UpgradeLedgerConflict(
-                "pending operation %s owns the host" % conflicts[0]["operation_id"]
-            )
-        path = self._ledger_path(operation_id)
-        if not path.exists() and not path.is_symlink():
-            raise UpgradeLedgerError("operation ledger does not exist")
-        state = self._read_ledger(path, operation_id)
-        self._set_current(path, state)
-        phase = state["phase"]
-        if phase in TERMINAL_PHASES:
-            return self.state
-        if phase == "maintenance_bypass":
-            if state.get("recovery_action") == "operator_action_required":
+        acquired_here = self._lock_fd is None
+        try:
+            self._acquire_lock()
+            self._ensure_operations_dir()
+            pending = self._pending_ledgers()
+            conflicts = [
+                item for item in pending if item["operation_id"] != operation_id
+            ]
+            if conflicts:
+                raise UpgradeLedgerConflict(
+                    "pending operation %s owns the host"
+                    % conflicts[0]["operation_id"]
+                )
+            path = self._ledger_path(operation_id)
+            if not path.exists() and not path.is_symlink():
+                raise UpgradeLedgerError("operation ledger does not exist")
+            state = self._read_ledger(path, operation_id)
+            self._set_current(path, state)
+            phase = state["phase"]
+            if phase in TERMINAL_PHASES:
                 return self.state
+            if phase == "maintenance_bypass":
+                if state.get("recovery_action") == "operator_action_required":
+                    return self.state
+                return self._update_same_phase(
+                    {"recovery_action": "operator_action_required"},
+                    "recovered",
+                    phase,
+                )
+            if "maintenance_bypass" in ALLOWED.get(phase, ()):
+                return self.transition(
+                    phase,
+                    "maintenance_bypass",
+                    {"recovery_action": "operator_action_required"},
+                )
             return self._update_same_phase(
-                {"recovery_action": "operator_action_required"}, "recovered"
+                {"recovery_action": "resume_exact_phase"}, "recovered", phase
             )
-        if "maintenance_bypass" in ALLOWED.get(phase, ()):
-            return self.transition(
-                phase,
-                "maintenance_bypass",
-                {"recovery_action": "operator_action_required"},
-            )
-        return self._update_same_phase(
-            {"recovery_action": "resume_exact_phase"}, "recovered"
-        )
+        except Exception:
+            if acquired_here:
+                self.close()
+            raise
 
     def _validate_operation_id(self, operation_id):
         if not isinstance(operation_id, str) or OPERATION_ID_RE.fullmatch(operation_id) is None:
@@ -361,6 +391,8 @@ class UpgradeLedger(object):
             file_stat = os.fstat(fd)
             if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != self.owner_uid:
                 raise UpgradeLedgerTrustError("lock file has untrusted ownership or type")
+            if file_stat.st_nlink != 1:
+                raise UpgradeLedgerTrustError("lock file must have exactly one link")
             if existed and stat.S_IMODE(file_stat.st_mode) != 0o600:
                 raise UpgradeLedgerTrustError("lock file mode must be 0600")
             if not existed:
@@ -542,9 +574,17 @@ class UpgradeLedger(object):
         except UpgradeLedgerError:
             pass
 
-    def _update_same_phase(self, evidence, result):
+    def _update_same_phase(self, evidence, result, expected_phase):
         self._require_current()
+        self._state = self._read_ledger(
+            self._path, self._state["operation_id"]
+        )
         old_phase = self._state["phase"]
+        if old_phase != expected_phase:
+            raise UpgradeLedgerTransitionError(
+                "phase compare-and-swap failed: expected %s, found %s"
+                % (expected_phase, old_phase)
+            )
         next_state = copy.deepcopy(self._state)
         self._merge_evidence(next_state, evidence)
         next_state["last_progress_at"] = self.clock()
@@ -568,7 +608,13 @@ class UpgradeLedger(object):
             }
         if isinstance(value, (list, tuple)):
             return [self._audit_value(item) for item in value[:16]]
-        if value is None or isinstance(value, (bool, int, float)):
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value.bit_length() > 1024:
+                return "<integer-truncated>"
+            return value
+        if isinstance(value, float):
             return value
         return str(value)[:256]
 
@@ -604,6 +650,16 @@ class UpgradeLedger(object):
         if len(line.encode("utf-8")) > MAX_AUDIT_BYTES:
             record["old_image_ids"] = "<truncated>"
             record["candidate_image_ids"] = "<truncated>"
+            line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        if len(line.encode("utf-8")) > MAX_AUDIT_BYTES:
+            record = {
+                key: "<truncated>"
+                for key in (
+                    "operation_id", "host", "old_phase", "new_phase",
+                    "elapsed_ms", "generation", "desired_hash", "old_image_ids",
+                    "candidate_image_ids", "result",
+                )
+            }
             line = json.dumps(record, sort_keys=True, separators=(",", ":"))
         if self.audit_sink is not None:
             try:

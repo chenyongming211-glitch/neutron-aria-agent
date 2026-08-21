@@ -230,12 +230,16 @@ The allowed edge table is a constant. `transition(expected_phase, next_phase, ev
 
 ```python
 ALLOWED = {
-    "preflight": ("bypass_preparing", "failed_before_mutation"),
+    "preflight": ("bypass_preparing", "failed_before_mutation", "quiescing"),
+    "quiescing": ("bypass_preparing",),
     "bypass_preparing": ("bypass_confirmed",),
     "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass", "rollback"),
     "datapath_upgrading": ("datapath_live", "maintenance_bypass", "rollback"),
     "datapath_live": ("agent_upgrading", "maintenance_bypass", "rollback"),
-    "agent_upgrading": ("full_resync", "maintenance_bypass", "rollback"),
+    "agent_upgrading": (
+        "full_resync", "maintenance_bypass", "rollback", "agent_buffering",
+    ),
+    "agent_buffering": ("full_resync",),
     "full_resync": ("shadow_apply", "maintenance_bypass", "rollback"),
     "shadow_apply": ("activating", "maintenance_bypass", "rollback"),
     "activating": ("verifying", "maintenance_bypass", "rollback"),
