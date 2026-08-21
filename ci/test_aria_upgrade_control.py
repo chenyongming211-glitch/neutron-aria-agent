@@ -4,11 +4,14 @@
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -423,6 +426,355 @@ class AriaUpgradeControlTest(unittest.TestCase):
         source = CONTROL_PATH.read_text(encoding="utf-8")
         self.assertNotIn("from __future__ import annotations", source)
         self.assertNotIn("add_subparsers(dest=\"command\", required=True)", source)
+
+
+class UpgradeLedgerTest(unittest.TestCase):
+    def control(self):
+        spec = importlib.util.spec_from_file_location("aria_upgrade_control", CONTROL_PATH)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def new_ledger(self, control, temp, audit=None):
+        return control.UpgradeLedger(
+            operations_dir=temp / "operations",
+            lock_path=temp / "aria-release.lock",
+            owner_uid=os.getuid(),
+            audit_sink=audit,
+        )
+
+    def operation(self, suffix="1"):
+        return str(uuid.UUID(suffix * 32))
+
+    def evidence(self):
+        return {
+            "affected_domains": ["acl"],
+            "old_image_ids": {"aria-datapath": "sha256:" + "1" * 64},
+            "candidate_image_ids": {"aria-datapath": "sha256:" + "2" * 64},
+            "old_manifest_hash": "sha256:" + "3" * 64,
+            "candidate_manifest_hash": "sha256:" + "4" * 64,
+            "old_config_hash": "sha256:" + "5" * 64,
+            "candidate_config_hash": "sha256:" + "6" * 64,
+            "pre_accepted_generation": 10,
+            "pre_applied_generation": 9,
+            "pre_desired_hash": "sha256:" + "7" * 64,
+            "pre_managed_port_ids": ["port-a"],
+            "maintenance_token": "maintenance-secret",
+            "ovs_vswitchd_pid": 101,
+            "ovs_agent_container_id": "ovs-agent-id",
+            "ovs_agent_started_at": "2026-08-21T00:00:00Z",
+            "br_int_uuid": "br-int-uuid",
+        }
+
+    def begin(self, ledger, operation_id=None):
+        return ledger.begin(
+            operation_id or self.operation(),
+            host="compute-1",
+            upgrade_class="planned_maintenance",
+            evidence=self.evidence(),
+        )
+
+    def read_ledger(self, temp, operation_id=None):
+        path = temp / "operations" / ((operation_id or self.operation()) + ".json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_allowed_transition_table_is_the_reviewed_contract(self):
+        control = self.control()
+        self.assertEqual(
+            {
+                "preflight": ("bypass_preparing", "failed_before_mutation"),
+                "bypass_preparing": ("bypass_confirmed",),
+                "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass", "rollback"),
+                "datapath_upgrading": ("datapath_live", "maintenance_bypass", "rollback"),
+                "datapath_live": ("agent_upgrading", "maintenance_bypass", "rollback"),
+                "agent_upgrading": ("full_resync", "maintenance_bypass", "rollback"),
+                "full_resync": ("shadow_apply", "maintenance_bypass", "rollback"),
+                "shadow_apply": ("activating", "maintenance_bypass", "rollback"),
+                "activating": ("verifying", "maintenance_bypass", "rollback"),
+                "verifying": ("committed", "maintenance_bypass", "rollback"),
+                "maintenance_bypass": ("full_resync", "rollback"),
+                "rollback": ("full_resync", "maintenance_bypass"),
+            },
+            control.ALLOWED,
+        )
+
+    def test_begin_persists_complete_root_trusted_mode_0600_ledger(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            state = self.begin(ledger)
+            path = temp / "operations" / (self.operation() + ".json")
+            self.assertEqual(state, self.read_ledger(temp))
+            self.assertEqual("preflight", state["phase"])
+            self.assertEqual(1, state["schema_version"])
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+            for field in (
+                "schema_version", "operation_id", "host", "phase", "started_at",
+                "last_progress_at", "upgrade_class", "affected_domains", "old_image_ids",
+                "candidate_image_ids", "old_manifest_hash", "candidate_manifest_hash",
+                "old_config_hash", "candidate_config_hash", "pre_accepted_generation",
+                "pre_applied_generation", "pre_desired_hash", "pre_managed_port_ids",
+                "maintenance_token", "ovs_vswitchd_pid", "ovs_agent_container_id",
+                "ovs_agent_started_at", "br_int_uuid", "last_error", "recovery_action",
+            ):
+                self.assertIn(field, state)
+            ledger.close()
+
+    def test_duplicate_operation_is_idempotent_and_conflicting_operation_is_rejected(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            first = self.new_ledger(control, temp)
+            original = self.begin(first)
+            duplicate = self.begin(first)
+            self.assertEqual(original, duplicate)
+            first.close()
+
+            replay = self.new_ledger(control, temp)
+            self.assertEqual(original, self.begin(replay))
+            replay.close()
+
+            conflict = self.new_ledger(control, temp)
+            with self.assertRaises(control.UpgradeLedgerConflict):
+                self.begin(conflict, self.operation("2"))
+            conflict.close()
+            self.assertFalse(
+                (temp / "operations" / (self.operation("2") + ".json")).exists()
+            )
+
+    def test_host_lock_is_exclusive_and_nonblocking(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            owner = self.new_ledger(control, temp)
+            self.begin(owner)
+            contender = self.new_ledger(control, temp)
+            with self.assertRaises(control.UpgradeLedgerLocked):
+                self.begin(contender, self.operation("2"))
+            contender.close()
+            owner.close()
+
+    def test_transition_is_compare_and_swap_and_rejects_skips_and_backwards_edges(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            with self.assertRaises(control.UpgradeLedgerTransitionError):
+                ledger.transition("bypass_preparing", "bypass_confirmed", {})
+            with self.assertRaises(control.UpgradeLedgerTransitionError):
+                ledger.transition("preflight", "bypass_confirmed", {})
+            state = ledger.transition("preflight", "bypass_preparing", {"generation": 11})
+            self.assertEqual("bypass_preparing", state["phase"])
+            with self.assertRaises(control.UpgradeLedgerTransitionError):
+                ledger.transition("bypass_preparing", "preflight", {})
+            self.assertEqual("bypass_preparing", self.read_ledger(temp)["phase"])
+            ledger.close()
+
+    def test_transition_compare_and_swap_checks_the_durable_phase(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            path = temp / "operations" / (self.operation() + ".json")
+            changed = self.read_ledger(temp)
+            changed["phase"] = "bypass_preparing"
+            path.write_text(
+                json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            with self.assertRaises(control.UpgradeLedgerTransitionError):
+                ledger.transition("preflight", "bypass_preparing", {})
+            self.assertEqual("bypass_preparing", self.read_ledger(temp)["phase"])
+            ledger.close()
+
+    def test_fail_commit_and_rollback_apis_use_legal_edges(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            early = self.new_ledger(control, temp)
+            self.begin(early)
+            failed = early.fail("preflight", "preflight rejected")
+            self.assertEqual("failed_before_mutation", failed["phase"])
+            self.assertEqual("preflight rejected", failed["last_error"])
+            early.close()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            for old, new in (
+                ("preflight", "bypass_preparing"),
+                ("bypass_preparing", "bypass_confirmed"),
+                ("bypass_confirmed", "datapath_upgrading"),
+            ):
+                ledger.transition(old, new, {})
+            failed = ledger.fail("datapath_upgrading", "candidate failed")
+            self.assertEqual("maintenance_bypass", failed["phase"])
+            rolled_back = ledger.transition("maintenance_bypass", "rollback", {})
+            self.assertEqual("rollback", rolled_back["phase"])
+            ledger.close()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            for old, new in (
+                ("preflight", "bypass_preparing"),
+                ("bypass_preparing", "bypass_confirmed"),
+                ("bypass_confirmed", "datapath_upgrading"),
+                ("datapath_upgrading", "datapath_live"),
+                ("datapath_live", "agent_upgrading"),
+                ("agent_upgrading", "full_resync"),
+                ("full_resync", "shadow_apply"),
+                ("shadow_apply", "activating"),
+                ("activating", "verifying"),
+            ):
+                ledger.transition(old, new, {})
+            self.assertEqual("committed", ledger.commit({"generation": 12})["phase"])
+            ledger.close()
+
+    def test_recover_never_activates_stale_state_and_keeps_unsafe_state_in_bypass(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            first = self.new_ledger(control, temp)
+            self.begin(first)
+            first.transition("preflight", "bypass_preparing", {})
+            first.transition("bypass_preparing", "bypass_confirmed", {})
+            first.close()
+
+            recovered = self.new_ledger(control, temp)
+            state = recovered.recover(self.operation())
+            self.assertEqual("maintenance_bypass", state["phase"])
+            self.assertEqual("operator_action_required", state["recovery_action"])
+            self.assertNotEqual("committed", state["phase"])
+            recovered.close()
+
+    def test_failure_before_rename_preserves_previous_parseable_ledger(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            previous = self.read_ledger(temp)
+            with mock.patch.object(control.os, "rename", side_effect=OSError("crash")):
+                with self.assertRaisesRegex(OSError, "crash"):
+                    ledger.transition("preflight", "bypass_preparing", {})
+            self.assertEqual(previous, self.read_ledger(temp))
+            self.assertEqual([], list((temp / "operations").glob(".*.tmp")))
+            ledger.close()
+
+    def test_directory_fsync_failure_leaves_a_complete_parseable_ledger(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            real_fsync = control.os.fsync
+
+            def fail_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("directory fsync crash")
+                return real_fsync(fd)
+
+            with mock.patch.object(control.os, "fsync", side_effect=fail_directory_fsync):
+                with self.assertRaisesRegex(OSError, "directory fsync crash"):
+                    ledger.transition("preflight", "bypass_preparing", {})
+            state = self.read_ledger(temp)
+            self.assertIn(state["phase"], ("preflight", "bypass_preparing"))
+            self.assertEqual(self.operation(), state["operation_id"])
+            ledger.close()
+
+    def test_existing_symlink_wrong_owner_and_wrong_mode_are_rejected(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            operations = temp / "operations"
+            operations.mkdir()
+            target = temp / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            (operations / (self.operation() + ".json")).symlink_to(target)
+            ledger = self.new_ledger(control, temp)
+            with self.assertRaises(control.UpgradeLedgerTrustError):
+                self.begin(ledger)
+            ledger.close()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            ledger.close()
+            path = temp / "operations" / (self.operation() + ".json")
+            path.chmod(0o644)
+            reopened = self.new_ledger(control, temp)
+            with self.assertRaises(control.UpgradeLedgerTrustError):
+                reopened.recover(self.operation())
+            reopened.close()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            ledger.close()
+            path = temp / "operations" / (self.operation() + ".json")
+            real_lstat = control.os.lstat
+
+            def ledger_with_untrusted_owner(candidate):
+                result = real_lstat(candidate)
+                if Path(candidate) == path:
+                    values = list(result)
+                    values[4] = os.getuid() + 1
+                    return os.stat_result(values)
+                return result
+
+            reopened = self.new_ledger(control, temp)
+            with mock.patch.object(
+                control.os, "lstat", side_effect=ledger_with_untrusted_owner
+            ):
+                with self.assertRaises(control.UpgradeLedgerTrustError):
+                    reopened.recover(self.operation())
+            reopened.close()
+
+    def test_audit_records_are_bounded_and_exclude_secrets_and_snapshot_bodies(self):
+        control = self.control()
+        records = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            ledger = self.new_ledger(control, temp, records.append)
+            self.begin(ledger)
+            ledger.transition(
+                "preflight",
+                "bypass_preparing",
+                {
+                    "generation": 11,
+                    "desired_hash": "sha256:" + "8" * 10000,
+                    "environment": {"OS_TOKEN": "do-not-log"},
+                    "auth_token": "do-not-log",
+                    "snapshot_body": "x" * 10000,
+                },
+            )
+            ledger.close()
+        record = json.loads(records[-1])
+        self.assertEqual(
+            {
+                "operation_id", "host", "old_phase", "new_phase", "elapsed_ms",
+                "generation", "desired_hash", "old_image_ids", "candidate_image_ids",
+                "result",
+            },
+            set(record),
+        )
+        self.assertEqual("preflight", record["old_phase"])
+        self.assertEqual("bypass_preparing", record["new_phase"])
+        self.assertEqual(11, record["generation"])
+        self.assertLessEqual(len(records[-1]), control.MAX_AUDIT_BYTES)
+        self.assertNotIn("do-not-log", records[-1])
+        self.assertNotIn("snapshot", records[-1])
 
 
 if __name__ == "__main__":
