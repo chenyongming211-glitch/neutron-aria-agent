@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "uds_schema_min": 1,
+  "uds_schema_max": 1,
+  "snapshot_schema_version": 1,
+  "ebpf_abi_version": 1,
+  "map_schema_version": 1,
+  "wal_schema_version": 1,
+  "runtime_state_schema_version": 1,
+  "minimum_kernel_profile": "rhel8-4.18",
+  "managed_domain_contract_version": "2026-06-v0.9",
+  "maintenance_gate_capable": false
+}

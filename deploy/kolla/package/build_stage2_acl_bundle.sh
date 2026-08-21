@@ -37,6 +37,7 @@ for path in \
     "${REPO_ROOT}/CHANGELOG.md" \
     "${REPO_ROOT}/Cargo.toml" \
     "${REPO_ROOT}/release/support-matrix.json" \
+    "${REPO_ROOT}/release/runtime-compatibility.json" \
     "${REPO_ROOT}/ci/create_release_manifest.py" \
     "${REPO_ROOT}/docs/neutron-uds-contract.json" \
     "${REPO_ROOT}/deploy/kolla/package" \
@@ -66,6 +67,7 @@ mkdir -p "${OUT_DIR}" "${STAGING_DIR}"
     git archive --format=tar "${SOURCE_TREEISH}" -- \
         Cargo.toml VERSION LICENSE CHANGELOG.md \
         release/support-matrix.json \
+        release/runtime-compatibility.json \
         ci/create_release_manifest.py \
         docs/neutron-uds-contract.json \
         openstack/neutron_aria \
@@ -82,7 +84,9 @@ for path in \
     "${STAGING_DIR}/LICENSE" \
     "${STAGING_DIR}/CHANGELOG.md" \
     "${STAGING_DIR}/release/support-matrix.json" \
+    "${STAGING_DIR}/release/runtime-compatibility.json" \
     "${STAGING_DIR}/ci/create_release_manifest.py" \
+    "${STAGING_DIR}/deploy/kolla/package/aria_upgrade_control.py" \
     "${STAGING_DIR}/deploy/kolla/package/install_aria_datapath_rc_image.sh"
 do
     require_path "${path}"

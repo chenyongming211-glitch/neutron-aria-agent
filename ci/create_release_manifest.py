@@ -17,6 +17,19 @@ ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 IMAGE_IDENTITY_RE = re.compile(
     r"^[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}$"
 )
+RUNTIME_COMPATIBILITY_FIELDS = {
+    "schema_version": int,
+    "uds_schema_min": int,
+    "uds_schema_max": int,
+    "snapshot_schema_version": int,
+    "ebpf_abi_version": int,
+    "map_schema_version": int,
+    "wal_schema_version": int,
+    "runtime_state_schema_version": int,
+    "minimum_kernel_profile": str,
+    "managed_domain_contract_version": str,
+    "maintenance_gate_capable": bool,
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -25,6 +38,44 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_length_delimited_files(paths: tuple[Path, ...]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, byteorder="big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def load_runtime_compatibility(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"runtime compatibility JSON is invalid: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("runtime compatibility must be a JSON object")
+
+    expected = set(RUNTIME_COMPATIBILITY_FIELDS)
+    actual = set(payload)
+    missing = sorted(expected - actual)
+    unknown = sorted(actual - expected)
+    if missing:
+        raise ValueError("runtime compatibility is missing fields: " + ", ".join(missing))
+    if unknown:
+        raise ValueError("runtime compatibility has unknown fields: " + ", ".join(unknown))
+
+    for key, expected_type in RUNTIME_COMPATIBILITY_FIELDS.items():
+        value = payload[key]
+        if expected_type is int:
+            if type(value) is not int or value < 0:
+                raise ValueError(f"runtime compatibility {key} must be a non-negative integer")
+        elif type(value) is not expected_type:
+            raise ValueError(f"runtime compatibility {key} has an invalid type")
+        elif expected_type is str and not value:
+            raise ValueError(f"runtime compatibility {key} must not be empty")
+    return payload
 
 
 def parse_named(values: list[str], label: str) -> list[tuple[str, str]]:
@@ -83,10 +134,25 @@ def build_manifest(
 
     version_path = repo_root / "VERSION"
     support_path = repo_root / "release/support-matrix.json"
+    compatibility_path = repo_root / "release/runtime-compatibility.json"
     uds_contract_path = repo_root / "docs/neutron-uds-contract.json"
-    for path in (version_path, support_path, uds_contract_path):
+    abi_path = repo_root / "abi/src/lib.rs"
+    map_schema_path = repo_root / "ebpf/src/maps.rs"
+    for path in (
+        version_path,
+        support_path,
+        compatibility_path,
+        uds_contract_path,
+        abi_path,
+        map_schema_path,
+    ):
         if not path.is_file():
             raise ValueError(f"required release input is missing: {path}")
+    runtime_compatibility = load_runtime_compatibility(compatibility_path)
+    runtime_compatibility["ebpf_abi_hash"] = sha256_file(abi_path)
+    runtime_compatibility["map_schema_hash"] = sha256_length_delimited_files(
+        (abi_path, map_schema_path)
+    )
 
     artifact_records: list[dict[str, object]] = []
     checksum_lines: list[str] = []
@@ -113,11 +179,14 @@ def build_manifest(
         "component_versions": component_versions(repo_root),
         "contracts": {
             "neutron_uds_sha256": sha256_file(uds_contract_path),
+            "runtime_compatibility_sha256": sha256_file(compatibility_path),
             "support_matrix_sha256": sha256_file(support_path),
         },
         "images": image_records,
         "product": "aria-firewall-neutron",
         "product_version": version_path.read_text(encoding="utf-8").strip(),
+        "release_version": "v" + version_path.read_text(encoding="utf-8").strip(),
+        "runtime_compatibility": runtime_compatibility,
         "schema_version": 1,
         "source_commit": source_commit,
     }

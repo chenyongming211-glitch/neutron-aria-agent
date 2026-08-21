@@ -2,7 +2,9 @@
 """Contracts for the minimal v0.9 RC delivery surface."""
 
 import hashlib
+import importlib.util
 import json
+import struct
 import subprocess
 import sys
 import tempfile
@@ -12,6 +14,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_VERSION = "0.9.0-rc.1"
+COMPATIBILITY_FIELDS = {
+    "schema_version": 1,
+    "uds_schema_min": 1,
+    "uds_schema_max": 1,
+    "snapshot_schema_version": 1,
+    "ebpf_abi_version": 1,
+    "map_schema_version": 1,
+    "wal_schema_version": 1,
+    "runtime_state_schema_version": 1,
+    "minimum_kernel_profile": "rhel8-4.18",
+    "managed_domain_contract_version": "2026-06-v0.9",
+    "maintenance_gate_capable": False,
+}
+
+
+def load_manifest_generator():
+    path = ROOT / "ci" / "create_release_manifest.py"
+    spec = importlib.util.spec_from_file_location("create_release_manifest", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class ReleaseGovernanceTest(unittest.TestCase):
@@ -93,6 +117,85 @@ class ReleaseGovernanceTest(unittest.TestCase):
                 "%s  aria-agent\n" % hashlib.sha256(b"candidate").hexdigest(),
                 checksums.read_text(encoding="utf-8"),
             )
+
+    def test_manifest_generator_embeds_validated_runtime_compatibility(self):
+        generator = ROOT / "ci" / "create_release_manifest.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            artifact = temp / "aria-agent"
+            artifact.write_bytes(b"candidate")
+            output = temp / "release-manifest.json"
+            checksums = temp / "SHA256SUMS"
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    str(generator),
+                    "--repo-root",
+                    str(ROOT),
+                    "--source-commit",
+                    "7" * 40,
+                    "--artifact",
+                    "aria-agent=" + str(artifact),
+                    "--output",
+                    str(output),
+                    "--checksums-output",
+                    str(checksums),
+                ]
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            compatibility_path = ROOT / "release" / "runtime-compatibility.json"
+            abi_path = ROOT / "abi" / "src" / "lib.rs"
+            maps_path = ROOT / "ebpf" / "src" / "maps.rs"
+            abi_bytes = abi_path.read_bytes()
+            maps_bytes = maps_path.read_bytes()
+            map_hasher = hashlib.sha256()
+            for content in (abi_bytes, maps_bytes):
+                map_hasher.update(struct.pack(">Q", len(content)))
+                map_hasher.update(content)
+
+            self.assertEqual(COMPATIBILITY_FIELDS, json.loads(
+                compatibility_path.read_text(encoding="utf-8")
+            ))
+            self.assertEqual(COMPATIBILITY_FIELDS, {
+                key: payload["runtime_compatibility"][key]
+                for key in COMPATIBILITY_FIELDS
+            })
+            self.assertEqual("v" + PRODUCT_VERSION, payload["release_version"])
+            self.assertEqual(
+                hashlib.sha256(abi_bytes).hexdigest(),
+                payload["runtime_compatibility"]["ebpf_abi_hash"],
+            )
+            self.assertEqual(
+                map_hasher.hexdigest(),
+                payload["runtime_compatibility"]["map_schema_hash"],
+            )
+            self.assertEqual(
+                hashlib.sha256(compatibility_path.read_bytes()).hexdigest(),
+                payload["contracts"]["runtime_compatibility_sha256"],
+            )
+
+    def test_runtime_compatibility_rejects_invalid_required_fields(self):
+        generator = load_manifest_generator()
+        invalid_payloads = []
+        missing = dict(COMPATIBILITY_FIELDS)
+        del missing["wal_schema_version"]
+        invalid_payloads.append(missing)
+        boolean_integer = dict(COMPATIBILITY_FIELDS)
+        boolean_integer["schema_version"] = True
+        invalid_payloads.append(boolean_integer)
+        negative = dict(COMPATIBILITY_FIELDS)
+        negative["map_schema_version"] = -1
+        invalid_payloads.append(negative)
+        unknown = dict(COMPATIBILITY_FIELDS)
+        unknown["unrecognized_schema"] = 1
+        invalid_payloads.append(unknown)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime-compatibility.json"
+            for payload in invalid_payloads:
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    generator.load_runtime_compatibility(path)
 
     def test_manifest_generator_rejects_invalid_source_commit(self):
         generator = ROOT / "ci" / "create_release_manifest.py"
@@ -245,7 +348,9 @@ class ReleaseGovernanceTest(unittest.TestCase):
         for term in (
             "VERSION",
             "release/support-matrix.json",
+            "release/runtime-compatibility.json",
             "create_release_manifest.py",
+            "aria_upgrade_control.py",
             "SHA256SUMS",
             "release-manifest.json",
             "install_aria_datapath_rc_image.sh",
