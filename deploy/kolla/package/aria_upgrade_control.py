@@ -72,6 +72,10 @@ def _valid_compatibility(manifest: object) -> dict | None:
         for key in ("ebpf_abi_hash", "map_schema_hash")
     ):
         return None
+    if compatibility["schema_version"] != 1:
+        return None
+    if compatibility["uds_schema_min"] > compatibility["uds_schema_max"]:
+        return None
     return compatibility
 
 

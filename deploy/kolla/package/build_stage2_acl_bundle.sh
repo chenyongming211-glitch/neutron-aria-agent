@@ -36,6 +36,8 @@ for path in \
     "${REPO_ROOT}/LICENSE" \
     "${REPO_ROOT}/CHANGELOG.md" \
     "${REPO_ROOT}/Cargo.toml" \
+    "${REPO_ROOT}/abi/src/lib.rs" \
+    "${REPO_ROOT}/ebpf/src/maps.rs" \
     "${REPO_ROOT}/release/support-matrix.json" \
     "${REPO_ROOT}/release/runtime-compatibility.json" \
     "${REPO_ROOT}/ci/create_release_manifest.py" \
@@ -66,6 +68,8 @@ mkdir -p "${OUT_DIR}" "${STAGING_DIR}"
     cd "${REPO_ROOT}"
     git archive --format=tar "${SOURCE_TREEISH}" -- \
         Cargo.toml VERSION LICENSE CHANGELOG.md \
+        abi/src/lib.rs \
+        ebpf/src/maps.rs \
         release/support-matrix.json \
         release/runtime-compatibility.json \
         ci/create_release_manifest.py \
@@ -83,6 +87,8 @@ for path in \
     "${STAGING_DIR}/VERSION" \
     "${STAGING_DIR}/LICENSE" \
     "${STAGING_DIR}/CHANGELOG.md" \
+    "${STAGING_DIR}/abi/src/lib.rs" \
+    "${STAGING_DIR}/ebpf/src/maps.rs" \
     "${STAGING_DIR}/release/support-matrix.json" \
     "${STAGING_DIR}/release/runtime-compatibility.json" \
     "${STAGING_DIR}/ci/create_release_manifest.py" \

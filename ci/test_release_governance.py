@@ -4,6 +4,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -196,6 +197,74 @@ class ReleaseGovernanceTest(unittest.TestCase):
                 path.write_text(json.dumps(payload), encoding="utf-8")
                 with self.assertRaises(ValueError):
                     generator.load_runtime_compatibility(path)
+
+    def test_stage2_bundle_stages_all_manifest_hash_sources(self):
+        builder = ROOT / "deploy/kolla/package/build_stage2_acl_bundle.sh"
+        runtime_bin = Path(sys.executable).parent
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            wheel = temp / "netaddr.whl"
+            wheel.write_bytes(b"offline test wheel")
+            shims = temp / "shims"
+            shims.mkdir()
+            date_shim = shims / "date"
+            date_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import datetime\n"
+                "import sys\n"
+                "if sys.argv[1:3] != ['-u', '-d'] or not sys.argv[3].startswith('@'):\n"
+                "    raise SystemExit(2)\n"
+                "timestamp = int(sys.argv[3][1:])\n"
+                "print(datetime.datetime.fromtimestamp(\n"
+                "    timestamp, datetime.timezone.utc\n"
+                ").strftime(sys.argv[4]))\n",
+                encoding="utf-8",
+            )
+            date_shim.chmod(0o755)
+            touch_shim = shims / "touch"
+            touch_shim.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [ \"$1\" = \"-h\" ] && [ \"$2\" = \"-d\" ]; then\n"
+                "  shift 3\n"
+                "fi\n"
+                "exec /usr/bin/touch \"$@\"\n",
+                encoding="utf-8",
+            )
+            touch_shim.chmod(0o755)
+            tar_shim = shims / "tar"
+            tar_shim.write_text(
+                "#!/usr/bin/env bash\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"${argument}\" = \"--sort=name\" ]; then\n"
+                "    exec /usr/bin/tar -cf - .\n"
+                "  fi\n"
+                "done\n"
+                "exec /usr/bin/tar \"$@\"\n",
+                encoding="utf-8",
+            )
+            tar_shim.chmod(0o755)
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "OUT_DIR": str(temp / "out"),
+                    "NETADDR_WHEEL_PATH": str(wheel),
+                    "NETADDR_WHEEL_SHA256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                    "PATH": os.pathsep.join((str(shims), str(runtime_bin), environment["PATH"])),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(builder)],
+                cwd=str(ROOT),
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            manifest = temp / "out" / "stage2-acl-bundle" / "release-manifest.json"
+            self.assertTrue(manifest.is_file())
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertIn("ebpf_abi_hash", payload["runtime_compatibility"])
+            self.assertIn("map_schema_hash", payload["runtime_compatibility"])
 
     def test_manifest_generator_rejects_invalid_source_commit(self):
         generator = ROOT / "ci" / "create_release_manifest.py"

@@ -78,6 +78,23 @@ class AriaUpgradeControlTest(unittest.TestCase):
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("unknown_compatibility",), result.reasons)
 
+    def test_unsupported_runtime_schema_requires_planned_maintenance(self):
+        control = self.control()
+        candidate = manifest()
+        candidate["runtime_compatibility"]["schema_version"] = 2
+        result = control.classify_upgrade(manifest(), candidate)
+        self.assertEqual("planned_maintenance", result.path)
+        self.assertEqual(("unknown_compatibility",), result.reasons)
+
+    def test_invalid_uds_range_requires_planned_maintenance(self):
+        control = self.control()
+        candidate = manifest()
+        candidate["runtime_compatibility"]["uds_schema_min"] = 2
+        candidate["runtime_compatibility"]["uds_schema_max"] = 1
+        result = control.classify_upgrade(manifest(), candidate)
+        self.assertEqual("planned_maintenance", result.path)
+        self.assertEqual(("unknown_compatibility",), result.reasons)
+
     def test_force_maintenance_overrides_compatible_manifests(self):
         control = self.control()
         result = control.classify_upgrade(manifest(), manifest(), force_maintenance=True)
