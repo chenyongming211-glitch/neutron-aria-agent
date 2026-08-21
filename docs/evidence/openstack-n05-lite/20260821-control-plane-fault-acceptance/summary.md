@@ -63,5 +63,6 @@ RabbitMQ duplicate, reverse-order, and lost-event behavior converged through
 the designed event merge or polling fallback. UDS malformed, oversized,
 disconnect, peer-credential, and timeout paths preserved forwarding and
 recovered. `REVIEW-OPS-043` removes the only reproduced unbounded Neutron HTTP
-wait and is field-verified. Final source closure still requires the sanitized
-exact-head hosted gate; no hosted result is inferred from field evidence.
+wait and is field-verified. Exact evidence-head Build
+[32455870722](https://github.com/chenyongming211-glitch/neutron-aria-agent/actions/runs/32455870722)
+passed the full hosted gate, including the legacy Python clean-container lane.
