@@ -526,6 +526,7 @@ def build_neutron_status_reporter(
         "incremental_rpc_enabled": bool(config.incremental_rpc_enabled),
         "revisionless_incremental_mode": config.revisionless_incremental_mode,
         "event_merge_interval": config.event_merge_interval,
+        "neutron_api_timeout": config.neutron_api_timeout,
     }
     heartbeat_reporter = NeutronStatusReporter(
         report_state_api=report_state_api,
@@ -540,7 +541,9 @@ def build_neutron_status_reporter(
     if aria_acl_api is None:
         try:
             from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
-            aria_acl_api = build_aria_acl_client_from_env()
+            aria_acl_api = build_aria_acl_client_from_env(
+                timeout=config.neutron_api_timeout
+            )
         except Exception as exc:
             raise StatusReportError("aria_acl port-status API unavailable: %s" % exc)
 

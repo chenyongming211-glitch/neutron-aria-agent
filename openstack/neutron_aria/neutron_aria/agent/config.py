@@ -14,6 +14,7 @@ DEFAULT_HEARTBEAT_DETAIL_MODE = "summary_only"
 DEFAULT_COUNTERS_REPORT_ENABLED = False
 DEFAULT_IPV6_ACL_ENABLED = False
 DEFAULT_PORT_SOURCE = "disabled"
+DEFAULT_NEUTRON_API_TIMEOUT = 10.0
 DEFAULT_EVENT_MERGE_INTERVAL = 0.2
 DEFAULT_EVENT_MAX_MERGE_DELAY = 5.0
 DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
@@ -72,6 +73,7 @@ class AgentConfig(object):
         ipv6_acl_enabled=DEFAULT_IPV6_ACL_ENABLED,
         full_resync_enabled=False,
         port_source=DEFAULT_PORT_SOURCE,
+        neutron_api_timeout=DEFAULT_NEUTRON_API_TIMEOUT,
         port_page_size=None,
         acl_page_size=None,
         resync_backoff_initial=5,
@@ -103,6 +105,7 @@ class AgentConfig(object):
         self.ipv6_acl_enabled = bool(ipv6_acl_enabled)
         self.full_resync_enabled = bool(full_resync_enabled)
         self.port_source = port_source or DEFAULT_PORT_SOURCE
+        self.neutron_api_timeout = float(neutron_api_timeout)
         self.port_page_size = _optional_positive_int(
             port_page_size, "neutron.port_page_size"
         )
@@ -252,6 +255,8 @@ def validate_config(config):
             "aria.request_timeout must not exceed stage-one UDS timeout %.1fs"
             % DEFAULT_REQUEST_TIMEOUT
         )
+    if config.neutron_api_timeout <= 0:
+        raise ConfigError("neutron.api_timeout must be positive")
 
 
 def sync_mode(config):
@@ -340,6 +345,12 @@ def load_config(path):
             option="full_resync_enabled",
         ),
         port_source=_get(parser, "neutron", "port_source", DEFAULT_PORT_SOURCE),
+        neutron_api_timeout=_get(
+            parser,
+            "neutron",
+            "api_timeout",
+            str(DEFAULT_NEUTRON_API_TIMEOUT),
+        ),
         port_page_size=_get(parser, "neutron", "port_page_size"),
         acl_page_size=_get(parser, "neutron", "acl_page_size"),
         resync_backoff_initial=_get(parser, "agent", "resync_backoff_initial", "5"),

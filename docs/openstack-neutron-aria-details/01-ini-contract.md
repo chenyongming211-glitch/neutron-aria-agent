@@ -30,6 +30,7 @@ socket_path = /run/aria/aria-agent.sock
 request_timeout = 3.0
 
 [neutron]
+api_timeout = 10.0
 port_source = disabled
 rpc_events_enabled = false
 incremental_rpc_enabled = false
@@ -114,6 +115,7 @@ function-by-function design until the config PR is opened.
 | `[aria]` | `socket_path` | Local UDS path for `aria-datapath`. |
 | `[aria]` | `request_timeout` | Client timeout; timeout recovery is defined in `07-transaction-wal.md`. |
 | `[neutron]` | `port_source` | `disabled` by default; production target `neutronclient` after N0.5 gates. |
+| `[neutron]` | `api_timeout` | Positive per-request timeout for legacy Neutron HTTP calls; default `10.0s`. It is independent of the Aria UDS timeout. |
 | `[neutron]` | `rpc_events_enabled` | Event path gate; safe default `false`. |
 | `[neutron]` | `incremental_rpc_enabled` | P3 port-scoped apply gate; safe default `false`. When set to `true`, config validation requires RPC events, full resync, and `port_source=neutronclient`. |
 | `[neutron]` | `revisionless_incremental_mode` | Safe default `disabled`. `experimental` is allowed only on controlled test hosts when old Neutron has no trustworthy `revision_number`; production P3 still requires revision-aware events or reads. |

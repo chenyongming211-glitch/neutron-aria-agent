@@ -75,6 +75,7 @@ timeout_convergence_interval = 0.4
 
 [neutron]
 port_source = neutronclient
+api_timeout = 7.5
 port_page_size = 50
 acl_page_size = 25
 rpc_events_enabled = true
@@ -103,6 +104,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual(77, config.resync_backoff_max)
             self.assertEqual("/tmp/neutron-aria-state", config.state_dir)
             self.assertEqual("neutronclient", config.port_source)
+            self.assertEqual(7.5, config.neutron_api_timeout)
             self.assertEqual(50, config.port_page_size)
             self.assertEqual(25, config.acl_page_size)
             self.assertTrue(config.rpc_events_enabled)
@@ -570,6 +572,16 @@ request_timeout = 0
         path = self._write_config("""
 [aria]
 request_timeout = 5
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_non_positive_neutron_api_timeout(self):
+        path = self._write_config("""
+[neutron]
+api_timeout = 0
 """)
         try:
             self.assertRaises(ConfigError, load_config, path)

@@ -247,7 +247,7 @@ class UnavailablePortSource(object):
         raise PortSourceUnavailable(self.reason)
 
 
-def neutron_client_kwargs_from_env(env=None):
+def neutron_client_kwargs_from_env(env=None, timeout=None):
     env = env or os.environ
     auth_url = env.get("OS_AUTH_URL")
     username = env.get("OS_USERNAME")
@@ -274,6 +274,8 @@ def neutron_client_kwargs_from_env(env=None):
         "password": password,
         "tenant_name": tenant_name,
     }
+    if timeout is not None:
+        kwargs["timeout"] = float(timeout)
     optional_env = {
         "OS_REGION_NAME": "region_name",
         "OS_CACERT": "ca_cert",
@@ -302,17 +304,19 @@ def normalize_endpoint_type(endpoint_type):
     return legacy.get(endpoint_type, endpoint_type)
 
 
-def build_neutronclient_from_env(env=None):
+def build_neutronclient_from_env(env=None, timeout=None):
     try:
         from neutronclient.v2_0 import client as neutron_client
     except Exception as exc:
         raise NeutronClientFactoryError("python-neutronclient unavailable: %s" % exc)
-    return neutron_client.Client(**neutron_client_kwargs_from_env(env=env))
+    return neutron_client.Client(
+        **neutron_client_kwargs_from_env(env=env, timeout=timeout)
+    )
 
 
-def build_aria_acl_client_from_env(env=None, page_size=None):
+def build_aria_acl_client_from_env(env=None, page_size=None, timeout=None):
     return AriaAclRestClient(
-        build_neutronclient_from_env(env=env),
+        build_neutronclient_from_env(env=env, timeout=timeout),
         page_size=page_size,
     )
 
@@ -325,7 +329,10 @@ def build_port_source(config, host, env=None):
         )
     if source == "neutronclient":
         return NeutronPortSource(
-            build_neutronclient_from_env(env=env),
+            build_neutronclient_from_env(
+                env=env,
+                timeout=config.neutron_api_timeout,
+            ),
             host,
             page_size=config.port_page_size,
         )

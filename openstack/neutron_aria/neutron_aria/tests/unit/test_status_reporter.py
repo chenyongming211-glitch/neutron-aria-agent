@@ -900,6 +900,29 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual(1, len(report_state.calls))
         self.assertEqual(1, len(aria_acl_api.statuses))
 
+    def test_build_reporter_passes_neutron_api_timeout_to_acl_client(self):
+        from neutron_aria.agent import neutron_client as neutron_client_module
+
+        calls = []
+        original_factory = neutron_client_module.build_aria_acl_client_from_env
+
+        def fake_factory(env=None, page_size=None, timeout=None):
+            calls.append(timeout)
+            return FakeAriaAclApi()
+
+        neutron_client_module.build_aria_acl_client_from_env = fake_factory
+        try:
+            build_neutron_status_reporter(
+                "compute-1",
+                AgentConfig(acl_source="neutron", neutron_api_timeout=7.5),
+                report_state_api=FakeReportStateApi(),
+                context="ctx",
+            )
+        finally:
+            neutron_client_module.build_aria_acl_client_from_env = original_factory
+
+        self.assertEqual([7.5], calls)
+
 
 class StatusContractStatusReporterRedTestCase(unittest.TestCase):
     def test_classified_degraded_heartbeat_preserves_feature_ready_domain_history(self):

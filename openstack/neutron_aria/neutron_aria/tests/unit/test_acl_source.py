@@ -19,7 +19,7 @@ from neutron_aria.db.aria_acl.query import encode_port_status_id
 
 
 class AclSourceTestCase(unittest.TestCase):
-    def test_neutron_acl_factory_receives_acl_page_size_only(self):
+    def test_neutron_factories_receive_page_sizes_and_api_timeout(self):
         from neutron_aria.agent import neutron_client as neutron_client_module
 
         calls = []
@@ -32,12 +32,12 @@ class AclSourceTestCase(unittest.TestCase):
         class FakeNeutronClient(object):
             pass
 
-        def fake_acl_factory(env=None, page_size=None):
-            calls.append(("acl", page_size))
+        def fake_acl_factory(env=None, page_size=None, timeout=None):
+            calls.append(("acl", page_size, timeout))
             return FakeAclClient()
 
-        def fake_neutron_factory(env=None):
-            calls.append(("port", None))
+        def fake_neutron_factory(env=None, timeout=None):
+            calls.append(("port", None, timeout))
             return FakeNeutronClient()
 
         neutron_client_module.build_aria_acl_client_from_env = fake_acl_factory
@@ -48,6 +48,7 @@ class AclSourceTestCase(unittest.TestCase):
                 acl_page_size=25,
                 port_source="neutronclient",
                 port_page_size=50,
+                neutron_api_timeout=7.5,
             )
             acl_source = build_acl_source(config)
             port_source = build_port_source(config, "compute-1")
@@ -57,6 +58,8 @@ class AclSourceTestCase(unittest.TestCase):
 
         self.assertIsInstance(acl_source.neutron_client, FakeAclClient)
         self.assertEqual(25, calls[0][1])
+        self.assertEqual(7.5, calls[0][2])
+        self.assertEqual(7.5, calls[1][2])
         self.assertEqual(50, port_source.page_size)
 
     def test_disabled_source_returns_no_index(self):

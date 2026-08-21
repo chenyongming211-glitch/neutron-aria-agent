@@ -139,7 +139,7 @@ class NeutronClientTestCase(unittest.TestCase):
             "OS_REGION_NAME": "RegionOne",
             "OS_INTERFACE": "internal",
             "OS_INSECURE": "true",
-        })
+        }, timeout=7.5)
 
         self.assertEqual("http://keystone:5000/v2.0", kwargs["auth_url"])
         self.assertEqual("admin", kwargs["username"])
@@ -148,6 +148,7 @@ class NeutronClientTestCase(unittest.TestCase):
         self.assertEqual("RegionOne", kwargs["region_name"])
         self.assertEqual("internalURL", kwargs["endpoint_type"])
         self.assertTrue(kwargs["insecure"])
+        self.assertEqual(7.5, kwargs["timeout"])
 
     def test_endpoint_type_normalizes_modern_interface_names(self):
         self.assertEqual("publicURL", normalize_endpoint_type("public"))

@@ -140,7 +140,8 @@ def build_acl_source(config, neutron_client=None):
             try:
                 from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
                 neutron_client = build_aria_acl_client_from_env(
-                    page_size=resolved_acl_page_size(config)
+                    page_size=resolved_acl_page_size(config),
+                    timeout=config.neutron_api_timeout,
                 )
             except Exception as exc:
                 raise AclSourceError(
