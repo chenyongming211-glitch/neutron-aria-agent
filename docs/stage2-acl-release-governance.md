@@ -41,7 +41,9 @@ v0.9.0-rc.1
 
 ## Default Release Attachments
 
-Every GitHub tag release must include:
+Every GitHub tag release includes the binary archive, manifest, and checksums.
+The joint Kolla bundle is included only when CI has built and inspected both
+fresh images from the required bases:
 
 ```text
 firewall-binaries-x86_64.zip
@@ -51,9 +53,9 @@ SHA256SUMS
 ```
 
 The binary archive and Kolla bundle include `VERSION`, the MIT `LICENSE`, the
-changelog, and `release/support-matrix.json`. The deterministic manifest binds
-the source commit, component versions, contract hashes, artifact hashes and,
-when built in CI, immutable image identities.
+changelog, and `release/support-matrix.json`. The joint bundle's deterministic
+manifest binds the source commit, component versions, contract hashes, artifact
+hashes, and verified immutable identities for both freshly built images.
 
 The stage-two ACL Kolla bundle contains the old-Neutron plugin, agent package
 builder, DB migration/check scripts, install gate, smoke gates, and operator
@@ -112,8 +114,11 @@ KOLLA_NEUTRON_AGENT_BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag>
 KOLLA_ARIA_DATAPATH_BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag>
 ```
 
-When the variable is absent, CI still publishes the stage-two ACL Kolla bundle.
-Operators can build the images from the bundle onsite:
+When either variable is absent, CI skips joint bundle publication because it
+cannot produce a releasable manifest containing both image identities.
+Individual image tar generation remains conditional on its own base variable.
+Operators can build images onsite, then build a joint bundle only with both
+verified immutable identities:
 
 ```bash
 sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
@@ -122,6 +127,16 @@ sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
   REPO_ROOT=$(pwd) \
   deploy/kolla/package/build_neutron_aria_agent_image.sh
 ```
+
+```bash
+AGENT_IMAGE_IDENTITY=<registry>/neutron-aria-agent:v0.9.0-rc.1-stage2-acl@sha256:<64-lowercase-hex> \
+DATAPATH_IMAGE_IDENTITY=<registry>/aria-datapath:v0.9.0-rc.1-stage2-acl@sha256:<64-lowercase-hex> \
+  deploy/kolla/package/build_stage2_acl_bundle.sh
+```
+
+`ci/check_release_reproducibility.sh` uses stable synthetic identities only to
+verify deterministic bundle bytes without Docker. Those synthetic identities
+are not a releasable manifest and must never be used for publication.
 
 ```bash
 sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
@@ -210,7 +225,9 @@ python3 ci/check_uds_hardening_evidence.py \
   --require-hardened
 python3 ci/check_stage2_acceptance_evidence.py
 python3 ci/check_stage3_readiness.py
-bash deploy/kolla/package/build_stage2_acl_bundle.sh
+AGENT_IMAGE_IDENTITY=<registry>/neutron-aria-agent:v0.9.0-rc.1-stage2-acl@sha256:<64-lowercase-hex> \
+DATAPATH_IMAGE_IDENTITY=<registry>/aria-datapath:v0.9.0-rc.1-stage2-acl@sha256:<64-lowercase-hex> \
+  deploy/kolla/package/build_stage2_acl_bundle.sh
 python3 ci/check_payload_terms.py dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
 ```
 

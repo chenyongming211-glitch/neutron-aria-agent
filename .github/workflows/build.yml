@@ -301,6 +301,19 @@ jobs:
           echo "=== release contents ==="
           ls -la release/
 
+      - name: Prepare Neutron Aria agent image inputs
+        if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' }}
+        run: |
+          set -euo pipefail
+          bash deploy/kolla/package/build_neutron_aria_egg.sh
+          mkdir -p dist/kolla/python2-wheels
+          python3 -m pip download --disable-pip-version-check --no-deps \
+            --only-binary=:all: --dest dist/kolla/python2-wheels netaddr==0.7.19
+          printf '%s  %s\n' \
+            '56b3558bd71f3f6999e4c52e349f38660e54a7a8a9943335f73dfc96883e08ca' \
+            'dist/kolla/python2-wheels/netaddr-0.7.19-py2.py3-none-any.whl' | \
+            sha256sum --check --strict
+
       - name: Build optional Neutron Aria agent image tar
         if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' }}
         run: |
@@ -339,7 +352,7 @@ jobs:
             bash deploy/kolla/package/build_aria_datapath_image.sh
 
       - name: Build Neutron stage-two ACL Kolla bundle
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
+        if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != '' }}
         run: |
           set -euo pipefail
           release_version="v$(tr -d '[:space:]' < VERSION)"
@@ -353,19 +366,16 @@ jobs:
             echo "Required immutable datapath image is unavailable: ${datapath_tag}" >&2
             exit 1
           }
-          mkdir -p dist/kolla/python2-wheels
-          python3 -m pip download --disable-pip-version-check --no-deps \
-            --only-binary=:all: --dest dist/kolla/python2-wheels netaddr==0.7.19
           AGENT_IMAGE_IDENTITY="${agent_tag}@${agent_id}" \
             DATAPATH_IMAGE_IDENTITY="${datapath_tag}@${datapath_id}" \
             bash deploy/kolla/package/build_stage2_acl_bundle.sh
 
       - name: Check Neutron stage-two ACL Kolla bundle payload policy
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
+        if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != '' }}
         run: python3 ci/check_payload_terms.py dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
 
       - name: Upload Neutron stage-two ACL Kolla bundle
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
+        if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: neutron-aria-stage2-acl-kolla-bundle-${{ github.sha }}

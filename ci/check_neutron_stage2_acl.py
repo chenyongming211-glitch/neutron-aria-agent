@@ -379,6 +379,33 @@ def check_production_acl_smoke():
     ):
         if term not in workflow:
             raise SystemExit("ERROR: workflow missing stage-two ACL bundle term %s" % term)
+    joint_publish_condition = (
+        "${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && "
+        "vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' && "
+        "vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != '' }}"
+    )
+    for step in (
+        "Build Neutron stage-two ACL Kolla bundle",
+        "Check Neutron stage-two ACL Kolla bundle payload policy",
+        "Upload Neutron stage-two ACL Kolla bundle",
+    ):
+        step_start = workflow.find("- name: " + step)
+        step_end = workflow.find("\n      - name:", step_start + 1)
+        if step_start < 0 or joint_publish_condition not in workflow[step_start:step_end]:
+            raise SystemExit("ERROR: workflow joint bundle step lacks both-base publish condition: %s" % step)
+    inputs_step = workflow.find("- name: Prepare Neutron Aria agent image inputs")
+    agent_step = workflow.find("- name: Build optional Neutron Aria agent image tar")
+    if inputs_step < 0 or agent_step < 0 or inputs_step >= agent_step:
+        raise SystemExit("ERROR: workflow must prepare agent image inputs before image build")
+    agent_inputs = workflow[inputs_step:agent_step]
+    for term in ("build_neutron_aria_egg.sh", "netaddr==0.7.19", "sha256sum --check --strict"):
+        if term not in agent_inputs:
+            raise SystemExit("ERROR: workflow agent image input preparation missing %s" % term)
+    bundle_step = workflow.find("- name: Build Neutron stage-two ACL Kolla bundle")
+    bundle_check_step = workflow.find("- name: Check Neutron stage-two ACL Kolla bundle payload policy")
+    bundle_step_source = workflow[bundle_step:bundle_check_step]
+    if "pip download" in bundle_step_source:
+        raise SystemExit("ERROR: workflow bundle build must not prepare netaddr late")
     for term in (
         "OBSERVATION_SECONDS",
         "rpc_events_enabled",
@@ -428,6 +455,17 @@ def check_production_acl_smoke():
     ):
         if term not in release_governance:
             raise SystemExit("ERROR: stage-two release governance missing %s" % term)
+    for document_path in (
+        os.path.join("docs", "stage2-acl-release-governance.md"),
+        os.path.join("docs", "openstack-deployment-runbook.md"),
+        os.path.join("docs", "openstack-neutron-aria-details", "08-stage3-acl-production-hardening.md"),
+    ):
+        document = _read(document_path)
+        for term in ("AGENT_IMAGE_IDENTITY=", "DATAPATH_IMAGE_IDENTITY="):
+            if term not in document:
+                raise SystemExit("ERROR: bundle documentation missing %s in %s" % (term, document_path))
+        if "bash deploy/kolla/package/build_stage2_acl_bundle.sh" in document:
+            raise SystemExit("ERROR: bundle documentation must provide both immutable identities in %s" % document_path)
 
 
 def check_datapath_apply_error_observability():

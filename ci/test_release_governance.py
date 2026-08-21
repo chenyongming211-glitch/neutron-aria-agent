@@ -206,19 +206,47 @@ class ReleaseGovernanceTest(unittest.TestCase):
         control = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         spec.loader.exec_module(control)
-        valid = "registry.example/aria-datapath:v0.9@sha256:" + "a" * 64
+        valid = (
+            "registry.example/aria-datapath:v0.9@sha256:" + "a" * 64,
+            "registry.example:5000/team/image:tag@sha256:" + "b" * 64,
+        )
         invalid = (
             ":@sha256:" + "a" * 64,
             "UPPERCASE:v0.9@sha256:" + "a" * 64,
             "aria-datapath@sha256:" + "A" * 64,
             "aria-datapath@sha256:" + "a" * 63,
+            "registry.example:5000//team/image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/team//image:tag@sha256:" + "a" * 64,
+            "registry.example:5000/team/image::tag@sha256:" + "a" * 64,
+            "registry.example:5000/team/image:@sha256:" + "a" * 64,
+            "registry.example:5000/team/image:tag@sha256:" + "a" * 64 + "/",
         )
-        self.assertTrue(generator.is_valid_image_identity(valid))
-        self.assertTrue(control.is_valid_image_identity(valid))
+        for identity in valid:
+            with self.subTest(identity=identity):
+                self.assertTrue(generator.is_valid_image_identity(identity))
+                self.assertTrue(control.is_valid_image_identity(identity))
         for identity in invalid:
             with self.subTest(identity=identity):
                 self.assertFalse(generator.is_valid_image_identity(identity))
                 self.assertFalse(control.is_valid_image_identity(identity))
+
+    def test_runtime_compatibility_rejects_duplicate_json_members(self):
+        generator = load_manifest_generator()
+        duplicate = (
+            '{"schema_version":1,"schema_version":1,'
+            '"uds_schema_min":1,"uds_schema_max":1,'
+            '"snapshot_schema_version":1,"ebpf_abi_version":1,'
+            '"map_schema_version":1,"wal_schema_version":1,'
+            '"runtime_state_schema_version":1,'
+            '"minimum_kernel_profile":"rhel8-4.18",'
+            '"managed_domain_contract_version":"2026-06-v0.9",'
+            '"maintenance_gate_capable":false}'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime-compatibility.json"
+            path.write_text(duplicate, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate JSON object member"):
+                generator.load_runtime_compatibility(path)
 
     def test_stage2_bundle_stages_all_manifest_hash_sources(self):
         builder = ROOT / "deploy/kolla/package/build_stage2_acl_bundle.sh"
@@ -565,6 +593,50 @@ class ReleaseGovernanceTest(unittest.TestCase):
             workflow.index("- name: Create release archive"),
             workflow.index("- name: Create release manifest and checksums"),
         )
+        joint_condition = (
+            "${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && "
+            "vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' && "
+            "vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != '' }}"
+        )
+        agent_input = "- name: Prepare Neutron Aria agent image inputs"
+        agent_build = "- name: Build optional Neutron Aria agent image tar"
+        bundle_build = "- name: Build Neutron stage-two ACL Kolla bundle"
+        bundle_check = "- name: Check Neutron stage-two ACL Kolla bundle payload policy"
+        bundle_upload = "- name: Upload Neutron stage-two ACL Kolla bundle"
+        self.assertIn(agent_input, workflow)
+        self.assertLess(workflow.index(agent_input), workflow.index(agent_build))
+        self.assertIn("build_neutron_aria_egg.sh", workflow[workflow.index(agent_input):workflow.index(agent_build)])
+        self.assertIn("netaddr==0.7.19", workflow[workflow.index(agent_input):workflow.index(agent_build)])
+        self.assertIn("sha256sum --check --strict", workflow[workflow.index(agent_input):workflow.index(agent_build)])
+        for step in (bundle_build, bundle_check, bundle_upload):
+            step_start = workflow.index(step)
+            step_end = workflow.find("\n      - name:", step_start + len(step))
+            if step_end == -1:
+                step_end = len(workflow)
+            self.assertIn("if: " + joint_condition, workflow[step_start:step_end])
+        bundle_block = workflow[
+            workflow.index(bundle_build):workflow.index(bundle_check)
+        ]
+        self.assertNotIn("pip download", bundle_block)
+        self.assertIn("docker image inspect -f '{{.Id}}' \"${agent_tag}\"", bundle_block)
+        self.assertIn("docker image inspect -f '{{.Id}}' \"${datapath_tag}\"", bundle_block)
+
+        governance = (ROOT / "docs/stage2-acl-release-governance.md").read_text(
+            encoding="utf-8"
+        )
+        runbook = (ROOT / "docs/openstack-deployment-runbook.md").read_text(
+            encoding="utf-8"
+        )
+        stage_three_plan = (
+            ROOT / "docs/openstack-neutron-aria-details/08-stage3-acl-production-hardening.md"
+        ).read_text(encoding="utf-8")
+        for document in (governance, runbook, stage_three_plan):
+            self.assertIn("AGENT_IMAGE_IDENTITY=", document)
+            self.assertIn("DATAPATH_IMAGE_IDENTITY=", document)
+            self.assertNotIn("bash deploy/kolla/package/build_stage2_acl_bundle.sh", document)
+        self.assertIn("CI skips joint bundle publication", governance)
+        self.assertIn("stable synthetic identities", governance)
+        self.assertIn("not a releasable manifest", governance)
 
         reproducibility = (
             ROOT / "ci/check_release_reproducibility.sh"

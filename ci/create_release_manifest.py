@@ -14,10 +14,7 @@ from pathlib import Path
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
-IMAGE_IDENTITY_RE = re.compile(
-    r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*"
-    r"(?::[a-z0-9][a-z0-9._-]*)?@sha256:[0-9a-f]{64}$"
-)
+IMAGE_COMPONENT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 RUNTIME_COMPATIBILITY_FIELDS = {
     "schema_version": int,
     "uds_schema_min": int,
@@ -52,7 +49,9 @@ def sha256_length_delimited_files(paths: tuple[Path, ...]) -> str:
 
 def load_runtime_compatibility(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_members
+        )
     except json.JSONDecodeError as error:
         raise ValueError(f"runtime compatibility JSON is invalid: {error}") from error
     if not isinstance(payload, dict):
@@ -79,9 +78,47 @@ def load_runtime_compatibility(path: Path) -> dict[str, object]:
     return payload
 
 
+def reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build a JSON object only when each member name occurs once."""
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON object member: {key}")
+        payload[key] = value
+    return payload
+
+
 def is_valid_image_identity(identity: object) -> bool:
     """Return true only for a conservative named immutable image reference."""
-    return isinstance(identity, str) and IMAGE_IDENTITY_RE.fullmatch(identity) is not None
+    if not isinstance(identity, str) or "@sha256:" not in identity:
+        return False
+    name, digest = identity.rsplit("@sha256:", 1)
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False
+    parts = name.split("/")
+    if not parts or any(not part for part in parts):
+        return False
+    for index, part in enumerate(parts):
+        if ":" not in part:
+            if not IMAGE_COMPONENT_RE.fullmatch(part):
+                return False
+            continue
+        value, separator = part.rsplit(":", 1)
+        if not value or not separator:
+            return False
+        if index == 0 and len(parts) > 1:
+            if not IMAGE_COMPONENT_RE.fullmatch(value):
+                return False
+            if not separator.isdigit() or not 1 <= int(separator) <= 65535:
+                return False
+        elif index == len(parts) - 1:
+            if not IMAGE_COMPONENT_RE.fullmatch(value):
+                return False
+            if not IMAGE_COMPONENT_RE.fullmatch(separator):
+                return False
+        else:
+            return False
+    return True
 
 
 def parse_named(values: list[str], label: str) -> list[tuple[str, str]]:

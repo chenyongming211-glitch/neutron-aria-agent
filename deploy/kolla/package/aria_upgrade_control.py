@@ -34,10 +34,7 @@ REQUIRED_COMPATIBILITY = {
     "ebpf_abi_hash": str,
     "map_schema_hash": str,
 }
-IMAGE_IDENTITY_RE = re.compile(
-    r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*"
-    r"(?::[a-z0-9][a-z0-9._-]*)?@sha256:[0-9a-f]{64}$"
-)
+IMAGE_COMPONENT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 REQUIRED_IMAGES = ("neutron-aria-agent", "aria-datapath")
 UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 
@@ -45,12 +42,25 @@ UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 def load_manifest(path):
     """Load one release manifest as a JSON object."""
     try:
-        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        manifest = json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_members,
+        )
     except (OSError, ValueError, RecursionError) as error:
         raise ValueError(f"manifest cannot be loaded: {error}") from error
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be a JSON object")
     return manifest
+
+
+def reject_duplicate_members(pairs):
+    """Build a JSON object only when each member name occurs once."""
+    payload = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("duplicate JSON object member: %s" % key)
+        payload[key] = value
+    return payload
 
 
 def _valid_compatibility(manifest):
@@ -84,7 +94,35 @@ def _valid_compatibility(manifest):
 
 def is_valid_image_identity(identity):
     """Return true only for a conservative named immutable image reference."""
-    return isinstance(identity, str) and IMAGE_IDENTITY_RE.fullmatch(identity) is not None
+    if not isinstance(identity, str) or "@sha256:" not in identity:
+        return False
+    name, digest = identity.rsplit("@sha256:", 1)
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return False
+    parts = name.split("/")
+    if not parts or any(not part for part in parts):
+        return False
+    for index, part in enumerate(parts):
+        if ":" not in part:
+            if IMAGE_COMPONENT_RE.fullmatch(part) is None:
+                return False
+            continue
+        value, separator = part.rsplit(":", 1)
+        if not value or not separator:
+            return False
+        if index == 0 and len(parts) > 1:
+            if IMAGE_COMPONENT_RE.fullmatch(value) is None:
+                return False
+            if not separator.isdigit() or not 1 <= int(separator) <= 65535:
+                return False
+        elif index == len(parts) - 1:
+            if IMAGE_COMPONENT_RE.fullmatch(value) is None:
+                return False
+            if IMAGE_COMPONENT_RE.fullmatch(separator) is None:
+                return False
+        else:
+            return False
+    return True
 
 
 def _image_identities(manifest):

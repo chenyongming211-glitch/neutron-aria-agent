@@ -147,8 +147,15 @@ python3 ci/check_stage2_acceptance_evidence.py
 python3 ci/check_stage3_readiness.py
 python3 ci/check_stage3_n3_evidence.py
 python3 ci/check_smoke_python_blocks.py
-bash deploy/kolla/package/build_stage2_acl_bundle.sh
+AGENT_IMAGE_IDENTITY=<registry>/neutron-aria-agent:<repo-version>-stage2-acl@sha256:<64-lowercase-hex> \
+DATAPATH_IMAGE_IDENTITY=<registry>/aria-datapath:<repo-version>-stage2-acl@sha256:<64-lowercase-hex> \
+  deploy/kolla/package/build_stage2_acl_bundle.sh
 ```
+
+CI publishes this joint bundle only when both Kolla base-image variables are
+configured and both fresh images have been inspected. Without both variables,
+CI skips joint bundle publication; a standalone reproducibility check's stable
+synthetic identities prove deterministic bytes only and are not releasable.
 
 When Rust/eBPF files change, on tag builds, or on manual workflow dispatch, CI
 must run the Rust-required path:

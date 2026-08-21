@@ -260,6 +260,56 @@ class AriaUpgradeControlTest(unittest.TestCase):
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("operator_forced",), result.reasons)
 
+    def test_force_maintenance_precedes_joint_uds_gate_and_datapath_changes(self):
+        control = self.control()
+        candidate = manifest("3", "4")
+        candidate["runtime_compatibility"]["uds_schema_min"] = 2
+        candidate["runtime_compatibility"]["uds_schema_max"] = 2
+        candidate["runtime_compatibility"]["maintenance_gate_capable"] = True
+        candidate["runtime_compatibility"]["map_schema_hash"] = "c" * 64
+        result = control.classify_upgrade(manifest(), candidate, force_maintenance=True)
+        self.assertEqual("planned_maintenance", result.path)
+        self.assertEqual(("operator_forced",), result.reasons)
+
+    def test_duplicate_manifest_members_are_unknown_for_loader_and_cli(self):
+        control = self.control()
+        payload = json.dumps(manifest())
+        duplicate_runtime = payload.replace(
+            '"schema_version": 1', '"schema_version": 1, "schema_version": 1', 1
+        )
+        duplicate_images = payload.replace(
+            '"identity": "neutron-aria-agent:v0.9@sha256:' + "1" * 64 + '"',
+            '"identity": "neutron-aria-agent:v0.9@sha256:' + "1" * 64
+            + '", "identity": "neutron-aria-agent:v0.9@sha256:' + "1" * 64 + '"',
+            1,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            for name, text in (("runtime.json", duplicate_runtime), ("images.json", duplicate_images)):
+                with self.subTest(name=name):
+                    path = temp / name
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "duplicate JSON object member"):
+                        control.load_manifest(path)
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(CONTROL_PATH),
+                            "classify",
+                            "--current",
+                            str(path),
+                            "--candidate",
+                            str(path),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        {"path": "planned_maintenance", "reasons": ["unknown_compatibility"]},
+                        json.loads(result.stdout),
+                    )
+
     def test_classify_command_prints_bounded_json_without_docker(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

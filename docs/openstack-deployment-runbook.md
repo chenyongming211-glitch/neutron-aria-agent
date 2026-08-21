@@ -378,7 +378,9 @@ behind the Neutron API endpoint.
 Build and check the bundle from the repo:
 
 ```bash
-bash deploy/kolla/package/build_stage2_acl_bundle.sh
+AGENT_IMAGE_IDENTITY=<registry>/neutron-aria-agent:<repo-version>-stage2-acl@sha256:<64-lowercase-hex> \
+DATAPATH_IMAGE_IDENTITY=<registry>/aria-datapath:<repo-version>-stage2-acl@sha256:<64-lowercase-hex> \
+  deploy/kolla/package/build_stage2_acl_bundle.sh
 python ci/check_neutron_stage2_acl.py
 python ci/check_neutron_stage1.py
 ```
