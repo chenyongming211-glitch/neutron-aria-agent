@@ -1962,6 +1962,58 @@ class UpgradeLedgerTest(unittest.TestCase):
                     self.assertIsNone(progressed["last_error"])
                     recovered.close()
 
+    def test_bypass_preparing_failure_metadata_clears_on_progress(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            ledger.transition("preflight", "quiescing", {})
+            ledger.transition("quiescing", "bypass_preparing", {})
+            failed = ledger.fail("bypass_preparing", "preparation paused")
+            self.assertEqual("bypass_preparing", failed["phase"])
+            self.assertEqual("resume_exact_phase", failed["recovery_action"])
+            self.assertEqual("preparation paused", failed["last_error"])
+            progressed = ledger.transition(
+                "bypass_preparing", "bypass_confirmed", {}
+            )
+            self.assertIsNone(progressed["recovery_action"])
+            self.assertIsNone(progressed["last_error"])
+            ledger.close()
+
+    def test_recovered_preflight_metadata_clears_on_progress(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            first = self.new_ledger(control, temp)
+            self.begin(first)
+            first.close()
+
+            recovered = self.new_ledger(control, temp)
+            state = recovered.recover(self.operation())
+            self.assertEqual("preflight", state["phase"])
+            self.assertEqual("resume_exact_phase", state["recovery_action"])
+            progressed = recovered.transition("preflight", "quiescing", {})
+            self.assertIsNone(progressed["recovery_action"])
+            self.assertIsNone(progressed["last_error"])
+            recovered.close()
+
+    def test_any_durable_exact_resume_directive_clears_on_legal_progress(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            ledger = self.new_ledger(control, temp)
+            self.begin(ledger)
+            state = self.read_ledger(temp)
+            state["phase"] = "rollback"
+            state["recovery_action"] = "resume_exact_phase"
+            state["last_error"] = "stale rollback failure"
+            self.write_ledger(temp, state)
+            progressed = ledger.transition("rollback", "full_resync", {})
+            self.assertIsNone(progressed["recovery_action"])
+            self.assertIsNone(progressed["last_error"])
+            ledger.close()
+
     def test_commit_clears_stale_recovery_metadata(self):
         control = self.control()
         with tempfile.TemporaryDirectory() as temp_dir:

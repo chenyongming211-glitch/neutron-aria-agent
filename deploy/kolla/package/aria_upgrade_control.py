@@ -395,10 +395,7 @@ class UpgradeLedger(object):
         if (
             old_phase == "maintenance_bypass"
             or next_phase == "committed"
-            or (
-                old_phase in SAFE_EXACT_RESUME_PHASES
-                and self._state.get("recovery_action") == "resume_exact_phase"
-            )
+            or self._state.get("recovery_action") == "resume_exact_phase"
         ):
             state["recovery_action"] = None
             state["last_error"] = None
