@@ -96,6 +96,10 @@ Expected: PASS and continued assertions that degraded/bypass are Docker unhealth
 - Produces: `load_manifest(path) -> dict`, `classify_upgrade(current, candidate, force_maintenance=False) -> UpgradeClassification`.
 - `UpgradeClassification.path` is exactly `hot_agent`, `hot_datapath`, or `planned_maintenance`.
 - `UpgradeClassification.reasons` is a sorted tuple of stable reason codes.
+- The stage-two bundle requires verified `AGENT_IMAGE_IDENTITY` and
+  `DATAPATH_IMAGE_IDENTITY` values in named immutable `@sha256:` form; the
+  publishing workflow obtains both from the freshly built image IDs before
+  constructing the bundle manifest.
 
 - [x] **Step 1: Write failing manifest-field tests**
 
@@ -138,7 +142,8 @@ Use this decision order:
 
 ```python
 DATAPATH_KEYS = (
-    "snapshot_schema_version", "ebpf_abi_hash", "map_schema_hash",
+    "snapshot_schema_version", "ebpf_abi_version", "map_schema_version",
+    "ebpf_abi_hash", "map_schema_hash",
     "wal_schema_version", "runtime_state_schema_version",
     "minimum_kernel_profile", "managed_domain_contract_version",
 )

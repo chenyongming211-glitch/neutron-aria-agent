@@ -301,25 +301,6 @@ jobs:
           echo "=== release contents ==="
           ls -la release/
 
-      - name: Build Neutron stage-two ACL Kolla bundle
-        run: |
-          mkdir -p dist/kolla/python2-wheels
-          python3 -m pip download --disable-pip-version-check --no-deps \
-            --only-binary=:all: --dest dist/kolla/python2-wheels netaddr==0.7.19
-          bash deploy/kolla/package/build_stage2_acl_bundle.sh
-
-      - name: Check Neutron stage-two ACL Kolla bundle payload policy
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
-        run: python3 ci/check_payload_terms.py dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
-
-      - name: Upload Neutron stage-two ACL Kolla bundle
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: neutron-aria-stage2-acl-kolla-bundle-${{ github.sha }}
-          path: dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
-          retention-days: 14
-
       - name: Build optional Neutron Aria agent image tar
         if: ${{ env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' }}
         run: |
@@ -357,6 +338,40 @@ jobs:
             IMAGE_TAR="${image_tar}" \
             bash deploy/kolla/package/build_aria_datapath_image.sh
 
+      - name: Build manifest-pinned Neutron stage-two ACL Kolla bundle
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
+        run: |
+          set -euo pipefail
+          release_version="v$(tr -d '[:space:]' < VERSION)"
+          agent_tag="neutron-aria-agent:${release_version}-stage2-acl"
+          datapath_tag="aria-datapath:${release_version}-stage2-acl"
+          agent_id="$(docker image inspect -f '{{.Id}}' "${agent_tag}")" || {
+            echo "Required immutable agent image is unavailable: ${agent_tag}" >&2
+            exit 1
+          }
+          datapath_id="$(docker image inspect -f '{{.Id}}' "${datapath_tag}")" || {
+            echo "Required immutable datapath image is unavailable: ${datapath_tag}" >&2
+            exit 1
+          }
+          mkdir -p dist/kolla/python2-wheels
+          python3 -m pip download --disable-pip-version-check --no-deps \
+            --only-binary=:all: --dest dist/kolla/python2-wheels netaddr==0.7.19
+          AGENT_IMAGE_IDENTITY="${agent_tag}@${agent_id}" \
+            DATAPATH_IMAGE_IDENTITY="${datapath_tag}@${datapath_id}" \
+            bash deploy/kolla/package/build_stage2_acl_bundle.sh
+
+      - name: Check Neutron stage-two ACL Kolla bundle payload policy
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
+        run: python3 ci/check_payload_terms.py dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
+
+      - name: Upload Neutron stage-two ACL Kolla bundle
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: neutron-aria-stage2-acl-kolla-bundle-${{ github.sha }}
+          path: dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
+          retention-days: 14
+
       - name: Create release archive
         run: |
           source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
@@ -383,11 +398,14 @@ jobs:
             --artifact "libebpf_firewall.so=release/libebpf_firewall.so"
             --artifact "libebpf_firewall_perf.so=release/libebpf_firewall_perf.so"
             --artifact "stack-budget.json=release/stack-budget.json"
-            --artifact "neutron-aria-stage2-acl-kolla-bundle.tgz=dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz"
             --artifact "firewall-binaries-x86_64.zip=firewall-binaries-x86_64.zip"
             --output release/release-manifest.json
             --checksums-output release/SHA256SUMS
           )
+          bundle="dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz"
+          if [ -f "${bundle}" ]; then
+            args+=(--artifact "neutron-aria-stage2-acl-kolla-bundle.tgz=${bundle}")
+          fi
           for image_tar in dist/kolla/*-stage2-acl-image.tar; do
             if [ -f "${image_tar}" ]; then
               args+=(--artifact "$(basename "${image_tar}")=${image_tar}")

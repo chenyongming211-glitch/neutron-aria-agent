@@ -84,6 +84,14 @@ class AriaUpgradeControlTest(unittest.TestCase):
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("joint_agent_datapath_change",), result.reasons)
 
+    def test_joint_change_precedes_datapath_compatibility_reasons(self):
+        control = self.control()
+        candidate = manifest("3", "4")
+        candidate["runtime_compatibility"]["map_schema_hash"] = "c" * 64
+        result = control.classify_upgrade(manifest(), candidate)
+        self.assertEqual("planned_maintenance", result.path)
+        self.assertEqual(("joint_agent_datapath_change",), result.reasons)
+
     def test_map_schema_change_requires_planned_maintenance(self):
         control = self.control()
         current = manifest()
@@ -128,6 +136,16 @@ class AriaUpgradeControlTest(unittest.TestCase):
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("uds_schema_incompatible",), result.reasons)
 
+    def test_disjoint_uds_range_precedes_datapath_compatibility_reasons(self):
+        control = self.control()
+        candidate = manifest()
+        candidate["runtime_compatibility"]["uds_schema_min"] = 2
+        candidate["runtime_compatibility"]["uds_schema_max"] = 2
+        candidate["runtime_compatibility"]["map_schema_hash"] = "c" * 64
+        result = control.classify_upgrade(manifest(), candidate)
+        self.assertEqual("planned_maintenance", result.path)
+        self.assertEqual(("uds_schema_incompatible",), result.reasons)
+
     def test_overlapping_uds_ranges_keep_agent_hot_path(self):
         control = self.control()
         current = manifest()
@@ -147,6 +165,15 @@ class AriaUpgradeControlTest(unittest.TestCase):
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("maintenance_gate_capability_changed",), result.reasons)
 
+    def test_maintenance_gate_transition_precedes_datapath_compatibility_reasons(self):
+        control = self.control()
+        candidate = manifest()
+        candidate["runtime_compatibility"]["maintenance_gate_capable"] = True
+        candidate["runtime_compatibility"]["wal_schema_version"] += 1
+        result = control.classify_upgrade(manifest(), candidate)
+        self.assertEqual("planned_maintenance", result.path)
+        self.assertEqual(("maintenance_gate_capability_changed",), result.reasons)
+
     def test_every_datapath_key_reports_its_sorted_stable_reason(self):
         control = self.control()
         for key in control.DATAPATH_KEYS:
@@ -157,6 +184,16 @@ class AriaUpgradeControlTest(unittest.TestCase):
                     "c" * 64 if key.endswith("_hash") else
                     value + "-next" if isinstance(value, str) else value + 1
                 )
+                result = control.classify_upgrade(manifest(), candidate)
+                self.assertEqual("planned_maintenance", result.path)
+                self.assertEqual((key,), result.reasons)
+
+    def test_abi_and_map_version_only_bumps_require_planned_maintenance(self):
+        control = self.control()
+        for key in ("ebpf_abi_version", "map_schema_version"):
+            with self.subTest(key=key):
+                candidate = manifest()
+                candidate["runtime_compatibility"][key] += 1
                 result = control.classify_upgrade(manifest(), candidate)
                 self.assertEqual("planned_maintenance", result.path)
                 self.assertEqual((key,), result.reasons)
@@ -271,6 +308,7 @@ class AriaUpgradeControlTest(unittest.TestCase):
                 text=True,
                 env=environment,
             )
+            self.assertFalse(marker.exists(), "dry-run must not execute Docker")
         self.assertEqual(
             {
                 "path": "planned_maintenance",
@@ -286,7 +324,6 @@ class AriaUpgradeControlTest(unittest.TestCase):
         )
         self.assertEqual(1, result.stdout.count("\n"))
         self.assertLess(len(result.stdout), 1024)
-        self.assertFalse(marker.exists(), "dry-run must not execute Docker")
 
     def test_invalid_missing_and_deep_cli_manifests_are_bounded_unknown_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:

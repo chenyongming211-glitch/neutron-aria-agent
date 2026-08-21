@@ -10,6 +10,8 @@ from pathlib import Path
 
 DATAPATH_KEYS = (
     "snapshot_schema_version",
+    "ebpf_abi_version",
+    "map_schema_version",
     "ebpf_abi_hash",
     "map_schema_hash",
     "wal_schema_version",
@@ -122,16 +124,6 @@ def classify_upgrade(current, candidate, force_maintenance=False):
     ):
         return _unknown()
 
-    changed_keys = tuple(
-        sorted(
-            key
-            for key in DATAPATH_KEYS
-            if current_compatibility[key] != candidate_compatibility[key]
-        )
-    )
-    if changed_keys:
-        return UpgradeClassification("planned_maintenance", changed_keys)
-
     agent_changed = (
         current_images["neutron-aria-agent"]
         != candidate_images["neutron-aria-agent"]
@@ -159,6 +151,15 @@ def classify_upgrade(current, candidate, force_maintenance=False):
         return UpgradeClassification(
             "planned_maintenance", ("maintenance_gate_capability_changed",)
         )
+    changed_keys = tuple(
+        sorted(
+            key
+            for key in DATAPATH_KEYS
+            if current_compatibility[key] != candidate_compatibility[key]
+        )
+    )
+    if changed_keys:
+        return UpgradeClassification("planned_maintenance", changed_keys)
     if agent_changed and not datapath_changed:
         return UpgradeClassification("hot_agent", ("agent_only",))
     if datapath_changed:

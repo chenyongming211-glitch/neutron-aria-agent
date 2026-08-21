@@ -10,6 +10,8 @@ EGG_NAME="${EGG_NAME:-neutron_aria-0.1.0-py2.7.egg}"
 NETADDR_WHEEL_NAME="${NETADDR_WHEEL_NAME:-netaddr-0.7.19-py2.py3-none-any.whl}"
 NETADDR_WHEEL_SHA256="${NETADDR_WHEEL_SHA256:-56b3558bd71f3f6999e4c52e349f38660e54a7a8a9943335f73dfc96883e08ca}"
 NETADDR_WHEEL_PATH="${NETADDR_WHEEL_PATH:-${REPO_ROOT}/dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}}"
+AGENT_IMAGE_IDENTITY="${AGENT_IMAGE_IDENTITY:-}"
+DATAPATH_IMAGE_IDENTITY="${DATAPATH_IMAGE_IDENTITY:-}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.0}"
 SOURCE_TREEISH="${SOURCE_TREEISH:-HEAD}"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse "${SOURCE_TREEISH}^{commit}")"
@@ -52,6 +54,10 @@ do
 done
 
 require_path "${NETADDR_WHEEL_PATH}"
+[ -n "${AGENT_IMAGE_IDENTITY}" ] && [ -n "${DATAPATH_IMAGE_IDENTITY}" ] || {
+    echo "AGENT_IMAGE_IDENTITY and DATAPATH_IMAGE_IDENTITY are required immutable image references." >&2
+    exit 1
+}
 actual_netaddr_sha256="$(sha256sum "${NETADDR_WHEEL_PATH}" | awk '{print $1}')"
 if [ "${actual_netaddr_sha256}" != "${NETADDR_WHEEL_SHA256}" ]; then
     echo "netaddr wheel SHA-256 mismatch: ${actual_netaddr_sha256}" >&2
@@ -388,6 +394,8 @@ python3 "${STAGING_DIR}/ci/create_release_manifest.py" \
     --source-commit "${SOURCE_COMMIT}" \
     --artifact "dist/kolla/${EGG_NAME}=${STAGING_DIR}/dist/kolla/${EGG_NAME}" \
     --artifact "dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}=${STAGING_DIR}/dist/kolla/python2-wheels/${NETADDR_WHEEL_NAME}" \
+    --image "neutron-aria-agent=${AGENT_IMAGE_IDENTITY}" \
+    --image "aria-datapath=${DATAPATH_IMAGE_IDENTITY}" \
     --output "${STAGING_DIR}/release-manifest.json" \
     --checksums-output "${STAGING_DIR}/SHA256SUMS"
 

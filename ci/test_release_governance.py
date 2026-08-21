@@ -271,8 +271,25 @@ class ReleaseGovernanceTest(unittest.TestCase):
                     "OUT_DIR": str(temp / "out"),
                     "NETADDR_WHEEL_PATH": str(wheel),
                     "NETADDR_WHEEL_SHA256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                    "AGENT_IMAGE_IDENTITY": "neutron-aria-agent:v0.9@sha256:" + "1" * 64,
+                    "DATAPATH_IMAGE_IDENTITY": "aria-datapath:v0.9@sha256:" + "2" * 64,
                     "PATH": os.pathsep.join((str(shims), str(runtime_bin), environment["PATH"])),
                 }
+            )
+            missing_identity_environment = dict(environment)
+            del missing_identity_environment["AGENT_IMAGE_IDENTITY"]
+            del missing_identity_environment["DATAPATH_IMAGE_IDENTITY"]
+            missing_identity_result = subprocess.run(
+                ["bash", str(builder)],
+                cwd=str(ROOT),
+                env=missing_identity_environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(0, missing_identity_result.returncode)
+            self.assertIn(
+                "AGENT_IMAGE_IDENTITY and DATAPATH_IMAGE_IDENTITY",
+                missing_identity_result.stderr,
             )
             result = subprocess.run(
                 ["bash", str(builder)],
@@ -287,6 +304,19 @@ class ReleaseGovernanceTest(unittest.TestCase):
             payload = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertIn("ebpf_abi_hash", payload["runtime_compatibility"])
             self.assertIn("map_schema_hash", payload["runtime_compatibility"])
+            self.assertEqual(
+                [
+                    {
+                        "identity": environment["DATAPATH_IMAGE_IDENTITY"],
+                        "name": "aria-datapath",
+                    },
+                    {
+                        "identity": environment["AGENT_IMAGE_IDENTITY"],
+                        "name": "neutron-aria-agent",
+                    },
+                ],
+                sorted(payload["images"], key=lambda image: image["name"]),
+            )
             bundle = temp / "out" / "neutron-aria-stage2-acl-kolla-bundle.tgz"
             self.assertTrue(bundle.is_file())
             with tarfile.open(bundle, "r:gz") as archive:
@@ -308,6 +338,10 @@ class ReleaseGovernanceTest(unittest.TestCase):
                 packaged_compatibility = read_member("release/runtime-compatibility.json")
                 packaged_abi = read_member("abi/src/lib.rs")
                 packaged_maps = read_member("ebpf/src/maps.rs")
+            self.assertEqual(
+                payload["images"],
+                packaged_manifest["images"],
+            )
             self.assertEqual(
                 hashlib.sha256(packaged_compatibility).hexdigest(),
                 packaged_manifest["contracts"]["runtime_compatibility_sha256"],
@@ -479,6 +513,10 @@ class ReleaseGovernanceTest(unittest.TestCase):
             "release/runtime-compatibility.json",
             "create_release_manifest.py",
             "aria_upgrade_control.py",
+            "AGENT_IMAGE_IDENTITY",
+            "DATAPATH_IMAGE_IDENTITY",
+            '--image "neutron-aria-agent=${AGENT_IMAGE_IDENTITY}"',
+            '--image "aria-datapath=${DATAPATH_IMAGE_IDENTITY}"',
             "SHA256SUMS",
             "release-manifest.json",
             "install_aria_datapath_rc_image.sh",
@@ -515,6 +553,9 @@ class ReleaseGovernanceTest(unittest.TestCase):
             "ci/check_release_reproducibility.sh",
             'cp VERSION LICENSE CHANGELOG.md release/',
             '--artifact "firewall-binaries-x86_64.zip=firewall-binaries-x86_64.zip"',
+            "Build manifest-pinned Neutron stage-two ACL Kolla bundle",
+            'AGENT_IMAGE_IDENTITY="${agent_tag}@${agent_id}"',
+            'DATAPATH_IMAGE_IDENTITY="${datapath_tag}@${datapath_id}"',
         ):
             self.assertIn(term, workflow)
         self.assertNotIn('RELEASE_VERSION="${GITHUB_REF_NAME', workflow)
