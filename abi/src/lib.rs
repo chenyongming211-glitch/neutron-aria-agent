@@ -692,7 +692,7 @@ pub fn set_fragment_resolve_drop_ids(
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct FirewallConfig {
     pub conntrack_enabled: u8,
     pub monitoring_enabled: u8,
@@ -713,6 +713,33 @@ pub struct FirewallConfig {
 
 pub const TAP_ID_UNASSIGNED: u32 = 0;
 pub const FIRST_MANAGED_TAP_ID: u32 = 1;
+
+/// The only lookup stages allowed for ACL and conntrack feature decisions.
+/// A bypass result is terminal, so callers must not consult per-tap state.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AclCtRuntimeSource {
+    BypassAclAndConntrack,
+    PerTapThenGlobal,
+    GlobalOnly,
+}
+
+#[inline(always)]
+pub fn acl_ct_runtime_source(
+    global: Option<&FirewallConfig>,
+    tap_id: u32,
+) -> AclCtRuntimeSource {
+    if global
+        .map(|config| config.acl_maintenance_bypass != 0)
+        .unwrap_or(false)
+    {
+        return AclCtRuntimeSource::BypassAclAndConntrack;
+    }
+    if tap_id != TAP_ID_UNASSIGNED {
+        AclCtRuntimeSource::PerTapThenGlobal
+    } else {
+        AclCtRuntimeSource::GlobalOnly
+    }
+}
 
 /// Runtime lookup result for a managed interface in the future shared data plane.
 #[repr(C)]
@@ -903,8 +930,9 @@ mod userspace_pod {
 /// are intentionally not re-exported through this module.
 pub mod userspace {
     pub use super::{
-        acl_banked_tap_id, acl_next_bank, ct_acl_family_is_current, drop_family_is_valid,
-        fragment_metric_index, normalize_acl_bank, normalize_acl_ingress_hook,
+        acl_banked_tap_id, acl_ct_runtime_source, acl_next_bank, ct_acl_family_is_current,
+        drop_family_is_valid, fragment_metric_index, normalize_acl_bank,
+        normalize_acl_ingress_hook,
         policy_family_is_valid, CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue,
         DropKey, DropValue, FirewallConfig, FlowStatsValue, FragmentConfig, FragmentContextKey4,
         FragmentContextKey6, FragmentContextValue, FragmentEpochValue, FragmentKind,
@@ -913,7 +941,7 @@ pub mod userspace {
         MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey, QosStatsValue,
         RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpValue, SslScratch, SslWriteScratch,
         TapConfig, TcpRtValue, TokenBucket, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter,
-        TraceStreamEvent, ACL_BANK_PRIMARY, ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC,
+        TraceStreamEvent, AclCtRuntimeSource, ACL_BANK_PRIMARY, ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC,
         ACL_INGRESS_HOOK_XDP, CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6,
         CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED,
         CT_CONTRACT_REASON_CT_HIT, CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK,

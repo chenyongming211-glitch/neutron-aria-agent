@@ -412,6 +412,45 @@ pub fn replay_state_from_snapshot(
     )
 }
 
+fn fresh_unpinned_firewall_config(state: &crate::state::FirewallState) -> FirewallConfig {
+    let raw_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    let num_cpus = if raw_cpus > 0 {
+        raw_cpus as u16
+    } else {
+        1u16
+    };
+    FirewallConfig {
+        conntrack_enabled: u8::from(state.conntrack_enabled),
+        monitoring_enabled: u8::from(state.monitoring_enabled),
+        num_cpus,
+        qos_enabled: u8::from(state.qos_enabled && !state.qos_rules.is_empty()),
+        acl_enabled: u8::from(state.acl_enabled),
+        mirror_enabled: u8::from(state.mirror_enabled && !state.mirror_rules.is_empty()),
+        tcprt_enabled: u8::from(state.tcprt_enabled),
+        ssl_enabled: u8::from(state.ssl_enabled),
+        acl_active_bank: ACL_BANK_PRIMARY,
+        acl_maintenance_bypass: 0,
+        _pad: 0,
+    }
+}
+
+/// Initialize a newly loaded, not-yet-pinned object. This is deliberately a
+/// write-only startup boundary; concurrent pinned-map RMW goes through the
+/// serialized runtime helper instead.
+fn initialize_fresh_unpinned_firewall_config(
+    bpf: &mut aya::Ebpf,
+    state: &crate::state::FirewallState,
+) -> Result<(), String> {
+    let cfg = fresh_unpinned_firewall_config(state);
+    let map = bpf
+        .map_mut("FIREWALL_CONFIG")
+        .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())?;
+    let mut map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(map)
+        .map_err(|error| format!("{:?}", error))?;
+    map.insert(&0u32, &cfg, 0)
+        .map_err(|error| format!("{:?}", error))
+}
+
 fn replay_state_from_snapshot_with_mode(
     bpf: &mut aya::Ebpf,
     state_path: &str,
@@ -654,44 +693,8 @@ fn replay_state_from_snapshot_with_mode(
         errors.extend(mirror_errors);
     }
 
-    {
-        let raw_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        let num_cpus = if raw_cpus > 0 { raw_cpus as u16 } else { 1u16 };
-        let cfg = FirewallConfig {
-            conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
-            monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
-            num_cpus,
-            qos_enabled: if state.qos_enabled && !state.qos_rules.is_empty() {
-                1
-            } else {
-                0
-            },
-            acl_enabled: if state.acl_enabled { 1 } else { 0 },
-            mirror_enabled: if state.mirror_enabled && !state.mirror_rules.is_empty() {
-                1
-            } else {
-                0
-            },
-            tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
-            ssl_enabled: if state.ssl_enabled { 1 } else { 0 },
-            acl_active_bank: ACL_BANK_PRIMARY,
-            acl_maintenance_bypass: 0,
-            _pad: 0,
-        };
-        match bpf
-            .map_mut("FIREWALL_CONFIG")
-            .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())
-            .and_then(|m| {
-                aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(m)
-                    .map_err(|e| format!("{:?}", e))
-            }) {
-            Ok(mut map) => {
-                if let Err(e) = map.insert(&0u32, &cfg, 0) {
-                    errors.push(format!("FIREWALL_CONFIG: {:?}", e));
-                }
-            }
-            Err(e) => errors.push(format!("FIREWALL_CONFIG: {}", e)),
-        }
+    if let Err(error) = initialize_fresh_unpinned_firewall_config(bpf, state) {
+        errors.push(format!("FIREWALL_CONFIG: {}", error));
     }
 
     if tap_id != TAP_ID_UNASSIGNED {
@@ -1217,8 +1220,8 @@ mod maintenance_replay_tests {
         assert_eq!(config.conntrack_enabled, 1);
         assert_eq!(config.monitoring_enabled, 1);
         assert_eq!(config.acl_enabled, 1);
-        assert_eq!(config.qos_enabled, 1);
-        assert_eq!(config.mirror_enabled, 1);
+        assert_eq!(config.qos_enabled, 0);
+        assert_eq!(config.mirror_enabled, 0);
         assert_eq!(config.tcprt_enabled, 1);
         assert_eq!(config.ssl_enabled, 1);
         assert_eq!(config.acl_active_bank, ACL_BANK_PRIMARY);

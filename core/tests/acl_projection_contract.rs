@@ -49,21 +49,22 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
 
     for body in [conntrack, acl] {
         let gate = body
-            .find("acl_maintenance_bypass()")
-            .expect("ACL and conntrack must consult the shared maintenance gate");
+            .find("acl_ct_runtime_source(global.as_ref(), tap_id)")
+            .expect("ACL and conntrack must classify the shared maintenance gate");
         let per_tap = body
             .find("TAP_CONFIG_MAP")
             .expect("normal per-tap behavior must remain available");
         assert!(gate < per_tap, "maintenance gate must precede per-tap lookup");
-        assert!(body.contains("return false;"));
+        assert!(body.contains("AclCtRuntimeSource::BypassAclAndConntrack => return false"));
     }
 
+    let abi = include_str!("../../abi/src/lib.rs");
     let gate = source_function(
-        runtime,
-        "fn acl_maintenance_bypass() -> bool {",
-        "pub fn conntrack_enabled(tap_id: u32) -> bool {",
+        abi,
+        "pub fn acl_ct_runtime_source(",
+        "/// Runtime lookup result for a managed interface",
     );
-    assert!(gate.contains("cfg.acl_maintenance_bypass != 0"));
+    assert!(gate.contains("config.acl_maintenance_bypass != 0"));
     assert!(gate.contains(".unwrap_or(false)"));
 
     let packet_path = include_str!("../../ebpf/src/lib.rs");
@@ -162,6 +163,8 @@ fn acl_projection_maintenance_setter_is_shared_key_zero_and_read_verified() {
         "pub fn prove_managed_firewall_config_runtime(",
     );
     assert!(!proof_type.contains("pub pin_path"));
+    assert!(proof_type.contains("store: Mutex<PinnedFirewallConfigStore>"));
+    assert!(!setter.contains("PinnedFirewallConfigStore::open"));
     assert!(!common.contains("assume_managed"));
 }
 
@@ -205,7 +208,11 @@ fn acl_projection_maintenance_managed_proof_rejects_arbitrary_temporary_map_shap
     )
     .expect_err("temporary map shape must not mint managed authority");
     assert!(error.contains("managed FIREWALL_CONFIG authority rejected"));
-    assert!(error.contains("root ownership") || error.contains("bpffs"));
+    assert!(
+        error.contains("permissions")
+            || error.contains("root ownership")
+            || error.contains("bpffs")
+    );
     fs::remove_dir_all(base).unwrap();
 }
 

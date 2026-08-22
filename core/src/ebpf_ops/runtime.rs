@@ -1,4 +1,14 @@
 use super::*;
+use std::ffi::CString;
+use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
+const BPF_FS_MAGIC: libc::c_long = 0xcafe4a11;
+static FIREWALL_CONFIG_RMW_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), String> {
     let mut map = open_pinned_iface_ctx(runtime.pin_path)?;
@@ -88,19 +98,163 @@ fn firewall_config_with_acl_maintenance_bypass(
     }
 }
 
-fn verify_acl_maintenance_bypass_readback(
-    observed: FirewallConfig,
-    enabled: bool,
-) -> Result<(), String> {
-    let expected = if enabled { 1 } else { 0 };
-    if observed.acl_maintenance_bypass == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "FIREWALL_CONFIG ACL maintenance bypass readback mismatch: expected {}, observed {}",
-            expected, observed.acl_maintenance_bypass
-        ))
+#[derive(Clone, Copy, Debug, Default)]
+struct FirewallConfigPatch {
+    conntrack_enabled: Option<bool>,
+    monitoring_enabled: Option<bool>,
+    acl_enabled: Option<bool>,
+    qos_enabled: Option<bool>,
+    mirror_enabled: Option<bool>,
+    tcprt_enabled: Option<bool>,
+    ssl_enabled: Option<bool>,
+}
+
+impl FirewallConfigPatch {
+    fn is_full_initialization(self) -> bool {
+        self.conntrack_enabled.is_some()
+            && self.monitoring_enabled.is_some()
+            && self.acl_enabled.is_some()
+            && self.qos_enabled.is_some()
+            && self.mirror_enabled.is_some()
+            && self.tcprt_enabled.is_some()
+            && self.ssl_enabled.is_some()
     }
+}
+
+fn firewall_config_with_runtime_updates(
+    current: Option<FirewallConfig>,
+    patch: FirewallConfigPatch,
+    detected_num_cpus: u16,
+) -> Result<FirewallConfig, String> {
+    if current.is_none() && !patch.is_full_initialization() {
+        return Err("partial update requires initialized FIREWALL_CONFIG key 0".to_string());
+    }
+    let current = current.unwrap_or(FirewallConfig {
+        conntrack_enabled: 1,
+        monitoring_enabled: 1,
+        num_cpus: detected_num_cpus,
+        qos_enabled: 0,
+        acl_enabled: 1,
+        mirror_enabled: 0,
+        tcprt_enabled: 0,
+        ssl_enabled: 0,
+        acl_active_bank: ACL_BANK_PRIMARY,
+        acl_maintenance_bypass: 0,
+        _pad: 0,
+    });
+    Ok(FirewallConfig {
+        conntrack_enabled: patch
+            .conntrack_enabled
+            .map(u8::from)
+            .unwrap_or(current.conntrack_enabled),
+        monitoring_enabled: patch
+            .monitoring_enabled
+            .map(u8::from)
+            .unwrap_or(current.monitoring_enabled),
+        num_cpus: current.num_cpus,
+        qos_enabled: patch
+            .qos_enabled
+            .map(u8::from)
+            .unwrap_or(current.qos_enabled),
+        acl_enabled: patch
+            .acl_enabled
+            .map(u8::from)
+            .unwrap_or(current.acl_enabled),
+        mirror_enabled: patch
+            .mirror_enabled
+            .map(u8::from)
+            .unwrap_or(current.mirror_enabled),
+        tcprt_enabled: patch
+            .tcprt_enabled
+            .map(u8::from)
+            .unwrap_or(current.tcprt_enabled),
+        ssl_enabled: patch
+            .ssl_enabled
+            .map(u8::from)
+            .unwrap_or(current.ssl_enabled),
+        acl_active_bank: normalize_acl_bank(current.acl_active_bank),
+        acl_maintenance_bypass: current.acl_maintenance_bypass,
+        _pad: 0,
+    })
+}
+
+trait FirewallConfigStore {
+    fn read_key_zero(&mut self) -> Result<Option<FirewallConfig>, String>;
+    fn write_key_zero(&mut self, config: FirewallConfig) -> Result<(), String>;
+}
+
+struct PinnedFirewallConfigStore {
+    map: aya::maps::HashMap<MapData, u32, FirewallConfig>,
+}
+
+impl PinnedFirewallConfigStore {
+    fn open(pin_path: &Path) -> Result<Self, String> {
+        let map_path = pin_path.join("FIREWALL_CONFIG");
+        let map_data = MapData::from_pin(&map_path)
+            .map_err(|error| format!("open FIREWALL_CONFIG: {:?}", error))?;
+        let map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(
+            aya::maps::Map::HashMap(map_data),
+        )
+        .map_err(|error| format!("convert FIREWALL_CONFIG: {:?}", error))?;
+        Ok(Self { map })
+    }
+}
+
+impl FirewallConfigStore for PinnedFirewallConfigStore {
+    fn read_key_zero(&mut self) -> Result<Option<FirewallConfig>, String> {
+        match self.map.get(&0u32, 0) {
+            Ok(config) => Ok(Some(config)),
+            Err(aya::maps::MapError::KeyNotFound) => Ok(None),
+            Err(error) => Err(format!("read FIREWALL_CONFIG key 0: {}", error)),
+        }
+    }
+
+    fn write_key_zero(&mut self, config: FirewallConfig) -> Result<(), String> {
+        self.map
+            .insert(&0u32, &config, 0)
+            .map_err(|error| format!("write FIREWALL_CONFIG key 0: {:?}", error))
+    }
+}
+
+fn serialized_firewall_config_rmw<Store, Transform>(
+    update_lock: &Mutex<()>,
+    store: &mut Store,
+    operation: &str,
+    transform: Transform,
+) -> Result<FirewallConfig, String>
+where
+    Store: FirewallConfigStore,
+    Transform: FnOnce(Option<FirewallConfig>) -> Result<FirewallConfig, String>,
+{
+    let _guard = update_lock.lock().map_err(|_| {
+        format!(
+            "{} FIREWALL_CONFIG serialization lock poisoned; refusing shared-map write",
+            operation
+        )
+    })?;
+    let current = store
+        .read_key_zero()
+        .map_err(|error| format!("{}: {}", operation, error))?;
+    let expected = transform(current)?;
+    store
+        .write_key_zero(expected)
+        .map_err(|error| format!("{}: {}", operation, error))?;
+    let observed = store
+        .read_key_zero()
+        .map_err(|error| format!("{} readback: {}", operation, error))?
+        .ok_or_else(|| {
+            format!(
+                "{} FIREWALL_CONFIG full readback mismatch: expected {:?}, observed missing key 0",
+                operation, expected
+            )
+        })?;
+    if observed != expected {
+        return Err(format!(
+            "{} FIREWALL_CONFIG full readback mismatch: expected {:?}, observed {:?}",
+            operation, expected, observed
+        ));
+    }
+    Ok(observed)
 }
 
 fn tap_config_with_runtime_updates(
@@ -174,23 +328,20 @@ fn required_tap_config(
 
 pub fn set_acl_active_bank(runtime: TapMapRuntime<'_>, bank: u8) -> Result<(), String> {
     if runtime.tap_id == TAP_ID_UNASSIGNED {
-        let map_path = format!("{}/FIREWALL_CONFIG", runtime.pin_path);
-        let map_data = MapData::from_pin(&map_path)
-            .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
-        let mut map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(
-            aya::maps::Map::HashMap(map_data),
-        )
-        .map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
-        let current = required_firewall_config(
-            map.get(&0u32, 0),
-            false,
+        let mut store = PinnedFirewallConfigStore::open(Path::new(runtime.pin_path))?;
+        return serialized_firewall_config_rmw(
+            &FIREWALL_CONFIG_RMW_LOCK,
+            &mut store,
             "standalone active bank update",
-        )?
-        .expect("partial FIREWALL_CONFIG update requires an existing value");
-        let cfg = firewall_config_with_acl_bank(current, bank);
-        return map
-            .insert(&0u32, &cfg, 0)
-            .map_err(|e| format!("FIREWALL_CONFIG active bank insert: {:?}", e));
+            |current| {
+                let current = current.ok_or_else(|| {
+                    "standalone active bank update requires initialized FIREWALL_CONFIG key 0"
+                        .to_string()
+                })?;
+                Ok(firewall_config_with_acl_bank(current, bank))
+            },
+        )
+        .map(|_| ());
     }
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
@@ -297,6 +448,7 @@ pub fn update_runtime_config(
     })
 }
 
+#[cfg(test)]
 fn required_firewall_config(
     lookup: Result<FirewallConfig, aya::maps::MapError>,
     full_initialization: bool,
@@ -316,30 +468,229 @@ fn required_firewall_config(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ManagedFirewallConfigProofFacts {
+    runtime_tap_id: u32,
+    absolute_path: bool,
+    path_matches_managed_namespace: bool,
+    on_bpffs: bool,
+    has_symlink_component: bool,
+    root_owned: bool,
+    trusted_permissions: bool,
+    complete_inventory: bool,
+}
+
+fn validate_managed_firewall_config_proof_facts(
+    facts: &ManagedFirewallConfigProofFacts,
+) -> Result<(), String> {
+    let prefix = "managed FIREWALL_CONFIG authority rejected";
+    if facts.runtime_tap_id != TAP_ID_UNASSIGNED {
+        return Err(format!("{}: runtime must use unassigned tap_id 0", prefix));
+    }
+    if !facts.absolute_path {
+        return Err(format!("{}: authority paths must be absolute", prefix));
+    }
+    if !facts.path_matches_managed_namespace {
+        return Err(format!(
+            "{}: runtime path must match the authority's managed namespace",
+            prefix
+        ));
+    }
+    if facts.has_symlink_component {
+        return Err(format!(
+            "{}: symlink components are not trusted",
+            prefix
+        ));
+    }
+    if !facts.trusted_permissions {
+        return Err(format!(
+            "{}: group/world-writable permissions are not trusted",
+            prefix
+        ));
+    }
+    if !facts.root_owned {
+        return Err(format!("{}: root ownership is required", prefix));
+    }
+    if !facts.on_bpffs {
+        return Err(format!("{}: runtime is not on bpffs", prefix));
+    }
+    if !facts.complete_inventory {
+        return Err(format!(
+            "{}: complete managed map inventory is required",
+            prefix
+        ));
+    }
+    Ok(())
+}
+
+fn absolute_component_paths(path: &Path) -> Vec<PathBuf> {
+    let mut current = PathBuf::new();
+    let mut paths = Vec::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        paths.push(current.clone());
+    }
+    paths
+}
+
+fn path_is_bpffs(path: &Path) -> Result<bool, String> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        format!(
+            "managed FIREWALL_CONFIG authority rejected: path contains a NUL byte: {}",
+            path.display()
+        )
+    })?;
+    let mut stats = core::mem::MaybeUninit::<libc::statfs>::uninit();
+    let result = unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(format!(
+            "managed FIREWALL_CONFIG authority rejected: statfs failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok(stats.f_type == BPF_FS_MAGIC)
+}
+
+/// Proof that a root-only shared FIREWALL_CONFIG operation targets the
+/// authority-owned managed namespace. Fields stay private so callers cannot
+/// manufacture this capability from an arbitrary compatible map.
+pub struct ManagedFirewallConfigRuntime {
+    store: Mutex<PinnedFirewallConfigStore>,
+}
+
+impl core::fmt::Debug for ManagedFirewallConfigRuntime {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ManagedFirewallConfigRuntime")
+            .field("verified_store", &"FIREWALL_CONFIG[0]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Validate the real managed bpffs authority and mint a proof-carrying handle.
+/// This is validation, not an assume-managed constructor.
+pub fn prove_managed_firewall_config_runtime(
+    runtime: TapMapRuntime<'_>,
+    authority_base_pin_path: &str,
+) -> Result<ManagedFirewallConfigRuntime, String> {
+    let runtime_path = Path::new(runtime.pin_path);
+    let authority_base = Path::new(authority_base_pin_path);
+    let expected_runtime_path = authority_base.join(MANAGED_SHARED_PIN_NAMESPACE);
+    let clean_components = |path: &Path| {
+        !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    };
+
+    validate_managed_firewall_config_proof_facts(&ManagedFirewallConfigProofFacts {
+        runtime_tap_id: runtime.tap_id,
+        absolute_path: runtime_path.is_absolute() && authority_base.is_absolute(),
+        path_matches_managed_namespace: runtime_path == expected_runtime_path
+            && clean_components(runtime_path)
+            && clean_components(authority_base),
+        on_bpffs: true,
+        has_symlink_component: false,
+        root_owned: true,
+        trusted_permissions: true,
+        complete_inventory: true,
+    })?;
+
+    let mut has_symlink_component = false;
+    let mut root_owned = true;
+    let mut trusted_permissions = true;
+    for path in absolute_component_paths(runtime_path) {
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "managed FIREWALL_CONFIG authority rejected: inspect {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        has_symlink_component |= metadata.file_type().is_symlink();
+        root_owned &= metadata.uid() == 0;
+        trusted_permissions &= metadata.mode() & 0o022 == 0;
+    }
+
+    let mut complete_inventory = true;
+    for map_name in CRITICAL_NETWORK_MAP_NAMES {
+        let map_path = runtime_path.join(map_name);
+        match fs::symlink_metadata(&map_path) {
+            Ok(metadata) => {
+                has_symlink_component |= metadata.file_type().is_symlink();
+                root_owned &= metadata.uid() == 0;
+                trusted_permissions &= metadata.mode() & 0o022 == 0;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                complete_inventory = false;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "managed FIREWALL_CONFIG authority rejected: inspect {}: {}",
+                    map_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    validate_managed_firewall_config_proof_facts(&ManagedFirewallConfigProofFacts {
+        runtime_tap_id: runtime.tap_id,
+        absolute_path: true,
+        path_matches_managed_namespace: true,
+        on_bpffs: path_is_bpffs(runtime_path)?,
+        has_symlink_component,
+        root_owned,
+        trusted_permissions,
+        complete_inventory,
+    })?;
+
+    for map_name in CRITICAL_NETWORK_MAP_NAMES {
+        let map_path = runtime_path.join(map_name);
+        MapData::from_pin(&map_path).map_err(|error| {
+            format!(
+                "managed FIREWALL_CONFIG authority rejected: {} is not a readable managed BPF map: {:?}",
+                map_path.display(),
+                error
+            )
+        })?;
+    }
+    let mut store = PinnedFirewallConfigStore::open(runtime_path)?;
+    store.read_key_zero()?.ok_or_else(|| {
+        "managed FIREWALL_CONFIG authority rejected: FIREWALL_CONFIG key 0 is missing".to_string()
+    })?;
+
+    Ok(ManagedFirewallConfigRuntime {
+        store: Mutex::new(store),
+    })
+}
+
 /// Toggle the shared host ACL/conntrack maintenance gate and prove the write.
 pub fn set_acl_maintenance_bypass(
-    runtime: TapMapRuntime<'_>,
+    runtime: &ManagedFirewallConfigRuntime,
     enabled: bool,
 ) -> Result<(), String> {
-    let map_path = format!("{}/FIREWALL_CONFIG", runtime.pin_path);
-    let map_data =
-        MapData::from_pin(&map_path).map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
-    let mut map =
-        aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(aya::maps::Map::HashMap(map_data))
-            .map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
-    let current = required_firewall_config(
-        map.get(&0u32, 0),
-        false,
+    let mut store = runtime.store.lock().map_err(|_| {
+        "ACL maintenance bypass verified-map lock poisoned; refusing shared-map write".to_string()
+    })?;
+    serialized_firewall_config_rmw(
+        &FIREWALL_CONFIG_RMW_LOCK,
+        &mut *store,
         "ACL maintenance bypass update",
-    )?
-    .expect("partial FIREWALL_CONFIG update requires an existing value");
-    let updated = firewall_config_with_acl_maintenance_bypass(current, enabled);
-    map.insert(&0u32, &updated, 0)
-        .map_err(|e| format!("FIREWALL_CONFIG ACL maintenance bypass insert: {:?}", e))?;
-    let observed_result = map.get(&0u32, 0);
-    let observed = observed_result
-        .map_err(|e| format!("FIREWALL_CONFIG ACL maintenance bypass readback: {:?}", e))?;
-    verify_acl_maintenance_bypass_readback(observed, enabled)
+        |current| {
+            let current = current.ok_or_else(|| {
+                "ACL maintenance bypass update requires initialized FIREWALL_CONFIG key 0"
+                    .to_string()
+            })?;
+            Ok(firewall_config_with_acl_maintenance_bypass(
+                current, enabled,
+            ))
+        },
+    )
+    .map(|_| ())
 }
 
 /// Update FIREWALL_CONFIG map at runtime via pinned map.
@@ -354,86 +705,34 @@ pub fn update_firewall_config(
     tcprt_enabled: Option<bool>,
     ssl_enabled: Option<bool>,
 ) -> Result<(), String> {
-    let pin_path = runtime.pin_path;
-    let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
-    let map_data =
-        MapData::from_pin(&map_path).map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
-    let mut map =
-        aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(aya::maps::Map::HashMap(map_data))
-            .map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
-
-    let full_initialization = conntrack_enabled.is_some()
-        && monitoring_enabled.is_some()
-        && acl_enabled.is_some()
-        && qos_enabled.is_some()
-        && mirror_enabled.is_some()
-        && tcprt_enabled.is_some()
-        && ssl_enabled.is_some();
-    let operation = if full_initialization {
+    let patch = FirewallConfigPatch {
+        conntrack_enabled,
+        monitoring_enabled,
+        acl_enabled,
+        qos_enabled,
+        mirror_enabled,
+        tcprt_enabled,
+        ssl_enabled,
+    };
+    let operation = if patch.is_full_initialization() {
         "full initialization"
     } else {
         "partial update"
     };
-    let current = required_firewall_config(
-        map.get(&0u32, 0),
-        full_initialization,
-        operation,
-    )?;
-    let num_cpus_val = current.as_ref().map(|c| c.num_cpus).unwrap_or_else(|| {
-        let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        if raw > 0 {
-            raw as u16
-        } else {
-            1u16
-        }
-    });
-    let ct = conntrack_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.conntrack_enabled).unwrap_or(1));
-    let mon = monitoring_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.monitoring_enabled).unwrap_or(1));
-    let acl = acl_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.acl_enabled).unwrap_or(1));
-    let qos = qos_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.qos_enabled).unwrap_or(0));
-    let mir = mirror_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0));
-    let tcprt = tcprt_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(0));
-    let ssl = ssl_enabled
-        .map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.ssl_enabled).unwrap_or(0));
-    let acl_active_bank = current
-        .as_ref()
-        .map(|c| normalize_acl_bank(c.acl_active_bank))
-        .unwrap_or(ACL_BANK_PRIMARY);
-    let acl_maintenance_bypass = current
-        .as_ref()
-        .map(|c| c.acl_maintenance_bypass)
-        .unwrap_or(0);
-
-    let cfg = FirewallConfig {
-        conntrack_enabled: ct,
-        monitoring_enabled: mon,
-        num_cpus: num_cpus_val,
-        qos_enabled: qos,
-        acl_enabled: acl,
-        mirror_enabled: mir,
-        tcprt_enabled: tcprt,
-        ssl_enabled: ssl,
-        acl_active_bank,
-        acl_maintenance_bypass,
-        _pad: 0,
+    let raw_num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    let detected_num_cpus = if raw_num_cpus > 0 {
+        raw_num_cpus as u16
+    } else {
+        1u16
     };
-    map.insert(&0u32, &cfg, 0)
-        .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
-
-    Ok(())
+    let mut store = PinnedFirewallConfigStore::open(Path::new(runtime.pin_path))?;
+    serialized_firewall_config_rmw(
+        &FIREWALL_CONFIG_RMW_LOCK,
+        &mut store,
+        operation,
+        |current| firewall_config_with_runtime_updates(current, patch, detected_num_cpus),
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]
