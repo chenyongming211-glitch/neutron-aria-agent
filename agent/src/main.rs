@@ -30,7 +30,6 @@ mod kernel_drop_support;
 mod netlink;
 mod neutron_acl_ip;
 mod neutron_api;
-#[cfg(test)]
 mod neutron_maintenance;
 mod neutron_wal;
 mod openapi;
@@ -589,6 +588,121 @@ async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixLi
     Ok(listener)
 }
 
+async fn bind_admin_socket() -> Result<tokio::net::UnixListener, String> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("root privileges are required to bind the maintenance admin socket".to_string());
+    }
+    let socket_path = Path::new(neutron_maintenance::ADMIN_SOCKET_PATH);
+    let parent = socket_path
+        .parent()
+        .ok_or_else(|| "maintenance admin socket has no parent directory".to_string())?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "create maintenance admin socket directory {}: {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        format!(
+            "inspect maintenance admin socket directory {}: {}",
+            parent.display(),
+            error
+        )
+    })?;
+    if parent_metadata.file_type().is_symlink()
+        || !parent_metadata.file_type().is_dir()
+        || parent_metadata.uid() != 0
+    {
+        return Err(format!(
+            "maintenance admin socket directory must be root-owned and non-symlink: {}",
+            parent.display()
+        ));
+    }
+
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.file_type().is_socket()
+                || metadata.uid() != 0
+                || metadata.gid() != 0
+            {
+                return Err(format!(
+                    "refusing unsafe existing maintenance admin socket path {}",
+                    socket_path.display()
+                ));
+            }
+            std::fs::remove_file(socket_path).map_err(|error| {
+                format!(
+                    "remove stale maintenance admin socket {}: {}",
+                    socket_path.display(),
+                    error
+                )
+            })?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect maintenance admin socket {}: {}",
+                socket_path.display(),
+                error
+            ));
+        }
+    }
+
+    let listener = tokio::net::UnixListener::bind(socket_path).map_err(|error| {
+        format!(
+            "bind maintenance admin socket {}: {}",
+            socket_path.display(),
+            error
+        )
+    })?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).map_err(
+        |error| {
+            format!(
+                "chmod maintenance admin socket {}: {}",
+                socket_path.display(),
+                error
+            )
+        },
+    )?;
+    let c_path = CString::new(socket_path.as_os_str().as_bytes()).map_err(|_| {
+        format!(
+            "maintenance admin socket path contains NUL: {}",
+            socket_path.display()
+        )
+    })?;
+    if unsafe { libc::chown(c_path.as_ptr(), 0, 0) } != 0 {
+        return Err(format!(
+            "chown maintenance admin socket {}: {}",
+            socket_path.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(socket_path).map_err(|error| {
+        format!(
+            "verify maintenance admin socket {}: {}",
+            socket_path.display(),
+            error
+        )
+    })?;
+    neutron_maintenance::validate_admin_socket_facts(
+        &neutron_maintenance::AdminSocketFacts {
+            parent_is_directory: parent_metadata.file_type().is_dir(),
+            parent_is_symlink: parent_metadata.file_type().is_symlink(),
+            parent_uid: parent_metadata.uid(),
+            socket_is_socket: metadata.file_type().is_socket(),
+            socket_is_symlink: metadata.file_type().is_symlink(),
+            socket_uid: metadata.uid(),
+            socket_gid: metadata.gid(),
+            socket_mode: metadata.permissions().mode() & 0o777,
+        },
+    )?;
+    Ok(listener)
+}
+
 async fn serve_acl_runtime_schema_blocked(
     config: &Config,
     neutron_peer_auth: NeutronPeerAuth,
@@ -1089,18 +1203,41 @@ async fn main() {
         &resolved_ebpf.selected_path,
         &config.pin_path,
     ));
-    if let Err(e) = ssl_manager.ensure_loaded().await {
-        warn!(error = %e, "failed to initialize global SSL manager");
-    }
-    if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
-        warn!(error = %e, "failed to clean legacy SSL pins");
-    }
 
     let kernel_drop_manager = Arc::new(kernel_drop_manager::KernelDropManager::new(
         &resolved_ebpf.selected_path,
         &config.pin_path,
         &config.state_path,
     ));
+
+    // Create ControlPlane
+    let control_plane = Arc::new(control_plane::ControlPlane::new_with_fragment_tracking(
+        &resolved_ebpf.selected_path,
+        &config.pin_path,
+        &config.state_path,
+        ssl_manager.clone(),
+        kernel_drop_manager.clone(),
+        trace_manager,
+        fragment_tracking,
+    ));
+
+    let neutron_wal = Arc::new(neutron_wal::NeutronWal::new(&config.state_path));
+    let maintenance = Arc::new(neutron_maintenance::MaintenanceCoordinator::new(
+        neutron_wal.clone(),
+        control_plane.clone(),
+    ));
+    if config.neutron_socket_enabled() {
+        if let Err(error) = maintenance.recover_before_reconciliation().await {
+            error!(error = %error, "maintenance recovery blocked ordinary runtime reconciliation");
+        }
+    }
+
+    if let Err(e) = ssl_manager.ensure_loaded().await {
+        warn!(error = %e, "failed to initialize global SSL manager");
+    }
+    if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
+        warn!(error = %e, "failed to clean legacy SSL pins");
+    }
     if let Err(e) = kernel_drop_manager.ensure_loaded().await {
         warn!(error = %e, "failed to initialize kernel drop manager");
     } else {
@@ -1114,17 +1251,6 @@ async fn main() {
             "kernel drop manager ready"
         );
     }
-
-    // Create ControlPlane
-    let control_plane = Arc::new(control_plane::ControlPlane::new_with_fragment_tracking(
-        &resolved_ebpf.selected_path,
-        &config.pin_path,
-        &config.state_path,
-        ssl_manager.clone(),
-        kernel_drop_manager.clone(),
-        trace_manager,
-        fragment_tracking,
-    ));
 
     // Note: instances are registered by TapRegistry::attach when XDP is actually attached.
     // Pre-loading state files without XDP would expose stale data via the API.
@@ -1160,14 +1286,31 @@ async fn main() {
     } else {
         None
     };
+    let admin_listener = if config.neutron_socket_enabled() {
+        match bind_admin_socket().await {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                error!(error = %error, "failed to bind root-only maintenance admin API");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
     // Bind before starting background tasks so we fail before any interfaces are attached.
     let netlink_task = if let Some(link_monitor_mode) = config.link_monitor_mode() {
         let registry_clone = registry.clone();
+        let netlink_maintenance = maintenance.clone();
         Some(tokio::spawn(async move {
             loop {
                 if let Err(e) =
-                    netlink::monitor(registry_clone.clone(), link_monitor_mode).await
+                    netlink::monitor(
+                        registry_clone.clone(),
+                        link_monitor_mode,
+                        netlink_maintenance.clone(),
+                    )
+                    .await
                 {
                     warn!(mode = ?link_monitor_mode, error = %e, "netlink monitor failed; restarting");
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1193,6 +1336,7 @@ async fn main() {
     });
 
     let tc_health_cp = control_plane.clone();
+    let tc_health_maintenance = maintenance.clone();
     let tc_acl_health_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(
             TC_ACL_HEALTH_INTERVAL_SECS,
@@ -1201,11 +1345,15 @@ async fn main() {
         interval.tick().await;
         loop {
             interval.tick().await;
+            if tc_health_maintenance.is_active().await {
+                continue;
+            }
             let _ = tc_health_cp.reconcile_tc_acl_health().await;
         }
     });
 
     let ssl_reconcile_cp = control_plane.clone();
+    let ssl_reconcile_maintenance = maintenance.clone();
     let ssl_reconcile_task = tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(SSL_RECONCILE_INTERVAL_SECS));
@@ -1213,6 +1361,9 @@ async fn main() {
         interval.tick().await;
         loop {
             interval.tick().await;
+            if ssl_reconcile_maintenance.is_active().await {
+                continue;
+            }
             ssl_reconcile_cp.reconcile_ssl_runtime_state().await;
         }
     });
@@ -1225,13 +1376,16 @@ async fn main() {
         }
     });
 
-    let neutron_runtime = neutron_listener.map(|listener| {
+    let neutron_runtime = neutron_listener.zip(admin_listener).map(|(listener, admin_listener)| {
         let runtime = neutron_api::build_router(
             registry.clone(),
             control_plane.clone(),
             config.ovs_bridge.clone(),
+            neutron_wal.clone(),
+            maintenance.clone(),
         );
         let router = runtime.router;
+        let admin_router = runtime.admin_router;
         let background = runtime.background;
         let neutron_peer_auth = neutron_peer_auth.clone();
         let server = tokio::spawn(async move {
@@ -1243,7 +1397,16 @@ async fn main() {
                 error!(error = %e, "Neutron UDS API server stopped with error");
             }
         });
-        (server, background)
+        let admin_server = tokio::spawn(async move {
+            info!(
+                socket_path = neutron_maintenance::ADMIN_SOCKET_PATH,
+                "root-only maintenance admin API listening"
+            );
+            if let Err(error) = axum::serve(admin_listener, admin_router).await {
+                error!(error = %error, "maintenance admin UDS server stopped with error");
+            }
+        });
+        (server, admin_server, background)
     });
 
     info!("aria-agent running");
@@ -1264,8 +1427,9 @@ async fn main() {
         task.abort();
     }
     http_task.abort();
-    if let Some((server, background)) = neutron_runtime {
+    if let Some((server, admin_server, background)) = neutron_runtime {
         server.abort();
+        admin_server.abort();
         background.abort().await;
     }
     compact_task.abort();

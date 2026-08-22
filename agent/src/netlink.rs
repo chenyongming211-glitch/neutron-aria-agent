@@ -1,5 +1,6 @@
 use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::kernel_drop_manager::KERNEL_DROP_PIN_NAMESPACE;
+use crate::neutron_maintenance::{MaintenanceCoordinator, MaintenanceWriter};
 use crate::tap_registry::TapRegistry;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
@@ -103,7 +104,11 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
 }
 
 /// Reconcile registry with actual interfaces according to the monitor's authority mode.
-async fn reconcile(registry: &Arc<TapRegistry>, mode: LinkMonitorMode) {
+async fn reconcile(
+    registry: &Arc<TapRegistry>,
+    mode: LinkMonitorMode,
+    maintenance: &MaintenanceCoordinator,
+) {
     let existing = scan_existing_interfaces(registry).await;
     let existing_set = existing.iter().cloned().collect::<BTreeSet<_>>();
     let managed = registry.list().await;
@@ -111,6 +116,13 @@ async fn reconcile(registry: &Arc<TapRegistry>, mode: LinkMonitorMode) {
     if mode == LinkMonitorMode::AutoAttach {
         for iface in &existing {
             if !managed.contains(iface) {
+                if maintenance
+                    .admit_writer(MaintenanceWriter::Periodic, None)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
                 info!(instance = %iface, "reconcile detected unmanaged tap");
                 if let Err(e) = registry.link_ready(iface).await {
                     warn!(instance = %iface, error = %e, "reconcile failed to attach interface");
@@ -119,6 +131,13 @@ async fn reconcile(registry: &Arc<TapRegistry>, mode: LinkMonitorMode) {
         }
         for iface in &managed {
             if !existing_set.contains(iface) {
+                if maintenance
+                    .admit_writer(MaintenanceWriter::Periodic, None)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
                 info!(instance = %iface, "reconcile detected disappeared interface");
                 if let Err(e) = registry.link_deleted(iface, None).await {
                     warn!(instance = %iface, error = %e, "reconcile failed to detach interface");
@@ -131,6 +150,13 @@ async fn reconcile(registry: &Arc<TapRegistry>, mode: LinkMonitorMode) {
     let authoritative = registry.neutron_authority_names().await;
     for iface in &managed {
         if authoritative.contains(iface) && !existing_set.contains(iface) {
+            if maintenance
+                .admit_writer(MaintenanceWriter::Periodic, None)
+                .await
+                .is_err()
+            {
+                return;
+            }
             let (_, _, active_ifindex) = registry.link_observation_state(iface).await;
             info!(instance = %iface, "managed-only reconcile detected disappeared interface");
             if let Err(e) = registry.link_deleted(iface, active_ifindex).await {
@@ -146,6 +172,13 @@ async fn reconcile(registry: &Arc<TapRegistry>, mode: LinkMonitorMode) {
             (Some(active), Some(observed)) if active != observed
         );
         if !active || identity_changed {
+            if maintenance
+                .admit_writer(MaintenanceWriter::Periodic, None)
+                .await
+                .is_err()
+            {
+                return;
+            }
             info!(
                 instance = %iface,
                 active_ifindex = ?active_ifindex,
@@ -164,12 +197,21 @@ async fn reconcile(registry: &Arc<TapRegistry>, mode: LinkMonitorMode) {
 /// 2. Cleans orphaned pins
 /// 3. Listens for RTM_NEWLINK/RTM_DELLINK events
 /// 4. Periodically reconciles (every 60s) as a safety net
-pub async fn monitor(registry: Arc<TapRegistry>, mode: LinkMonitorMode) -> Result<(), String> {
+pub async fn monitor(
+    registry: Arc<TapRegistry>,
+    mode: LinkMonitorMode,
+    maintenance: Arc<MaintenanceCoordinator>,
+) -> Result<(), String> {
     // 1. Initial scan
     let existing = scan_existing_interfaces(&registry).await;
     info!(count = existing.len(), interfaces = ?existing, "initial netlink scan complete");
 
-    if mode == LinkMonitorMode::AutoAttach {
+    if mode == LinkMonitorMode::AutoAttach
+        && maintenance
+            .admit_writer(MaintenanceWriter::Background, None)
+            .await
+            .is_ok()
+    {
         if let Some(pin_path) = registry.base_pin_path.to_str() {
             cleanup_orphaned_pins(pin_path, &existing);
         } else {
@@ -183,8 +225,8 @@ pub async fn monitor(registry: Arc<TapRegistry>, mode: LinkMonitorMode) -> Resul
                 warn!(instance = %iface, error = %e, "startup attach failed");
             }
         }
-    } else {
-        reconcile(&registry, mode).await;
+    } else if mode == LinkMonitorMode::ManagedOnly {
+        reconcile(&registry, mode, &maintenance).await;
     }
 
     // 4. Set up netlink event listener with RTMGRP_LINK multicast subscription
@@ -212,7 +254,13 @@ pub async fn monitor(registry: Arc<TapRegistry>, mode: LinkMonitorMode) -> Resul
             msg = messages.next() => {
                 match msg {
                     Some((message, _)) => {
-                        handle_netlink_message(&registry, mode, message).await;
+                        if maintenance
+                            .admit_writer(MaintenanceWriter::Background, None)
+                            .await
+                            .is_ok()
+                        {
+                            handle_netlink_message(&registry, mode, &maintenance, message).await;
+                        }
                     }
                     None => {
                         warn!("netlink stream ended; restarting monitor");
@@ -221,7 +269,7 @@ pub async fn monitor(registry: Arc<TapRegistry>, mode: LinkMonitorMode) -> Resul
                 }
             }
             _ = reconcile_interval.tick() => {
-                reconcile(&registry, mode).await;
+                reconcile(&registry, mode, &maintenance).await;
             }
         }
     }
@@ -233,6 +281,7 @@ pub async fn monitor(registry: Arc<TapRegistry>, mode: LinkMonitorMode) -> Resul
 async fn handle_netlink_message(
     registry: &Arc<TapRegistry>,
     mode: LinkMonitorMode,
+    maintenance: &MaintenanceCoordinator,
     message: netlink_packet_core::NetlinkMessage<RouteNetlinkMessage>,
 ) {
     match message.payload {
@@ -256,6 +305,13 @@ async fn handle_netlink_message(
                     info!(instance = %name, "received netlink NewLink");
                     // Small delay to let the interface fully initialize
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    if maintenance
+                        .admit_writer(MaintenanceWriter::Background, None)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     if let Err(e) = registry.link_ready(&name).await {
                         warn!(instance = %name, error = %e, "failed to attach interface after NewLink");
                     }
@@ -279,6 +335,13 @@ async fn handle_netlink_message(
                     active,
                     authoritative,
                 ) {
+                    if maintenance
+                        .admit_writer(MaintenanceWriter::Background, None)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     info!(instance = %name, "received netlink DelLink");
                     if let Err(e) = registry.link_deleted(&name, Some(msg.header.index)).await {
                         warn!(instance = %name, error = %e, "failed to detach interface after DelLink");

@@ -101,6 +101,57 @@
   "counters_v1": true,
   "acl_ipv6_v1": true,
   "counters_v2": true,
+  "maintenance": {
+    "schema_version": 1,
+    "gate_capability_advertised": false,
+    "admin_socket": {
+      "path": "/run/aria/aria-admin.sock",
+      "mode": "0600",
+      "owner": "root:root",
+      "separate_from_neutron_socket": true,
+      "no_follow": true
+    },
+    "active_writer_rule": "only a full-host snapshot with the exact maintenance_operation_id may stage",
+    "readiness_rule": "maintenance bypass returns HTTP 503 and includes phase plus operation identity",
+    "error_codes": [
+      "maintenance_operation_mismatch",
+      "maintenance_requires_full_host",
+      "maintenance_operation_conflict",
+      "maintenance_recovery_blocked",
+      "maintenance_convergence_incomplete"
+    ],
+    "state_fields": [
+      "schema_version",
+      "operation_id",
+      "phase",
+      "active_domains",
+      "expected_generation",
+      "expected_desired_hash",
+      "applied_generation",
+      "applied_desired_hash",
+      "bypass_started_at_ms",
+      "last_progress_at_ms",
+      "last_error"
+    ],
+    "routes": [
+      {
+        "method": "POST",
+        "path": "/api/v1/admin/maintenance/enter"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/maintenance"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/admin/maintenance/exit"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/admin/maintenance/abort"
+      }
+    ]
+  },
   "routes": [
     {
       "method": "GET",
@@ -205,7 +256,17 @@
     },
     {
       "method": "PUT",
-      "path": "/api/v1/neutron/snapshot"
+      "path": "/api/v1/neutron/snapshot",
+      "request_schema_extension": {
+        "maintenance_operation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "required": false,
+          "maxLength": 128
+        }
+      }
     },
     {
       "method": "PUT",

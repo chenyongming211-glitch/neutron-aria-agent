@@ -7,6 +7,11 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+use crate::neutron_maintenance::{
+    decode_maintenance_record, replay_maintenance_records, MaintenanceReplay,
+    MaintenanceWalRecord,
+};
+
 const WAL_FILE: &str = "neutron-snapshot.wal";
 const NEUTRON_WAL_SOFT_BYTES: u64 = 16 * 1024 * 1024;
 const NEUTRON_WAL_HARD_BYTES: u64 = 64 * 1024 * 1024;
@@ -18,7 +23,9 @@ pub(crate) struct NeutronWalReplay {
     pub(crate) status: String,
     pub(crate) replayed: u64,
     pub(crate) failures: u64,
+    pub(crate) maintenance_failures: u64,
     pub(crate) pending_intent: Option<PendingNeutronIntent>,
+    pub(crate) maintenance: MaintenanceReplay,
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +34,8 @@ struct NeutronWalScan {
     pending_intent: Option<PendingNeutronIntent>,
     replayed: u64,
     failures: u64,
+    maintenance_failures: u64,
+    maintenance_records: Vec<MaintenanceWalRecord>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,6 +297,21 @@ enum NeutronWalEntry {
     DeleteCommit {
         state: NeutronWalState,
     },
+    Maintenance {
+        record: MaintenanceWalRecord,
+    },
+}
+
+fn looks_like_maintenance_entry(raw: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("type").cloned())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("maintenance")
+        || raw
+            .windows(b"\"type\":\"maintenance\"".len())
+            .any(|window| window == b"\"type\":\"maintenance\"")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -346,6 +370,8 @@ impl NeutronWal {
             pending_intent: None,
             replayed: 0,
             failures: 0,
+            maintenance_failures: 0,
+            maintenance_records: Vec::new(),
         };
 
         let file = match File::open(&self.path) {
@@ -376,11 +402,31 @@ impl NeutronWal {
                 Ok(entry) => entry,
                 Err(_) => {
                     scan.failures += 1;
+                    if looks_like_maintenance_entry(&record) {
+                        scan.maintenance_failures += 1;
+                    }
                     continue;
                 }
             };
             scan.replayed += 1;
             match entry {
+                NeutronWalEntry::Maintenance { record } => {
+                    let encoded = match serde_json::to_vec(&record) {
+                        Ok(encoded) => encoded,
+                        Err(_) => {
+                            scan.failures += 1;
+                            scan.maintenance_failures += 1;
+                            continue;
+                        }
+                    };
+                    match decode_maintenance_record(&encoded) {
+                        Ok(record) => scan.maintenance_records.push(record),
+                        Err(_) => {
+                            scan.failures += 1;
+                            scan.maintenance_failures += 1;
+                        }
+                    }
+                }
                 NeutronWalEntry::SnapshotIntent {
                     generation,
                     desired_hash,
@@ -545,8 +591,21 @@ impl NeutronWal {
             status: "empty".to_string(),
             replayed: scan.replayed,
             failures: scan.failures,
+            maintenance_failures: scan.maintenance_failures,
             pending_intent: None,
+            maintenance: MaintenanceReplay::default(),
         };
+
+        for end in 1..=scan.maintenance_records.len() {
+            match replay_maintenance_records(&scan.maintenance_records[..end]) {
+                Ok(maintenance) => replay.maintenance = maintenance,
+                Err(_) => {
+                    replay.failures += 1;
+                    replay.maintenance_failures += 1;
+                    break;
+                }
+            }
+        }
 
         if let Some(intent) = scan.pending_intent {
             replay.state.pending_generation = Some(intent.generation);
@@ -648,6 +707,12 @@ impl NeutronWal {
                 scan.failures
             ));
         }
+        replay_maintenance_records(&scan.maintenance_records).map_err(|error| {
+            format!(
+                "cannot compact Neutron WAL with maintenance replay failure: {}",
+                error
+            )
+        })?;
 
         let mut entries = Vec::new();
         if let Some(state) = scan.last_committed_state {
@@ -656,6 +721,11 @@ impl NeutronWal {
         if let Some(intent) = scan.pending_intent.as_ref() {
             entries.push(Self::entry_for_pending_intent(intent)?);
         }
+        entries.extend(
+            scan.maintenance_records
+                .into_iter()
+                .map(|record| NeutronWalEntry::Maintenance { record }),
+        );
 
         let mut bytes = Vec::new();
         for entry in entries {
@@ -821,6 +891,16 @@ impl NeutronWal {
         self.append(&NeutronWalEntry::DeleteCommit {
             state: state.with_status_hash()?,
         })
+    }
+
+    pub(crate) fn append_maintenance_record(
+        &self,
+        record: MaintenanceWalRecord,
+    ) -> Result<(), String> {
+        let encoded = serde_json::to_vec(&record)
+            .map_err(|error| format!("serialize maintenance WAL record: {}", error))?;
+        decode_maintenance_record(&encoded)?;
+        self.append(&NeutronWalEntry::Maintenance { record })
     }
 
     fn checkpoint_temp_path(&self) -> PathBuf {
@@ -1107,6 +1187,8 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria_api::{MaintenancePhase, MaintenanceState, MAINTENANCE_SCHEMA_VERSION};
+    use crate::neutron_maintenance::MAINTENANCE_WAL_RECORD_MAX_BYTES;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Serialize)]
@@ -1148,6 +1230,22 @@ mod tests {
             ifindex: None,
             managed_domains: vec!["acl".to_string()],
             domain_desired_hashes: BTreeMap::new(),
+        }
+    }
+
+    fn maintenance_state(operation_id: &str) -> MaintenanceState {
+        MaintenanceState {
+            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            operation_id: Some(operation_id.to_string()),
+            phase: MaintenancePhase::BypassPreparing,
+            active_domains: vec!["acl".to_string()],
+            expected_generation: 9,
+            expected_desired_hash: Some("sha256:g9".to_string()),
+            applied_generation: 9,
+            applied_desired_hash: Some("sha256:g9".to_string()),
+            bypass_started_at_ms: Some(100),
+            last_progress_at_ms: 100,
+            last_error: None,
         }
     }
 
@@ -2760,5 +2858,88 @@ mod tests {
         assert!(wal_bytes(&root).len() < legacy_len);
         assert_eq!(101, wal.replay().state.applied_generation);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_dangling_intent_replays_active_from_real_wal() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(
+            maintenance_state("op-real-wal"),
+        ))
+        .unwrap();
+
+        let replay = wal.replay();
+        assert_eq!(0, replay.failures);
+        assert!(replay.maintenance.requires_bypass);
+        assert_eq!(
+            replay.maintenance.state.operation_id.as_deref(),
+            Some("op-real-wal")
+        );
+        assert_eq!(
+            replay.maintenance.state.phase,
+            MaintenancePhase::MaintenanceBypass
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_duplicate_keeps_last_good_active_prefix() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let intent = MaintenanceWalRecord::enter_intent_state(maintenance_state("op-duplicate"));
+        wal.append_maintenance_record(intent.clone()).unwrap();
+        wal.append_maintenance_record(intent).unwrap();
+
+        let replay = wal.replay();
+        assert_eq!(1, replay.failures);
+        assert_eq!(1, replay.maintenance_failures);
+        assert!(replay.maintenance.requires_bypass);
+        assert_eq!(
+            replay.maintenance.state.operation_id.as_deref(),
+            Some("op-duplicate")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_unknown_malformed_and_oversized_records_fail_conservatively() {
+        for (case, invalid) in [
+            (
+                "unknown",
+                b"{\"type\":\"maintenance\",\"record\":{\"kind\":\"unknown\"}}\n".to_vec(),
+            ),
+            ("malformed", b"{\"type\":\"maintenance\",\"record\":\n".to_vec()),
+            (
+                "oversized",
+                format!(
+                    "{{\"type\":\"maintenance\",\"record\":{{\"kind\":\"enter_intent\",\"schema_version\":1,\"state\":{{\"schema_version\":1,\"operation_id\":\"op-large\",\"phase\":\"bypass_preparing\",\"active_domains\":[\"acl\"],\"expected_generation\":9,\"expected_desired_hash\":\"sha256:g9\",\"applied_generation\":9,\"applied_desired_hash\":\"sha256:g9\",\"bypass_started_at_ms\":100,\"last_progress_at_ms\":100,\"last_error\":\"{}\"}}}}}}\n",
+                    "x".repeat(MAINTENANCE_WAL_RECORD_MAX_BYTES + 1)
+                )
+                .into_bytes(),
+            ),
+        ] {
+            let root = temp_state_path().join(case);
+            let wal = NeutronWal::new(&root);
+            wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(
+                maintenance_state(&format!("op-prefix-{}", case)),
+            ))
+            .unwrap();
+            let mut bytes = wal_bytes(&root);
+            bytes.extend_from_slice(&invalid);
+            fs::write(root.join(WAL_FILE), bytes).unwrap();
+
+            let replay = wal.replay();
+            let expected_operation_id = format!("op-prefix-{}", case);
+            assert_eq!(1, replay.failures, "case={case}");
+            assert_eq!(1, replay.maintenance_failures, "case={case}");
+            assert!(replay.maintenance.requires_bypass, "case={case}");
+            assert_eq!(
+                replay.maintenance.state.operation_id.as_deref(),
+                Some(expected_operation_id.as_str()),
+                "case={case}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
     }
 }

@@ -1119,10 +1119,6 @@ impl PreparedManagedInstance {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 4 will consume the agent-owned maintenance authority")
-)]
 struct ManagedMaintenanceAuthorityFacts {
     configured_pin_path: PathBuf,
     configured_mode: TraceMapMode,
@@ -1189,13 +1185,11 @@ where
     })
 }
 
-#[expect(dead_code, reason = "Task 4 will consume this crate-private capability")]
 pub(crate) struct ManagedFirewallConfigAuthority {
     facts: ManagedMaintenanceAuthorityFacts,
     authority_seal: std::sync::Weak<()>,
 }
 
-#[expect(dead_code, reason = "Task 4 will invoke the maintenance setter")]
 struct ManagedFirewallConfigStore {
     pin_path: PathBuf,
     trace_mode: TraceMapMode,
@@ -1203,7 +1197,6 @@ struct ManagedFirewallConfigStore {
     map: Option<BpfHashMap<MapData, u32, FirewallConfig>>,
 }
 
-#[expect(dead_code, reason = "Task 4 will invoke the maintenance setter")]
 impl ManagedFirewallConfigStore {
     fn new(pin_path: PathBuf, trace_mode: TraceMapMode, expected_map_id: u32) -> Self {
         Self {
@@ -1292,7 +1285,6 @@ pub struct ControlPlane {
     trace_manager: Arc<TraceManager>,
     fragment_tracking: FragmentTrackingSettings,
     chains: RwLock<Vec<ServiceChain>>,
-    #[expect(dead_code, reason = "Task 4 will mint the maintenance authority")]
     maintenance_authority_seal: Arc<()>,
 }
 
@@ -4486,7 +4478,6 @@ impl ControlPlane {
         self.trace_manager.map_mode()
     }
 
-    #[expect(dead_code, reason = "Task 4 will mint the maintenance authority")]
     async fn current_managed_maintenance_authority_facts(
         &self,
     ) -> Result<ManagedMaintenanceAuthorityFacts, String> {
@@ -4497,7 +4488,6 @@ impl ControlPlane {
         )
     }
 
-    #[expect(dead_code, reason = "Task 4 will consume this crate-private minting boundary")]
     pub(crate) async fn mint_managed_maintenance_authority(
         &self,
     ) -> Result<ManagedFirewallConfigAuthority, String> {
@@ -4508,7 +4498,6 @@ impl ControlPlane {
         })
     }
 
-    #[expect(dead_code, reason = "Task 4 will invoke the maintenance setter")]
     pub(crate) async fn set_acl_maintenance_bypass(
         &self,
         authority: &ManagedFirewallConfigAuthority,

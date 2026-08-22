@@ -7,7 +7,9 @@ use aria_api::{
     NeutronStatusDomainEvidence, NeutronStatusDomainState, NeutronStatusEffectiveAction,
     NeutronStatusOverallReadiness, NeutronStatusPortEvidence, NeutronStatusRecoveryCause,
     NeutronStatusRequiredAction, NeutronStatusSupportDisposition, NeutronStatusTransactionState,
-    NeutronStatusV1Response, NEUTRON_COUNTERS_SCHEMA_VERSION, NEUTRON_STATUS_CONTRACT_HASH,
+    NeutronStatusV1Response, MaintenanceAbortRequest, MaintenanceEnterRequest,
+    MaintenanceExitRequest, MaintenanceResponse, NEUTRON_COUNTERS_SCHEMA_VERSION,
+    NEUTRON_STATUS_CONTRACT_HASH,
     NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
     NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
@@ -42,6 +44,10 @@ use crate::control_plane::{
 use crate::fault_injection;
 use crate::neutron_acl_ip::{acl_protocol, AclCidr, IpFamily};
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
+use crate::neutron_maintenance::{
+    MaintenanceConvergence, MaintenanceCoordinator, MaintenanceDisposition, MaintenanceError,
+    MaintenanceWriter,
+};
 use crate::tap_registry::{RuntimeReconcileResult, TapLifecycleEvent, TapRegistry};
 
 const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
@@ -72,6 +78,7 @@ pub(crate) struct NeutronApiState {
     apply_lock: Arc<Mutex<()>>,
     restore_ready: Arc<AtomicBool>,
     wal: Arc<NeutronWal>,
+    maintenance: Arc<MaintenanceCoordinator>,
     pending_recovery: Option<PendingNeutronIntent>,
     applied_port_snapshots: Arc<RwLock<BTreeMap<String, AppliedPortSnapshot>>>,
 }
@@ -544,12 +551,33 @@ impl IntentPortRecovery {
 }
 
 impl NeutronApiState {
+    #[cfg(test)]
     fn new(
         registry: Arc<TapRegistry>,
         control_plane: Arc<ControlPlane>,
         ovs_bridge: String,
     ) -> Self {
         let wal = Arc::new(NeutronWal::new(&registry.base_state_path));
+        let maintenance = Arc::new(MaintenanceCoordinator::new(
+            wal.clone(),
+            control_plane.clone(),
+        ));
+        Self::new_with_maintenance(
+            registry,
+            control_plane,
+            ovs_bridge,
+            wal,
+            maintenance,
+        )
+    }
+
+    fn new_with_maintenance(
+        registry: Arc<TapRegistry>,
+        control_plane: Arc<ControlPlane>,
+        ovs_bridge: String,
+        wal: Arc<NeutronWal>,
+        maintenance: Arc<MaintenanceCoordinator>,
+    ) -> Self {
         let replay = wal.replay();
         let pending_recovery = replay.pending_intent.clone();
         let runtime =
@@ -562,6 +590,7 @@ impl NeutronApiState {
             apply_lock: Arc::new(Mutex::new(())),
             restore_ready: Arc::new(AtomicBool::new(false)),
             wal,
+            maintenance,
             pending_recovery,
             applied_port_snapshots: Arc::new(RwLock::new(BTreeMap::new())),
         }
@@ -599,6 +628,9 @@ impl NeutronApiState {
     }
 
     async fn restore_neutron_authorities(&self) {
+        if self.maintenance.is_active().await {
+            return;
+        }
         let (ports, generation) = {
             let runtime = self.runtime.read().await;
             (
@@ -625,6 +657,9 @@ impl NeutronApiState {
     }
 
     async fn reconcile_committed_runtime(&self) {
+        if self.maintenance.is_active().await {
+            return;
+        }
         let _guard = self.apply_lock.lock().await;
         let (ports, generation, desired_hash) = {
             let runtime = self.runtime.read().await;
@@ -690,6 +725,9 @@ impl NeutronApiState {
     }
 
     async fn retry_committed_runtime_after_tap_return(&self) {
+        if self.maintenance.is_active().await {
+            return;
+        }
         let should_retry = {
             let runtime = self.runtime.read().await;
             let live_ifnames: BTreeSet<String> = runtime
@@ -708,6 +746,9 @@ impl NeutronApiState {
     }
 
     async fn replay_recreated_port(&self, ifname: &str, new_ifindex: u32) -> bool {
+        if self.maintenance.is_active().await {
+            return false;
+        }
         let runtime = self.runtime.read().await.clone();
         let replay = {
             let cache = self.applied_port_snapshots.read().await;
@@ -771,6 +812,9 @@ impl NeutronApiState {
     }
 
     async fn recover_incomplete_wal_intent(&self) {
+        if self.maintenance.is_active().await {
+            return;
+        }
         let Some(intent) = self.pending_recovery.clone() else {
             return;
         };
@@ -1019,6 +1063,9 @@ impl NeutronApiState {
     }
 
     async fn project_tc_acl_health(&self) {
+        if self.maintenance.is_active().await {
+            return;
+        }
         let _guard = self.apply_lock.lock().await;
         let health = self.control_plane.list_instance_runtime_health().await;
         let mut next_runtime = {
@@ -1037,6 +1084,9 @@ impl NeutronApiState {
     }
 
     async fn handle_tap_lifecycle_event(&self, event: TapLifecycleEvent) {
+        if self.maintenance.is_active().await {
+            return;
+        }
         match event {
             TapLifecycleEvent::Deleted { ifname, ifindex } => {
                 let _guard = self.apply_lock.lock().await;
@@ -1421,6 +1471,7 @@ fn build_recreated_port_replay_request(
             generation: entry.generation,
             desired_hash: entry.desired_hash.clone(),
             host: entry.host.clone(),
+            maintenance_operation_id: None,
             ports: vec![port],
         },
     ))
@@ -1484,6 +1535,7 @@ impl NeutronBackgroundTasks {
 
 pub(crate) struct NeutronRouterRuntime {
     pub(crate) router: Router,
+    pub(crate) admin_router: Router,
     pub(crate) background: NeutronBackgroundTasks,
 }
 
@@ -1510,6 +1562,8 @@ fn acl_runtime_schema_blocked_status(reason: String) -> NeutronStatusV1Response 
         wal_status: reason.clone(),
         wal_replay_failures: 0,
         authority_state: reason,
+        maintenance_phase: None,
+        maintenance_operation_id: None,
         managed_ports: Vec::new(),
         port_statuses: Vec::new(),
         active_instances: Vec::new(),
@@ -1576,18 +1630,185 @@ pub(crate) fn build_acl_runtime_schema_blocked_router(reason: String) -> Router 
         .with_state(state)
 }
 
+fn maintenance_convergence(runtime: &NeutronRuntimeState) -> MaintenanceConvergence {
+    let ready_enforce_port_count = runtime
+        .ports
+        .iter()
+        .filter(|(port_id, port)| {
+            let Some(status) = runtime.port_statuses.get(*port_id) else {
+                return false;
+            };
+            if status.status != "ready"
+                || status.generation != runtime.applied_generation
+                || status.desired_hash != runtime.applied_desired_hash
+            {
+                return false;
+            }
+            let manages_acl = port.managed_domains.iter().any(|domain| domain == "acl");
+            !manages_acl
+                || status.domains.iter().any(|domain| {
+                    domain.domain == "acl"
+                        && domain.status == "ready"
+                        && domain.effective_action.as_deref() == Some("enforce")
+                })
+        })
+        .count();
+    MaintenanceConvergence {
+        applied_generation: runtime.applied_generation,
+        applied_desired_hash: runtime.applied_desired_hash.clone(),
+        pending_generation: runtime.pending_generation,
+        managed_port_count: runtime.ports.len(),
+        ready_enforce_port_count,
+    }
+}
+
+fn maintenance_error_response(error: MaintenanceError) -> axum::response::Response {
+    let status = StatusCode::from_u16(error.http_status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (
+        status,
+        Json(serde_json::json!({
+            "error": error.code,
+            "details": error.details,
+        })),
+    )
+        .into_response()
+}
+
+async fn post_maintenance_enter(
+    State(state): State<NeutronApiState>,
+    Json(request): Json<MaintenanceEnterRequest>,
+) -> axum::response::Response {
+    let _guard = state.apply_lock.lock().await;
+    let convergence = maintenance_convergence(&state.runtime.read().await);
+    match state.maintenance.enter(request, convergence).await {
+        Ok((disposition, maintenance)) => {
+            let accepted = disposition == MaintenanceDisposition::Mutate;
+            let status = if accepted {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            (
+                status,
+                Json(MaintenanceResponse {
+                    status: if accepted { "accepted" } else { "active" }.to_string(),
+                    accepted,
+                    state: maintenance,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => maintenance_error_response(error),
+    }
+}
+
+async fn get_maintenance_status(
+    State(state): State<NeutronApiState>,
+) -> impl IntoResponse {
+    let maintenance = state.maintenance.status().await;
+    Json(MaintenanceResponse {
+        status: if state.maintenance.is_blocked() {
+            "blocked"
+        } else if maintenance.is_active() {
+            "active"
+        } else if maintenance.phase == aria_api::MaintenancePhase::Committed {
+            "committed"
+        } else {
+            "ready"
+        }
+        .to_string(),
+        accepted: false,
+        state: maintenance,
+    })
+}
+
+async fn post_maintenance_exit(
+    State(state): State<NeutronApiState>,
+    Json(request): Json<MaintenanceExitRequest>,
+) -> axum::response::Response {
+    let _guard = state.apply_lock.lock().await;
+    let convergence = maintenance_convergence(&state.runtime.read().await);
+    match state.maintenance.exit(request, convergence).await {
+        Ok((disposition, maintenance)) => Json(MaintenanceResponse {
+            status: "committed".to_string(),
+            accepted: disposition == MaintenanceDisposition::Mutate,
+            state: maintenance,
+        })
+        .into_response(),
+        Err(error) => maintenance_error_response(error),
+    }
+}
+
+async fn post_maintenance_abort(
+    State(state): State<NeutronApiState>,
+    Json(request): Json<MaintenanceAbortRequest>,
+) -> axum::response::Response {
+    let _guard = state.apply_lock.lock().await;
+    let convergence = maintenance_convergence(&state.runtime.read().await);
+    match state.maintenance.abort(request, convergence).await {
+        Ok((disposition, maintenance)) => Json(MaintenanceResponse {
+            status: if maintenance.is_active() {
+                "maintenance_bypass"
+            } else {
+                "committed"
+            }
+            .to_string(),
+            accepted: disposition == MaintenanceDisposition::Mutate,
+            state: maintenance,
+        })
+        .into_response(),
+        Err(error) => maintenance_error_response(error),
+    }
+}
+
+fn build_admin_router(state: NeutronApiState) -> Router {
+    let _ = crate::neutron_maintenance::admin_route_specs();
+    Router::new()
+        .route(
+            "/api/v1/admin/maintenance/enter",
+            post(post_maintenance_enter),
+        )
+        .route(
+            "/api/v1/admin/maintenance",
+            get(get_maintenance_status),
+        )
+        .route(
+            "/api/v1/admin/maintenance/exit",
+            post(post_maintenance_exit),
+        )
+        .route(
+            "/api/v1/admin/maintenance/abort",
+            post(post_maintenance_abort),
+        )
+        .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
+        .with_state(state)
+}
+
 pub(crate) fn build_router(
     registry: Arc<TapRegistry>,
     control_plane: Arc<ControlPlane>,
     ovs_bridge: String,
+    wal: Arc<NeutronWal>,
+    maintenance: Arc<MaintenanceCoordinator>,
 ) -> NeutronRouterRuntime {
     let mut lifecycle_rx = registry.subscribe_lifecycle();
-    let state = NeutronApiState::new(registry, control_plane, ovs_bridge);
+    let state = NeutronApiState::new_with_maintenance(
+        registry,
+        control_plane,
+        ovs_bridge,
+        wal,
+        maintenance,
+    );
     let restore_state = state.clone();
     let restore_task = tokio::spawn(async move {
-        restore_state.recover_incomplete_wal_intent().await;
-        restore_state.reconcile_committed_runtime().await;
-        restore_state.restore_neutron_authorities().await;
+        if !restore_state.maintenance.is_active().await {
+            restore_state.recover_incomplete_wal_intent().await;
+            restore_state.reconcile_committed_runtime().await;
+            restore_state.restore_neutron_authorities().await;
+        } else {
+            info!("maintenance bypass is active; ordinary Neutron restore is fenced");
+        }
         restore_state.mark_restore_ready();
         info!("Neutron runtime restore completed; mutating UDS routes are ready");
     });
@@ -1600,6 +1821,9 @@ pub(crate) fn build_router(
         interval.tick().await;
         loop {
             interval.tick().await;
+            if health_state.maintenance.is_active().await {
+                continue;
+            }
             health_state
                 .retry_committed_runtime_after_tap_return()
                 .await;
@@ -1610,7 +1834,11 @@ pub(crate) fn build_router(
     let lifecycle_task = tokio::spawn(async move {
         loop {
             match lifecycle_rx.recv().await {
-                Ok(event) => lifecycle_state.handle_tap_lifecycle_event(event).await,
+                Ok(event) => {
+                    if !lifecycle_state.maintenance.is_active().await {
+                        lifecycle_state.handle_tap_lifecycle_event(event).await;
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!(
                         skipped,
@@ -1645,9 +1873,11 @@ pub(crate) fn build_router(
             delete(delete_neutron_port),
         )
         .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
-        .with_state(state);
+        .with_state(state.clone());
+    let admin_router = build_admin_router(state);
     NeutronRouterRuntime {
         router,
+        admin_router,
         background: NeutronBackgroundTasks {
             restore_task,
             health_task,
@@ -1660,6 +1890,13 @@ async fn post_neutron_recover_pending(
     State(state): State<NeutronApiState>,
     Json(request): Json<NeutronRecoverPendingRequest>,
 ) -> impl IntoResponse {
+    if let Err(error) = state
+        .maintenance
+        .admit_writer(MaintenanceWriter::Direct, None)
+        .await
+    {
+        return maintenance_error_response(error);
+    }
     match recover_pending_snapshot(state, request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => (
@@ -2776,6 +3013,12 @@ async fn build_neutron_status_response(
     let counters_ports = include_counters.then(|| projected_ports.clone());
     drop(runtime);
 
+    let maintenance_fenced = state.maintenance.is_active().await;
+    let maintenance = state.maintenance.status().await;
+    let maintenance_phase = maintenance_fenced.then_some(maintenance.phase);
+    let maintenance_operation_id = maintenance_fenced
+        .then(|| maintenance.operation_id)
+        .flatten();
     let active_instances = state.registry.list().await;
     let mut response = NeutronStatusV1Response {
         status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
@@ -2794,6 +3037,8 @@ async fn build_neutron_status_response(
         wal_status,
         wal_replay_failures,
         authority_state,
+        maintenance_phase,
+        maintenance_operation_id,
         managed_ports,
         port_statuses: projection.port_statuses,
         active_instances,
@@ -2863,8 +3108,11 @@ async fn get_neutron_status_with_query(
 }
 
 async fn get_neutron_readiness(State(state): State<NeutronApiState>) -> impl IntoResponse {
+    let maintenance_active = state.maintenance.is_active().await;
     let response = build_neutron_status_response(&state, false).await;
-    let status = if response.overall_readiness == NeutronStatusOverallReadiness::Ready {
+    let status = if !maintenance_active
+        && response.overall_readiness == NeutronStatusOverallReadiness::Ready
+    {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -3003,6 +3251,14 @@ fn snapshot_retry_not_safe(details: impl Into<String>) -> SnapshotApplyError {
     }
 }
 
+fn maintenance_snapshot_error(error: MaintenanceError) -> SnapshotApplyError {
+    SnapshotApplyError {
+        status: StatusCode::from_u16(error.http_status).unwrap_or(StatusCode::CONFLICT),
+        code: error.code,
+        details: error.details,
+    }
+}
+
 fn validate_durable_partial_retry_barrier(
     state: &NeutronApiState,
     runtime: &NeutronRuntimeState,
@@ -3105,6 +3361,15 @@ async fn accept_neutron_snapshot_submit(
     scope: &ApplyScope,
 ) -> Result<SnapshotSubmitDecision, SnapshotApplyError> {
     validate_snapshot_preflight(scope, snapshot)?;
+    let writer = match scope {
+        ApplyScope::FullHost => MaintenanceWriter::FullHostSnapshot,
+        ApplyScope::SinglePort(_) => MaintenanceWriter::PortSnapshot,
+    };
+    state
+        .maintenance
+        .admit_writer(writer, snapshot.maintenance_operation_id.as_deref())
+        .await
+        .map_err(maintenance_snapshot_error)?;
     state.require_restore_ready()?;
     let requested_hash = snapshot.desired_hash.clone();
     if let PendingSnapshotDisposition::Deduplicated(mut response) = {
@@ -3125,6 +3390,11 @@ async fn accept_neutron_snapshot_submit(
         let lock_started = Instant::now();
         let observation_guard = state.apply_lock.clone().lock_owned().await;
         lock_wait_ms += elapsed_ms(lock_started);
+        state
+            .maintenance
+            .admit_writer(writer, snapshot.maintenance_operation_id.as_deref())
+            .await
+            .map_err(maintenance_snapshot_error)?;
         let observed_runtime = state.runtime.read().await.clone();
         match pending_snapshot_submit_disposition(
             &observed_runtime,
@@ -3616,6 +3886,21 @@ async fn apply_neutron_snapshot_for_scope(
         state
             .record_successful_snapshot(&snapshot, &scope, &committed_ports)
             .await;
+        if matches!(scope, ApplyScope::FullHost) {
+            state
+                .maintenance
+                .record_applied_snapshot(
+                    snapshot.maintenance_operation_id.as_deref(),
+                    snapshot.generation,
+                    requested_hash.clone(),
+                )
+                .await
+                .map_err(|error| SnapshotApplyError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    code: "maintenance_progress_commit_failed",
+                    details: error,
+                })?;
+        }
     }
     publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
         fault_injection::check("neutron.snapshot.after_commit")
@@ -5161,6 +5446,13 @@ async fn delete_neutron_port(
     State(state): State<NeutronApiState>,
     Path(port_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = state
+        .maintenance
+        .admit_writer(MaintenanceWriter::Delete, None)
+        .await
+    {
+        return maintenance_error_response(error);
+    }
     if let Err(error) = state.require_restore_ready() {
         return (
             error.status,
@@ -5453,6 +5745,22 @@ async fn apply_delete_neutron_port(
     port_id: String,
 ) -> (StatusCode, NeutronDeleteResponse) {
     let _guard = state.apply_lock.lock().await;
+    if let Err(error) = state
+        .maintenance
+        .admit_writer(MaintenanceWriter::Delete, None)
+        .await
+    {
+        return (
+            StatusCode::CONFLICT,
+            NeutronDeleteResponse {
+                port_id,
+                ifname: None,
+                detached: false,
+                status: "blocked".to_string(),
+                error: Some(error.code.to_string()),
+            },
+        );
+    }
     let previous = {
         let runtime = state.runtime.read().await;
         runtime.clone()
@@ -7960,6 +8268,7 @@ mod tests {
             generation: 70,
             desired_hash: Some("hash-70".to_string()),
             host: Some("compute-1".to_string()),
+            maintenance_operation_id: None,
             ports: vec![first.clone(), second.clone(), uncommitted],
         };
         let committed = BTreeMap::from([
@@ -7998,6 +8307,7 @@ mod tests {
             generation: 71,
             desired_hash: Some("hash-71".to_string()),
             host: Some("compute-1".to_string()),
+            maintenance_operation_id: None,
             ports: vec![first.clone()],
         };
         let scoped_committed = BTreeMap::from([(
@@ -8036,6 +8346,7 @@ mod tests {
             generation: 42,
             desired_hash: Some("host-hash".to_string()),
             host: Some("compute-1".to_string()),
+            maintenance_operation_id: None,
             ports: vec![snapshot_port],
         };
         let mut committed_port = managed_with_ifindex("target-port", "tap-target", 52);
@@ -8094,6 +8405,7 @@ mod tests {
             generation: 42,
             desired_hash: Some("host-hash".to_string()),
             host: Some("compute-1".to_string()),
+            maintenance_operation_id: None,
             ports: vec![snapshot_port],
         };
         let mut managed_port = managed_with_ifindex("target-port", "tap-target", 52);
@@ -8240,6 +8552,7 @@ mod tests {
             generation: 42,
             desired_hash: Some("host-hash".to_string()),
             host: Some("compute-1".to_string()),
+            maintenance_operation_id: None,
             ports: vec![snapshot_port],
         };
         let mut managed_port = managed_with_ifindex("second-port", "tap-second", 52);
@@ -9096,6 +9409,8 @@ mod tests {
             } else {
                 runtime.authority_state.clone()
             },
+            maintenance_phase: None,
+            maintenance_operation_id: None,
             managed_ports: runtime.ports.values().cloned().collect(),
             port_statuses: projection.port_statuses,
             active_instances: Vec::new(),
@@ -9335,6 +9650,7 @@ mod tests {
             generation,
             desired_hash: Some(format!("hash-{}", generation)),
             host: None,
+            maintenance_operation_id: None,
             ports,
         }
     }
@@ -9768,6 +10084,7 @@ mod tests {
             generation: 45,
             desired_hash: Some("hash-pending-45".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("committed-port", "tap-committed", true)],
         };
 
@@ -11056,6 +11373,7 @@ mod tests {
             generation: 1,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![
                 port("vm-port", "tap111", true),
                 NeutronPortSnapshot {
@@ -11095,6 +11413,7 @@ mod tests {
             generation: 2,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("kept-port", "tap-kept", true)],
         };
 
@@ -11119,6 +11438,7 @@ mod tests {
             generation: 3,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("vm-port", "tap-new", true)],
         };
 
@@ -11144,6 +11464,7 @@ mod tests {
             generation: 4,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("vm-port", "tap-vm", true)],
         };
 
@@ -11175,6 +11496,7 @@ mod tests {
             generation: 4,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 disposition: Some("device_owner network:dhcp".to_string()),
                 ..port("dhcp-port", "tap-dhcp", false)
@@ -11208,6 +11530,7 @@ mod tests {
             generation: 5,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 managed_domains: vec!["acl".to_string(), "qos".to_string()],
                 ..port("vm-port", "tap-vm", true)
@@ -11251,6 +11574,7 @@ mod tests {
             generation: 8,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 managed_domains: vec!["acl".to_string(), "qos".to_string()],
                 ..port("target-port", "tap-target", true)
@@ -11288,6 +11612,7 @@ mod tests {
             generation: 9,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -11320,6 +11645,7 @@ mod tests {
             generation: 10,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-new", true)],
         };
 
@@ -11355,6 +11681,7 @@ mod tests {
             generation: 11,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 disposition: Some("not_applicable_device_owner:network:dhcp".to_string()),
                 ..port("target-port", "tap-target", false)
@@ -11396,6 +11723,7 @@ mod tests {
             generation: 12,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("other-port", "tap-other", true)],
         };
 
@@ -11438,6 +11766,7 @@ mod tests {
             generation: 13,
             desired_hash: Some("scoped-hash".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 managed_domains: vec!["acl".to_string()],
                 ..port("target-port", "tap-target", true)
@@ -11479,6 +11808,7 @@ mod tests {
             generation: 14,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: Vec::new(),
         };
 
@@ -11503,6 +11833,7 @@ mod tests {
             generation: 15,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![
                 port("target-port", "tap-target", true),
                 port("other-port", "tap-other", true),
@@ -11529,6 +11860,7 @@ mod tests {
             generation: 16,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("other-port", "tap-other", true)],
         };
 
@@ -11556,6 +11888,7 @@ mod tests {
             generation: 17,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
         let plan = SnapshotPlan {
@@ -11607,6 +11940,7 @@ mod tests {
             generation: 18,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 managed_domains: vec!["acl".to_string()],
                 ..port("kept-port", "tap-kept", true)
@@ -11773,6 +12107,7 @@ mod tests {
             generation: 41,
             desired_hash: Some("hash-41".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
         let plan = SnapshotPlan {
@@ -12302,6 +12637,7 @@ mod tests {
             generation: 50,
             desired_hash: Some("hash-50".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("other-port", "tap-other", true)],
         };
 
@@ -12323,6 +12659,7 @@ mod tests {
             generation: 51,
             desired_hash: Some("hash-51".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: Vec::new(),
         };
 
@@ -12358,6 +12695,7 @@ mod tests {
                 generation: 0,
                 desired_hash: Some("hash-zero-full".to_string()),
                 host: None,
+                maintenance_operation_id: None,
                 ports: Vec::new(),
             }),
         )
@@ -12372,6 +12710,7 @@ mod tests {
                 generation: 0,
                 desired_hash: Some("hash-zero-scoped".to_string()),
                 host: None,
+                maintenance_operation_id: None,
                 ports: vec![port("target-port", "tap-target", true)],
             }),
         )
@@ -12410,6 +12749,7 @@ mod tests {
             generation: 59,
             desired_hash: Some("hash-59".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12461,6 +12801,7 @@ mod tests {
             generation: 61,
             desired_hash: Some("hash-61".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12531,6 +12872,7 @@ mod tests {
             generation: 63,
             desired_hash: Some("hash-63".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![target_snapshot],
         };
 
@@ -12568,6 +12910,7 @@ mod tests {
             generation: 70,
             desired_hash: Some("hash-new".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12593,6 +12936,7 @@ mod tests {
             generation: 80,
             desired_hash: Some("hash-80".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("other-port", "tap-other", true)],
         };
 
@@ -12634,6 +12978,7 @@ mod tests {
             generation: 89,
             desired_hash: Some("hash-89".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12680,6 +13025,7 @@ mod tests {
             generation: 100,
             desired_hash: Some("hash-new".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12718,6 +13064,7 @@ mod tests {
             generation: 111,
             desired_hash: Some("hash-110".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12751,6 +13098,7 @@ mod tests {
             generation: 110,
             desired_hash: Some("hash-110".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -12784,6 +13132,7 @@ mod tests {
             generation: 110,
             desired_hash: Some("different-hash".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -13149,6 +13498,7 @@ mod tests {
             generation: 121,
             desired_hash: Some("hash-121".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -13173,6 +13523,7 @@ mod tests {
             generation: 130,
             desired_hash: Some("hash-130".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -13220,6 +13571,7 @@ mod tests {
             generation: 131,
             desired_hash: Some("hash-131".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -14189,6 +14541,7 @@ mod tests {
             generation: 131,
             desired_hash: Some("hash-131".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("target-port", "tap-target", true)],
         };
 
@@ -16461,6 +16814,7 @@ mod tests {
             generation: 42,
             desired_hash: Some("hash-42".to_string()),
             host: None,
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 managed_domains: vec!["acl".to_string()],
                 ..port("vm-port", "", true)
@@ -16551,6 +16905,7 @@ mod tests {
             generation: 6,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![candidate],
         };
 
@@ -16581,6 +16936,7 @@ mod tests {
             generation: 7,
             desired_hash: None,
             host: None,
+            maintenance_operation_id: None,
             ports: vec![port("vm-port", "", true)],
         };
 

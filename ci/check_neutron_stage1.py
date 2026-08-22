@@ -30,6 +30,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "managed_projection_replay_mode_"],
     ["test", "--locked", "-p", "aria-agent", "maintenance_authority_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_maintenance_"],
+    ["test", "--locked", "-p", "aria-api", "neutron_maintenance_"],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_inventory_handoff_"],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_health_"],
     ["test", "--locked", "-p", "aria-agent", "managed_acl_shadow_"],

@@ -46,6 +46,109 @@ pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-3";
 pub const NEUTRON_COUNTERS_SCHEMA_VERSION: u32 = 2;
 pub const NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT: usize = 512;
 
+pub const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenancePhase {
+    #[default]
+    Ready,
+    BypassPreparing,
+    MaintenanceBypass,
+    Verifying,
+    Committed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct MaintenanceState {
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    pub phase: MaintenancePhase,
+    #[serde(default)]
+    pub active_domains: Vec<String>,
+    pub expected_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_desired_hash: Option<String>,
+    pub applied_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_desired_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass_started_at_ms: Option<u64>,
+    pub last_progress_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl MaintenanceState {
+    pub fn inactive() -> Self {
+        Self {
+            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            operation_id: None,
+            phase: MaintenancePhase::Ready,
+            active_domains: Vec::new(),
+            expected_generation: 0,
+            expected_desired_hash: None,
+            applied_generation: 0,
+            applied_desired_hash: None,
+            bypass_started_at_ms: None,
+            last_progress_at_ms: 0,
+            last_error: None,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.phase,
+            MaintenancePhase::BypassPreparing
+                | MaintenancePhase::MaintenanceBypass
+                | MaintenancePhase::Verifying
+        )
+    }
+}
+
+impl Default for MaintenanceState {
+    fn default() -> Self {
+        Self::inactive()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceEnterRequest {
+    pub operation_id: String,
+    pub domains: Vec<String>,
+    pub reason: String,
+    pub expected_applied_generation: u64,
+    #[serde(default)]
+    pub expected_desired_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceExitRequest {
+    pub operation_id: String,
+    pub expected_applied_generation: u64,
+    #[serde(default)]
+    pub expected_applied_desired_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceAbortRequest {
+    pub operation_id: String,
+    pub expected_phase: MaintenancePhase,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct MaintenanceResponse {
+    pub status: String,
+    pub accepted: bool,
+    pub state: MaintenanceState,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
     "generation": 101,
@@ -82,6 +185,9 @@ pub struct NeutronSnapshotRequest {
     #[serde(default)]
     #[schema(example = "compute-1.example.test")]
     pub host: Option<String>,
+    /// Required operation identity for full-host staging during maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_operation_id: Option<String>,
     /// Desired local port runtime state for this host.
     #[serde(default)]
     pub ports: Vec<NeutronPortSnapshot>,
@@ -713,6 +819,12 @@ pub struct NeutronStatusV1Response {
     pub wal_replay_failures: u64,
     #[serde(default)]
     pub authority_state: String,
+    /// Active maintenance phase, present only while the normal writer is fenced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_phase: Option<MaintenancePhase>,
+    /// Active host maintenance identity; never contains policy or credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_operation_id: Option<String>,
     pub managed_ports: Vec<ManagedNeutronPort>,
     #[serde(default)]
     pub port_statuses: Vec<NeutronStatusPortEvidence>,
@@ -2703,6 +2815,8 @@ mod tests {
             wal_status: "committed".to_string(),
             wal_replay_failures: 0,
             authority_state: "partial".to_string(),
+            maintenance_phase: None,
+            maintenance_operation_id: None,
             managed_ports: Vec::new(),
             port_statuses: Vec::new(),
             active_instances: Vec::new(),
@@ -2871,6 +2985,7 @@ mod tests {
             generation: 42,
             desired_hash: Some("hash-42".to_string()),
             host: Some("compute-1.example.test".to_string()),
+            maintenance_operation_id: None,
             ports: vec![NeutronPortSnapshot {
                 port_id: "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f".to_string(),
                 ifname: "tape607e86b-9e".to_string(),
