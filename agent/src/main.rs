@@ -897,6 +897,76 @@ struct PeerAuthDecision {
     reason: &'static str,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AdminPeerAuth;
+
+impl AdminPeerAuth {
+    fn production() -> Self {
+        Self
+    }
+
+    fn authorize(&self, cred: Option<UnixPeerCred>) -> PeerAuthDecision {
+        match cred {
+            Some(cred) if cred.uid == 0 && cred.gid == 0 => PeerAuthDecision {
+                allowed: true,
+                reason: "admin_root_peer",
+            },
+            Some(_) => PeerAuthDecision {
+                allowed: false,
+                reason: "ADMIN_PEER_NOT_ROOT",
+            },
+            None => PeerAuthDecision {
+                allowed: false,
+                reason: "ADMIN_PEERCRED_UNAVAILABLE",
+            },
+        }
+    }
+
+    fn audit_and_enforce(&self, stream: &mut tokio::net::UnixStream) {
+        let credential = read_peercred(stream);
+        self.audit_and_enforce_with_credential(stream, credential);
+    }
+
+    fn audit_and_enforce_with_credential(
+        &self,
+        stream: &mut tokio::net::UnixStream,
+        credential: Result<UnixPeerCred, String>,
+    ) -> PeerAuthDecision {
+        let (cred, error) = match credential {
+            Ok(cred) => (Some(cred), None),
+            Err(error) => (None, Some(error)),
+        };
+        let decision = self.authorize(cred);
+        if decision.allowed {
+            let cred = cred.expect("allowed admin peer has root credentials");
+            info!(
+                peer_pid = cred.pid,
+                peer_uid = cred.uid,
+                peer_gid = cred.gid,
+                authorization = decision.reason,
+                "accepted maintenance admin UDS peer"
+            );
+        } else {
+            warn!(
+                peer_pid = cred.map(|value| value.pid),
+                peer_uid = cred.map(|value| value.uid),
+                peer_gid = cred.map(|value| value.gid),
+                credential_error = error.as_deref(),
+                authorization = decision.reason,
+                "rejected maintenance admin UDS peer"
+            );
+            let rc = unsafe { libc::shutdown(stream.as_raw_fd(), libc::SHUT_RDWR) };
+            if rc != 0 {
+                warn!(
+                    error = %io::Error::last_os_error(),
+                    "failed to shutdown unauthorized admin UDS peer"
+                );
+            }
+        }
+        decision
+    }
+}
+
 #[derive(Clone, Debug)]
 struct NeutronPeerAuth {
     enforce: bool,
@@ -1087,6 +1157,21 @@ fn read_peercred(_stream: &tokio::net::UnixStream) -> Result<UnixPeerCred, Strin
     Err("SO_PEERCRED is not supported on this platform".to_string())
 }
 
+#[cfg(test)]
+async fn run_maintenance_first_startup<Recover, RecoverFuture, Mutate, MutateFuture>(
+    recover: Recover,
+    mutate: Mutate,
+) -> Result<(), String>
+where
+    Recover: FnOnce() -> RecoverFuture,
+    RecoverFuture: std::future::Future<Output = Result<(), String>>,
+    Mutate: FnOnce() -> MutateFuture,
+    MutateFuture: std::future::Future<Output = Result<(), String>>,
+{
+    recover().await?;
+    mutate().await
+}
+
 #[tokio::main]
 async fn main() {
     const SSL_RECONCILE_INTERVAL_SECS: u64 = 15;
@@ -1219,7 +1304,44 @@ async fn main() {
         warn!(path = %config.state_path, error = %e, "failed to create state directory");
     }
 
-    if config.mode == AgentMode::NeutronManaged {
+    let trace_manager = Arc::new(trace_backend::TraceManager::new(
+        resolved_ebpf.trace_backend,
+    ));
+
+    let ssl_manager = Arc::new(ssl_manager::SslManager::new(
+        &resolved_ebpf.selected_path,
+        &config.pin_path,
+    ));
+
+    let kernel_drop_manager = Arc::new(kernel_drop_manager::KernelDropManager::new(
+        &resolved_ebpf.selected_path,
+        &config.pin_path,
+        &config.state_path,
+    ));
+
+    // Create ControlPlane
+    let control_plane = Arc::new(control_plane::ControlPlane::new_with_fragment_tracking(
+        &resolved_ebpf.selected_path,
+        &config.pin_path,
+        &config.state_path,
+        ssl_manager.clone(),
+        kernel_drop_manager.clone(),
+        trace_manager,
+        fragment_tracking,
+    ));
+
+    let neutron_wal = Arc::new(neutron_wal::NeutronWal::new(&config.state_path));
+    let maintenance = Arc::new(neutron_maintenance::MaintenanceCoordinator::new(
+        neutron_wal.clone(),
+        control_plane.clone(),
+    ));
+    if config.neutron_socket_enabled() {
+        if let Err(error) = maintenance.recover_before_reconciliation().await {
+            error!(error = %error, "maintenance recovery blocked ordinary runtime reconciliation");
+        }
+    }
+
+    if config.mode == AgentMode::NeutronManaged && !maintenance.is_blocked() {
         let shared_pin_path = Path::new(&config.pin_path)
             .join(control_plane::MANAGED_SHARED_PIN_NAMESPACE);
         let activity = match acl_runtime_schema::inventory_managed_runtime_activity(
@@ -1277,43 +1399,8 @@ async fn main() {
                 return;
             }
         }
-    }
-
-    let trace_manager = Arc::new(trace_backend::TraceManager::new(
-        resolved_ebpf.trace_backend,
-    ));
-
-    let ssl_manager = Arc::new(ssl_manager::SslManager::new(
-        &resolved_ebpf.selected_path,
-        &config.pin_path,
-    ));
-
-    let kernel_drop_manager = Arc::new(kernel_drop_manager::KernelDropManager::new(
-        &resolved_ebpf.selected_path,
-        &config.pin_path,
-        &config.state_path,
-    ));
-
-    // Create ControlPlane
-    let control_plane = Arc::new(control_plane::ControlPlane::new_with_fragment_tracking(
-        &resolved_ebpf.selected_path,
-        &config.pin_path,
-        &config.state_path,
-        ssl_manager.clone(),
-        kernel_drop_manager.clone(),
-        trace_manager,
-        fragment_tracking,
-    ));
-
-    let neutron_wal = Arc::new(neutron_wal::NeutronWal::new(&config.state_path));
-    let maintenance = Arc::new(neutron_maintenance::MaintenanceCoordinator::new(
-        neutron_wal.clone(),
-        control_plane.clone(),
-    ));
-    if config.neutron_socket_enabled() {
-        if let Err(error) = maintenance.recover_before_reconciliation().await {
-            error!(error = %error, "maintenance recovery blocked ordinary runtime reconciliation");
-        }
+    } else if config.mode == AgentMode::NeutronManaged {
+        warn!("maintenance recovery blocked ACL runtime schema inventory and preparation");
     }
 
     if let Ok(_maintenance_lease) = maintenance
@@ -1509,6 +1596,10 @@ async fn main() {
                 socket_path = neutron_maintenance::ADMIN_SOCKET_PATH,
                 "root-only maintenance admin API listening"
             );
+            let admin_auth = AdminPeerAuth::production();
+            let admin_listener = admin_listener.tap_io(move |stream: &mut tokio::net::UnixStream| {
+                admin_auth.audit_and_enforce(stream);
+            });
             if let Err(error) = axum::serve(admin_listener, admin_router).await {
                 error!(error = %error, "maintenance admin UDS server stopped with error");
             }

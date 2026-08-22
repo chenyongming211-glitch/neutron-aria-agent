@@ -55,6 +55,7 @@ pub enum MaintenancePhase {
     Ready,
     BypassPreparing,
     MaintenanceBypass,
+    GateUnknown,
     Verifying,
     Committed,
 }
@@ -832,6 +833,9 @@ pub struct NeutronStatusV1Response {
     /// Server-derived action needed while maintenance blocks ordinary readiness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_action: Option<String>,
+    /// Server-derived ACL enforcement truth during maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl_enforcement: Option<String>,
     pub managed_ports: Vec<ManagedNeutronPort>,
     #[serde(default)]
     pub port_statuses: Vec<NeutronStatusPortEvidence>,
@@ -2826,6 +2830,7 @@ mod tests {
             maintenance_operation_id: None,
             maintenance_reason: None,
             maintenance_action: None,
+            acl_enforcement: None,
             managed_ports: Vec::new(),
             port_statuses: Vec::new(),
             active_instances: Vec::new(),

@@ -15,6 +15,8 @@ use crate::neutron_maintenance::{
 const WAL_FILE: &str = "neutron-snapshot.wal";
 const NEUTRON_WAL_SOFT_BYTES: u64 = 16 * 1024 * 1024;
 const NEUTRON_WAL_HARD_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_WAL_REPLAY_RECORDS: usize = 4096;
+const MAX_WAL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -286,6 +288,10 @@ enum NeutronWalEntry {
     SnapshotCommit {
         state: NeutronWalState,
     },
+    SnapshotMaintenanceCommit {
+        state: NeutronWalState,
+        maintenance: MaintenanceWalRecord,
+    },
     DeleteIntent {
         port_id: String,
         generation: u64,
@@ -312,6 +318,45 @@ fn looks_like_maintenance_entry(raw: &[u8]) -> bool {
         || raw
             .windows(b"\"type\":\"maintenance\"".len())
             .any(|window| window == b"\"type\":\"maintenance\"")
+}
+
+fn read_bounded_record<R: BufRead>(
+    reader: &mut R,
+    record: &mut Vec<u8>,
+) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok((total, false));
+        }
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(buffer.len(), |position| position + 1);
+        total = total.saturating_add(consumed);
+        if record.len().saturating_add(consumed) > MAX_WAL_RECORD_BYTES {
+            reader.consume(consumed);
+            if newline.is_none() {
+                loop {
+                    let remainder = reader.fill_buf()?;
+                    if remainder.is_empty() {
+                        break;
+                    }
+                    let next_newline = remainder.iter().position(|byte| *byte == b'\n');
+                    let drain = next_newline.map_or(remainder.len(), |position| position + 1);
+                    reader.consume(drain);
+                    if next_newline.is_some() {
+                        break;
+                    }
+                }
+            }
+            return Ok((total, true));
+        }
+        record.extend_from_slice(&buffer[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok((total, false));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -387,8 +432,13 @@ impl NeutronWal {
         let mut record = Vec::new();
         loop {
             record.clear();
-            match reader.read_until(b'\n', &mut record) {
-                Ok(0) => break,
+            match read_bounded_record(&mut reader, &mut record) {
+                Ok((0, false)) => break,
+                Ok((_, true)) => {
+                    scan.failures += 1;
+                    scan.maintenance_failures += 1;
+                    continue;
+                }
                 Ok(_) => {}
                 Err(_) => {
                     scan.failures += 1;
@@ -409,6 +459,11 @@ impl NeutronWal {
                 }
             };
             scan.replayed += 1;
+            if scan.replayed as usize > MAX_WAL_REPLAY_RECORDS {
+                scan.failures += 1;
+                scan.maintenance_failures += 1;
+                break;
+            }
             match entry {
                 NeutronWalEntry::Maintenance { record } => {
                     let encoded = match serde_json::to_vec(&record) {
@@ -578,6 +633,35 @@ impl NeutronWal {
                     scan.last_committed_state = Some(state);
                     scan.pending_intent = None;
                 }
+                NeutronWalEntry::SnapshotMaintenanceCommit { state, maintenance } => {
+                    if scan.pending_intent.as_ref().is_some_and(|intent| {
+                        intent.kind != "snapshot" || is_protected_inventory_intent(intent)
+                    })
+                        || !matches!(state.status_hash_valid(), Ok(true))
+                    {
+                        scan.failures += 1;
+                        scan.maintenance_failures += 1;
+                        continue;
+                    }
+                    let encoded = match serde_json::to_vec(&maintenance) {
+                        Ok(encoded) => encoded,
+                        Err(_) => {
+                            scan.failures += 1;
+                            scan.maintenance_failures += 1;
+                            continue;
+                        }
+                    };
+                    match decode_maintenance_record(&encoded) {
+                        Ok(record) => scan.maintenance_records.push(record),
+                        Err(_) => {
+                            scan.failures += 1;
+                            scan.maintenance_failures += 1;
+                            continue;
+                        }
+                    }
+                    scan.last_committed_state = Some(state);
+                    scan.pending_intent = None;
+                }
             }
         }
         scan
@@ -724,12 +808,17 @@ impl NeutronWal {
         if maintenance.state != aria_api::MaintenanceState::inactive()
             || maintenance.pending_transition.is_some()
             || maintenance.terminal_action.is_some()
+            || maintenance.gate_state
+                != crate::neutron_maintenance::MaintenanceGateState::Enforce
+            || maintenance.block_cause.is_some()
         {
             entries.push(NeutronWalEntry::Maintenance {
                 record: MaintenanceWalRecord::checkpoint(
                     maintenance.state,
                     maintenance.pending_transition,
                     maintenance.terminal_action,
+                    maintenance.gate_state,
+                    maintenance.block_cause,
                 ),
             });
         }
@@ -791,6 +880,17 @@ impl NeutronWal {
     pub(crate) fn append_snapshot_commit(&self, state: NeutronWalState) -> Result<(), String> {
         self.append(&NeutronWalEntry::SnapshotCommit {
             state: state.with_status_hash()?,
+        })
+    }
+
+    pub(crate) fn append_snapshot_commit_with_maintenance_progress(
+        &self,
+        state: NeutronWalState,
+        maintenance_state: aria_api::MaintenanceState,
+    ) -> Result<(), String> {
+        self.append(&NeutronWalEntry::SnapshotMaintenanceCommit {
+            state: state.with_status_hash()?,
+            maintenance: MaintenanceWalRecord::progress_commit_state(maintenance_state),
         })
     }
 
@@ -1082,7 +1182,8 @@ impl NeutronWal {
             .checked_add(entry_bytes)
             .ok_or_else(|| "Neutron WAL projected length overflow".to_string())?;
 
-        if projected_bytes <= self.limits.soft_bytes {
+        let record_limit_reached = self.scan().replayed as usize + 1 >= MAX_WAL_REPLAY_RECORDS;
+        if projected_bytes <= self.limits.soft_bytes && !record_limit_reached {
             return self.append_serialized(&bytes);
         }
 

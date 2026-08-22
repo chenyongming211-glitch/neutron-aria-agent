@@ -1591,6 +1591,7 @@ fn acl_runtime_schema_blocked_status(reason: String) -> NeutronStatusV1Response 
         maintenance_operation_id: None,
         maintenance_reason: None,
         maintenance_action: None,
+        acl_enforcement: None,
         managed_ports: Vec::new(),
         port_statuses: Vec::new(),
         active_instances: Vec::new(),
@@ -1758,9 +1759,10 @@ async fn post_maintenance_enter(
 async fn get_maintenance_status(
     State(state): State<NeutronApiState>,
 ) -> impl IntoResponse {
-    let maintenance = state.maintenance.audited_status().await;
+    let snapshot = state.maintenance.audited_snapshot().await;
+    let maintenance = snapshot.state;
     Json(MaintenanceResponse {
-        status: if state.maintenance.is_blocked() {
+        status: if snapshot.blocked {
             "blocked"
         } else if maintenance.is_active() {
             "active"
@@ -3103,8 +3105,11 @@ async fn build_neutron_status_response(
     let counters_ports = include_counters.then(|| projected_ports.clone());
     drop(runtime);
 
-    let maintenance_fenced = state.maintenance.is_active().await;
-    let maintenance = state.maintenance.status().await;
+    let maintenance_snapshot = state.maintenance.snapshot().await;
+    let maintenance_fenced = maintenance_snapshot.fenced;
+    let maintenance = maintenance_snapshot.state;
+    let maintenance_unknown = maintenance_snapshot.gate_state
+        == crate::neutron_maintenance::MaintenanceGateState::Unknown;
     let maintenance_phase = maintenance_fenced.then_some(maintenance.phase.clone());
     let maintenance_operation_id = maintenance_fenced
         .then(|| maintenance.operation_id.clone())
@@ -3118,7 +3123,9 @@ async fn build_neutron_status_response(
         } else {
             projection.transaction_state
         },
-        overall_readiness: if maintenance_fenced {
+        overall_readiness: if maintenance_unknown {
+            NeutronStatusOverallReadiness::Blocked
+        } else if maintenance_fenced {
             NeutronStatusOverallReadiness::Degraded
         } else {
             projection.overall_readiness
@@ -3142,9 +3149,25 @@ async fn build_neutron_status_response(
         maintenance_phase,
         maintenance_operation_id,
         maintenance_reason: maintenance_fenced
-            .then_some("planned_upgrade_bypass".to_string()),
+            .then(|| {
+                maintenance_snapshot.block_cause.clone().unwrap_or_else(|| {
+                    if maintenance_unknown {
+                        "maintenance_gate_unknown".to_string()
+                    } else {
+                        "planned_upgrade_bypass".to_string()
+                    }
+                })
+            }),
         maintenance_action: maintenance_fenced
             .then_some("complete_or_repair_maintenance".to_string()),
+        acl_enforcement: Some(
+            match maintenance_snapshot.gate_state {
+                crate::neutron_maintenance::MaintenanceGateState::Enforce => "enforce",
+                crate::neutron_maintenance::MaintenanceGateState::Bypass => "bypass",
+                crate::neutron_maintenance::MaintenanceGateState::Unknown => "unknown",
+            }
+            .to_string(),
+        ),
         managed_ports,
         port_statuses: projection.port_statuses,
         active_instances,
@@ -3214,9 +3237,8 @@ async fn get_neutron_status_with_query(
 }
 
 async fn get_neutron_readiness(State(state): State<NeutronApiState>) -> impl IntoResponse {
-    let maintenance_active = state.maintenance.is_active().await;
     let response = build_neutron_status_response(&state, false).await;
-    let status = if !maintenance_active
+    let status = if response.maintenance_phase.is_none()
         && response.overall_readiness == NeutronStatusOverallReadiness::Ready
     {
         StatusCode::OK
@@ -3976,10 +3998,31 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_started = Instant::now();
-    if let Err(e) = state
-        .wal
-        .append_snapshot_commit(next_runtime.to_wal_state())
-    {
+    let maintenance_progress = if !has_error && matches!(scope, ApplyScope::FullHost) {
+        state
+            .maintenance
+            .prepare_applied_snapshot(
+                snapshot.maintenance_operation_id.as_deref(),
+                snapshot.generation,
+                requested_hash.clone(),
+            )
+            .await
+            .map_err(|error| SnapshotApplyError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "maintenance_progress_prepare_failed",
+                details: error,
+            })?
+    } else {
+        None
+    };
+    let wal_commit = match maintenance_progress.as_ref() {
+        Some(progress) => state.wal.append_snapshot_commit_with_maintenance_progress(
+            next_runtime.to_wal_state(),
+            progress.clone(),
+        ),
+        None => state.wal.append_snapshot_commit(next_runtime.to_wal_state()),
+    };
+    if let Err(e) = wal_commit {
         let blocked = recover_failed_snapshot_transaction(
             &state,
             &intent,
@@ -3996,26 +4039,14 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
+    if let Some(progress) = maintenance_progress {
+        state.maintenance.install_applied_snapshot(progress).await;
+    }
     let committed_ports = next_runtime.ports.clone();
     if !has_error {
         state
             .record_successful_snapshot(&snapshot, &scope, &committed_ports)
             .await;
-        if matches!(scope, ApplyScope::FullHost) {
-            state
-                .maintenance
-                .record_applied_snapshot(
-                    snapshot.maintenance_operation_id.as_deref(),
-                    snapshot.generation,
-                    requested_hash.clone(),
-                )
-                .await
-                .map_err(|error| SnapshotApplyError {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    code: "maintenance_progress_commit_failed",
-                    details: error,
-                })?;
-        }
     }
     publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
         fault_injection::check("neutron.snapshot.after_commit")
@@ -9533,6 +9564,7 @@ mod tests {
             maintenance_operation_id: None,
             maintenance_reason: None,
             maintenance_action: None,
+            acl_enforcement: None,
             managed_ports: runtime.ports.values().cloned().collect(),
             port_statuses: projection.port_statuses,
             active_instances: Vec::new(),

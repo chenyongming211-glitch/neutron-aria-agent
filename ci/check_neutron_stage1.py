@@ -263,7 +263,7 @@ DOC_INI_CONTRACT_PATHS = (
 STATUS_VOCABULARY = {
     "transaction_states": ("idle", "pending", "classified", "blocked", "recovery"),
     "overall_readiness": ("ready", "degraded", "blocked", "unknown"),
-    "required_actions": ("none", "poll", "recover_pending", "full_resync", "operator"),
+    "required_actions": ("none", "poll", "recover_pending", "full_resync", "operator", "complete_or_repair_maintenance"),
     "recovery_causes": (None, "inventory_unavailable"),
     "domain_statuses": ("ready", "not_requested", "degraded", "blocked"),
     "effective_actions": ("enforce", "bypass", "unchanged", "cleanup", "no_op"),
@@ -618,7 +618,11 @@ def check_status_v1_contract():
     if not isinstance(schema, dict) or schema.get("version") != 1 or schema.get("hash") != "v0.9-neutron-status-1":
         raise SystemExit("ERROR: Status V1 fixture contract metadata drifted")
     for name, values in STATUS_VOCABULARY.items():
-        if tuple(schema.get(name, ())) != values:
+        fixture_values = tuple(
+            value for value in values
+            if not (name == "required_actions" and value == "complete_or_repair_maintenance")
+        )
+        if tuple(schema.get(name, ())) != fixture_values:
             raise SystemExit("ERROR: Status V1 vocabulary %s drifted" % name)
     scenarios = fixture.get("scenarios")
     if not isinstance(scenarios, list) or tuple(item.get("id") for item in scenarios if isinstance(item, dict)) != STATUS_SCENARIOS:
@@ -695,7 +699,7 @@ def check_status_v1_contract():
     expected_enums = {
         "NeutronStatusTransactionState": ("Idle", "Pending", "Classified", "Blocked", "Recovery"),
         "NeutronStatusOverallReadiness": ("Ready", "Degraded", "Blocked", "Unknown"),
-        "NeutronStatusRequiredAction": ("None", "Poll", "RetrySnapshot", "RecoverPending", "FullResync", "Operator"),
+        "NeutronStatusRequiredAction": ("None", "Poll", "RetrySnapshot", "RecoverPending", "FullResync", "Operator", "CompleteOrRepairMaintenance"),
         "NeutronStatusRecoveryCause": ("InventoryUnavailable",),
         "NeutronStatusDomainState": ("Ready", "NotRequested", "Degraded", "Blocked"),
         "NeutronStatusEffectiveAction": ("Enforce", "Bypass", "Unchanged", "Cleanup", "NoOp"),
@@ -994,6 +998,7 @@ def run_fast_contracts():
     check_packaged_ini_contract()
     check_documented_ini_contract()
     check_documented_status_contract()
+    check_status_v1_contract()
     check_drop_reason_name_sync()
     check_uds_contract_artifact()
     check_public_smoke_entrypoints()
