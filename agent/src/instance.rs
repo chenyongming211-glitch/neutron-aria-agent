@@ -501,6 +501,7 @@ enum RuntimeInventoryStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(dead_code, reason = "Task 4 will consume the managed runtime identity")]
 pub(crate) struct ManagedMaintenanceRuntimeIdentity {
     pub trace_map_mode: TraceMapMode,
     pub owner_program_ids: Vec<u32>,
@@ -524,6 +525,7 @@ fn runtime_metadata_is_from_prior_boot(
 }
 
 impl FirewallInstance {
+    #[expect(dead_code, reason = "Task 4 will mint the maintenance authority")]
     pub(crate) fn managed_maintenance_runtime_identity(
         &self,
         ebpf_path: &str,
