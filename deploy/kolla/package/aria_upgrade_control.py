@@ -47,9 +47,9 @@ REQUIRED_IMAGES = ("neutron-aria-agent", "aria-datapath")
 UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 
 ALLOWED = {
-    "preflight": ("quiescing", "failed_before_mutation"),
+    "preflight": ("quiescing", "agent_upgrading", "failed_before_mutation"),
     "quiescing": ("bypass_preparing",),
-    "bypass_preparing": ("bypass_confirmed",),
+    "bypass_preparing": ("bypass_confirmed", "maintenance_bypass"),
     "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
     "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
     "datapath_live": ("agent_upgrading", "maintenance_bypass"),
@@ -123,7 +123,7 @@ COORDINATOR_LEDGER_FIELDS = frozenset(
     )
 )
 EXTERNAL_EVIDENCE_FIELDS = EVIDENCE_FIELDS - COORDINATOR_LEDGER_FIELDS
-UPGRADE_CLASSES = frozenset(("planned_maintenance",))
+UPGRADE_CLASSES = frozenset(("planned_maintenance", "hot_agent"))
 SAFE_EVIDENCE_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 RFC3339_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
@@ -449,6 +449,26 @@ class UpgradeLedger(object):
                 {}, "recovered", phase,
                 {"recovery_action": "resume_exact_phase"},
             )
+        except Exception:
+            if acquired_here:
+                self.close()
+            raise
+
+    def inspect(self, operation_id):
+        """Read one trusted ledger without changing its recovery phase."""
+        operation_id = self._validate_operation_id(operation_id)
+        acquired_here = self._lock_fd is None
+        try:
+            self._acquire_lock()
+            self._ensure_operations_dir()
+            path = self._ledger_path(operation_id)
+            if not self._ledger_exists(path):
+                raise UpgradeLedgerError("operation ledger does not exist")
+            state = self._read_ledger(path, operation_id)
+            self._fsync_operations_dir()
+            self._set_current(path, state)
+            self._validate_lock_binding()
+            return self.state
         except Exception:
             if acquired_here:
                 self.close()
@@ -1482,6 +1502,11 @@ def parse_args(argv=None):
     classify.add_argument("--current", type=Path, required=True)
     classify.add_argument("--candidate", type=Path, required=True)
     classify.add_argument("--force-maintenance", action="store_true")
+    ledger = command.add_parser("ledger", help="mutate one trusted host ledger")
+    ledger.add_argument(
+        "action", choices=("begin", "transition", "fail", "recover", "status")
+    )
+    ledger.add_argument("values", nargs="*")
     return parser.parse_args(argv)
 
 
@@ -1493,8 +1518,53 @@ def _print_result(result):
     ))
 
 
+def _ledger_result(args):
+    operations_dir = Path(os.environ.get(
+        "ARIA_RELEASE_OPERATIONS_DIR", str(DEFAULT_OPERATIONS_DIR)
+    ))
+    lock_path = Path(os.environ.get(
+        "ARIA_RELEASE_LOCK_PATH", str(DEFAULT_LOCK_PATH)
+    ))
+    owner_uid = os.geteuid()
+    values = args.values
+    with UpgradeLedger(
+        operations_dir=operations_dir,
+        lock_path=lock_path,
+        owner_uid=owner_uid,
+        trusted_gid=os.getegid(),
+    ) as ledger:
+        if args.action == "begin" and len(values) == 4:
+            operation_id, host, upgrade_class, evidence_json = values
+            return ledger.begin(
+                operation_id,
+                host=host,
+                upgrade_class=upgrade_class,
+                evidence=json.loads(evidence_json),
+            )
+        if args.action == "transition" and len(values) == 4:
+            expected, next_phase, operation_id, evidence_json = values
+            ledger.inspect(operation_id)
+            return ledger.transition(expected, next_phase, json.loads(evidence_json))
+        if args.action == "fail" and len(values) == 3:
+            expected, operation_id, error = values
+            ledger.inspect(operation_id)
+            return ledger.fail(expected, error)
+        if args.action == "recover" and len(values) == 1:
+            return ledger.recover(values[0])
+        if args.action == "status" and len(values) == 1:
+            return ledger.inspect(values[0])
+    raise ValueError("ledger action arguments are invalid")
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.command == "ledger":
+        try:
+            print(json.dumps(_ledger_result(args), sort_keys=True, separators=(",", ":")))
+            return 0
+        except (OSError, ValueError, UpgradeLedgerError) as error:
+            print("ledger error: %s" % error, file=os.sys.stderr)
+            return 1
     if args.command != "classify":
         _print_result(_unknown())
         return 0

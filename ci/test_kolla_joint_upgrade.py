@@ -108,7 +108,6 @@ set -eu
 printf 'curl %s\n' "$*" >>"$TRACE_FILE"
 args=" $* "
 if [[ "$args" == *"/maintenance/enter"* ]]; then
-  [ "${FAIL_AT:-}" != after_bypass ] || exit 41
   printf bypass >"$API_STATE"
   printf '{"accepted":true,"operation_id":"%s","maintenance_token":"token-7"}\n' "$OPERATION_ID"
 elif [[ "$args" == *"/full-resync"* ]]; then
@@ -126,6 +125,7 @@ elif [[ "$args" == *"/readyz"* ]]; then
 else
   state=baseline
   [ ! -f "$API_STATE" ] || state=$(cat "$API_STATE")
+  if [ "$state" = bypass ] && [ "${FAIL_AT:-}" = after_bypass ]; then exit 41; fi
   if [ "$state" = baseline ]; then
     printf '{"accepted_generation":41,"applied_generation":41,"pending_generation":null,"desired_hash":"%s","managed_port_ids":["tap-a","tap-b"],"overall_readiness":"ready"}\n' "$OLD_HASH"
   elif [ "$state" = active ]; then
@@ -313,8 +313,10 @@ printf '%s %s\n' "$component" "$action" >>"$TRACE_FILE"
                 trace = self.read_trace()
                 self.assertNotIn("docker restart", trace)
                 self.assertNotIn("ovs-vsctl", trace)
-                if phase == "maintenance_bypass":
+                if phase == "maintenance_bypass" and fail_at != "activation":
                     self.assertNotIn("/maintenance/exit", trace)
+                if fail_at == "activation":
+                    self.assertEqual(1, trace.count("/maintenance/exit"), trace)
 
     def test_resume_from_maintenance_restarts_at_resync_without_replacement(self):
         self.run_joint("install", fail_at="resync", expected=1)

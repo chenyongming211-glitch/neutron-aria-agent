@@ -28,6 +28,8 @@ AGENT_RUNTIME_USER="${AGENT_RUNTIME_USER:-neutron}"
 DETACH_ATTEMPTS="${DETACH_ATTEMPTS:-30}"
 DETACH_INTERVAL="${DETACH_INTERVAL:-1.0}"
 FORCE_RUNTIME_MIGRATION="${FORCE_RUNTIME_MIGRATION:-false}"
+JOINT_MAINTENANCE_MODE="${JOINT_MAINTENANCE_MODE:-false}"
+OPERATION_ID="${OPERATION_ID:-}"
 
 usage() {
     cat <<'EOF'
@@ -683,6 +685,14 @@ switch_to_candidate() {
 }
 
 verify_candidate_convergence() {
+    if [ "${JOINT_MAINTENANCE_MODE}" = "true" ]; then
+        curl -fsS "${HEALTH_URL%/api/v1/health}/livez" >/dev/null || return 1
+        docker exec -u "${AGENT_RUNTIME_USER}" "${AGENT_SERVICE}" curl -fsS \
+            --unix-socket /run/aria/aria-admin.sock \
+            http://localhost/api/v1/admin/maintenance | \
+            grep -q "\"operation_id\":\"${OPERATION_ID}\""
+        return $?
+    fi
     verify_running_candidate
 }
 
@@ -693,6 +703,10 @@ verify_rollback_convergence() {
         log "rollback restored an unexpected image"
         return 1
     }
+    if [ "${JOINT_MAINTENANCE_MODE}" = "true" ]; then
+        verify_candidate_convergence || return 1
+        return 0
+    fi
     wait_ready || return 1
     verify_generation_convergence || return 1
     wait_agent_healthy || return 1
@@ -971,6 +985,16 @@ main() {
     validate_name "${OVS_AGENT_SERVICE}"
 
     case "${1:-}" in
+        prepare)
+            [ -n "${IMAGE_REF}" ] || die "IMAGE_REF is required"
+            [ -n "${EXPECTED_IMAGE_ID}" ] || die "EXPECTED_IMAGE_ID is required"
+            docker image inspect "${IMAGE_REF}" >/dev/null
+            [ "$(docker image inspect -f '{{.Id}}' "${IMAGE_REF}")" = "${EXPECTED_IMAGE_ID}" ] ||
+                die "loaded image ID mismatch"
+            ;;
+        replace) install_candidate ;;
+        verify) verify_candidate_convergence ;;
+        restore) rollback_candidate ;;
         install) install_candidate ;;
         check) check_candidate ;;
         rollback) rollback_candidate ;;

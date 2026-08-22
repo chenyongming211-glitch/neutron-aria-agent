@@ -522,9 +522,9 @@ class UpgradeLedgerTest(unittest.TestCase):
         control = self.control()
         self.assertEqual(
             {
-                "preflight": ("quiescing", "failed_before_mutation"),
+                "preflight": ("quiescing", "agent_upgrading", "failed_before_mutation"),
                 "quiescing": ("bypass_preparing",),
-                "bypass_preparing": ("bypass_confirmed",),
+                "bypass_preparing": ("bypass_confirmed", "maintenance_bypass"),
                 "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
                 "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
                 "datapath_live": ("agent_upgrading", "maintenance_bypass"),
@@ -543,9 +543,9 @@ class UpgradeLedgerTest(unittest.TestCase):
     def test_every_authoritative_edge_persists_and_every_other_edge_is_rejected(self):
         control = self.control()
         authoritative = {
-            "preflight": ("quiescing", "failed_before_mutation"),
+            "preflight": ("quiescing", "agent_upgrading", "failed_before_mutation"),
             "quiescing": ("bypass_preparing",),
-            "bypass_preparing": ("bypass_confirmed",),
+            "bypass_preparing": ("bypass_confirmed", "maintenance_bypass"),
             "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
             "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
             "datapath_live": ("agent_upgrading", "maintenance_bypass"),
@@ -1975,12 +1975,10 @@ class UpgradeLedgerTest(unittest.TestCase):
             ledger.transition("preflight", "quiescing", {})
             ledger.transition("quiescing", "bypass_preparing", {})
             failed = ledger.fail("bypass_preparing", "preparation paused")
-            self.assertEqual("bypass_preparing", failed["phase"])
-            self.assertEqual("resume_exact_phase", failed["recovery_action"])
+            self.assertEqual("maintenance_bypass", failed["phase"])
+            self.assertEqual("operator_action_required", failed["recovery_action"])
             self.assertEqual("preparation paused", failed["last_error"])
-            progressed = ledger.transition(
-                "bypass_preparing", "bypass_confirmed", {}
-            )
+            progressed = ledger.transition("maintenance_bypass", "full_resync", {})
             self.assertIsNone(progressed["recovery_action"])
             self.assertIsNone(progressed["last_error"])
             ledger.close()

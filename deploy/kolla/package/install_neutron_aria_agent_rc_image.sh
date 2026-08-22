@@ -16,6 +16,7 @@ READY_TIMEOUT="${READY_TIMEOUT:-90}"
 RUNTIME_STATE_SOURCE="${RUNTIME_STATE_SOURCE:-/var/lib/neutron-aria-agent/state}"
 CONTAINER_STATE_DIR="${CONTAINER_STATE_DIR:-/var/lib/neutron-aria-agent/state}"
 RUNTIME_STATE_NEEDS_SEED=false
+JOINT_MAINTENANCE_MODE="${JOINT_MAINTENANCE_MODE:-false}"
 
 log() {
     printf '[neutron-aria-agent-rc] %s\n' "$*"
@@ -162,6 +163,9 @@ config = load_config("/etc/neutron-aria-agent/neutron-aria-agent.ini")
 assert HEARTBEAT_SCHEMA_VERSION == 2
 assert config.heartbeat_detail_mode == "summary_only"
 ' >/dev/null 2>&1; then
+            if [ "${JOINT_MAINTENANCE_MODE}" = "true" ]; then
+                return 0
+            fi
             wait_container_healthy
             return $?
         fi
@@ -359,6 +363,17 @@ rollback_candidate() {
 }
 
 case "${1:-}" in
+    prepare)
+        [ "$(id -u)" = "0" ] || die "must run as root"
+        [ -n "${IMAGE_REF}" ] || die "IMAGE_REF is required"
+        [ -n "${EXPECTED_IMAGE_ID}" ] || die "EXPECTED_IMAGE_ID is required"
+        docker image inspect "${IMAGE_REF}" >/dev/null
+        [ "$(docker image inspect -f '{{.Id}}' "${IMAGE_REF}")" = "${EXPECTED_IMAGE_ID}" ] ||
+            die "candidate image ID mismatch"
+        ;;
+    replace) install_candidate ;;
+    verify) check_candidate ;;
+    restore) rollback_candidate ;;
     install) install_candidate ;;
     check) check_candidate ;;
     rollback) rollback_candidate ;;
