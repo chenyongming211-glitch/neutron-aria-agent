@@ -8,7 +8,9 @@ import tempfile
 import unittest
 
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
+from neutron_aria.agent.event_merge import MergedEventBatch
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
+from neutron_aria.agent.neutron_client import PortSourceUnavailable
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
 from neutron_aria.agent.state import InMemorySnapshotStateStore
@@ -137,6 +139,38 @@ class FakeOvsReader(object):
                 bridge="br-int",
             )
         ]
+
+
+class SequencedPortSource(object):
+    def __init__(self, results, on_read=None):
+        self.results = list(results)
+        self.on_read = on_read
+        self.calls = 0
+
+    def list_ports_for_host(self):
+        index = min(self.calls, len(self.results) - 1)
+        result = self.results[index]
+        self.calls += 1
+        if self.on_read is not None:
+            self.on_read(self.calls)
+        if isinstance(result, Exception):
+            raise result
+        return copy.deepcopy(result)
+
+
+class SequencedEventMerger(object):
+    def __init__(self, batches=None):
+        self.batches = list(batches or [])
+        self.drains = 0
+
+    def drain(self):
+        self.drains += 1
+        if self.batches:
+            return self.batches.pop(0)
+        return MergedEventBatch()
+
+    def has_pending(self):
+        return bool(self.batches)
 
 
 class FakeLocalClient(object):
@@ -924,6 +958,209 @@ class PostRecoveryStatusUnavailableLocalClient(PublicV1ActionLocalClient):
 
 
 class EventLoopTestCase(unittest.TestCase):
+    @staticmethod
+    def _maintenance_port(port_id, binding_host="compute-1"):
+        return {
+            "id": port_id,
+            "network_id": "net-a",
+            "device_owner": "compute:nova",
+            "binding:host_id": binding_host,
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }
+
+    def test_stable_maintenance_resync_submits_only_after_two_equal_reads(self):
+        port = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        source = SequencedPortSource([[port], [port]])
+        client = FakeLocalClient()
+        state_store = InMemorySnapshotStateStore()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            state_store=state_store,
+            maintenance_event_merger=SequencedEventMerger(),
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-1", max_attempts=5)
+
+        self.assertEqual(2, source.calls)
+        self.assertEqual(1, len(client.snapshots))
+        self.assertEqual(
+            "op-maint-1",
+            client.snapshots[0]["maintenance_operation_id"],
+        )
+        self.assertEqual(1, result["stable_read_attempts"])
+        self.assertEqual(
+            result["snapshot"]["desired_hash"],
+            result["stable_desired_hash"],
+        )
+        progress = state_store.to_dict()
+        self.assertEqual("op-maint-1", progress["maintenance_operation_id"])
+        self.assertEqual(1, progress["stable_read_attempts"])
+
+    def test_stable_maintenance_resync_discards_changed_pair_before_submit(self):
+        port_a = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        port_b = self._maintenance_port(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        source = SequencedPortSource([[port_a], [port_b], [port_b], [port_b]])
+        client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            maintenance_event_merger=SequencedEventMerger(),
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-2", max_attempts=5)
+
+        self.assertEqual(4, source.calls)
+        self.assertEqual(1, len(client.snapshots))
+        self.assertEqual(2, result["stable_read_attempts"])
+        self.assertEqual(
+            ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
+            sorted(port["port_id"] for port in result["snapshot"]["ports"]),
+        )
+
+    def test_stable_maintenance_resync_retries_event_between_reads(self):
+        port = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        merger = SequencedEventMerger()
+
+        def record_between_reads(read_count):
+            if read_count == 2:
+                merger.batches.append(MergedEventBatch(
+                    port_updates={"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": {}},
+                ))
+
+        source = SequencedPortSource(
+            [[port], [port], [port], [port]],
+            on_read=record_between_reads,
+        )
+        client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            maintenance_event_merger=merger,
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-events", max_attempts=5)
+
+        self.assertEqual(4, source.calls)
+        self.assertEqual(1, len(client.snapshots))
+        self.assertEqual(2, result["stable_read_attempts"])
+
+    def test_stable_maintenance_resync_retries_overflow_without_submit(self):
+        port = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        source = SequencedPortSource([[port], [port], [port], [port]])
+        merger = SequencedEventMerger([
+            MergedEventBatch(full_resync=True, overflowed=True),
+            MergedEventBatch(),
+            MergedEventBatch(),
+            MergedEventBatch(),
+        ])
+        client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            maintenance_event_merger=merger,
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-overflow", max_attempts=5)
+
+        self.assertEqual(4, source.calls)
+        self.assertEqual(1, len(client.snapshots))
+        self.assertEqual(2, result["stable_read_attempts"])
+
+    def test_stable_maintenance_resync_rejects_foreign_host_ambiguity(self):
+        foreign = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            binding_host="compute-2",
+        )
+        source = SequencedPortSource([[foreign], [foreign]])
+        client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            maintenance_event_merger=SequencedEventMerger(),
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-foreign", max_attempts=1)
+
+        self.assertEqual([], client.snapshots)
+        self.assertIsNone(result["snapshot"])
+        self.assertEqual("maintenance_snapshot_not_stable", result["status"]["reason"])
+
+    def test_stable_maintenance_resync_times_out_without_submit(self):
+        port = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        source = SequencedPortSource([
+            [port],
+            PortSourceUnavailable("neutron timeout"),
+        ])
+        client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            maintenance_event_merger=SequencedEventMerger(),
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-timeout", max_attempts=5)
+
+        self.assertEqual([], client.snapshots)
+        self.assertIsNone(result["snapshot"])
+        self.assertTrue(result["status"]["degraded"])
+
+    def test_stable_maintenance_resync_exhausts_five_attempts_without_submit(self):
+        port_a = self._maintenance_port(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        port_b = self._maintenance_port(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        source = SequencedPortSource([[port_a], [port_b]] * 5)
+        client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "compute-1",
+            source,
+            FakeOvsReader(),
+            client,
+            managed_domains=["acl"],
+            maintenance_event_merger=SequencedEventMerger(),
+        )
+
+        result = sync.safe_stable_full_resync("op-maint-exhaust", max_attempts=5)
+
+        self.assertEqual(10, source.calls)
+        self.assertEqual([], client.snapshots)
+        self.assertIsNone(result["snapshot"])
+        self.assertEqual("maintenance_snapshot_not_stable", result["status"]["reason"])
+
     def test_full_resync_builds_and_submits_snapshot(self):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",

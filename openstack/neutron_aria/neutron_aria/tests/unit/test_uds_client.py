@@ -528,6 +528,72 @@ class UdsClientTestCase(unittest.TestCase):
             {"generation": 12, "host": "compute-1", "ports": []},
         )
 
+    def test_maintenance_status_returns_typed_active_identity(self):
+        self.client._status_contract_mode = "v4"
+        FakeConnection.responses.append(FakeResponse(200, "OK", {
+            "status_schema_version": 4,
+            "status_contract_hash": "v0.9-neutron-status-4",
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "complete_or_repair_maintenance",
+            "recovery_cause": None,
+            "last_classified_generation": 41,
+            "generation": 41,
+            "accepted_generation": 41,
+            "applied_generation": 41,
+            "pending_generation": None,
+            "desired_hash": "hash-41",
+            "applied_desired_hash": "hash-41",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "maintenance_phase": "maintenance_bypass",
+            "maintenance_operation_id": "op-upgrade-42",
+            "maintenance_reason": "planned_upgrade_bypass",
+            "maintenance_action": "complete_or_repair_maintenance",
+            "acl_enforcement": "bypass",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": [],
+        }))
+
+        status = self.client.maintenance_status()
+
+        self.assertTrue(status["active"])
+        self.assertEqual("maintenance_bypass", status["maintenance_phase"])
+        self.assertEqual("op-upgrade-42", status["maintenance_operation_id"])
+
+    def test_put_snapshot_adds_typed_operation_id_without_mutating_caller(self):
+        snapshot = {
+            "generation": 12,
+            "host": "compute-1",
+            "ports": [],
+        }
+        FakeConnection.responses.append(FakeResponse(200, "OK", {
+            "generation": 12,
+            "results": [],
+        }))
+
+        self.client.put_snapshot(
+            snapshot,
+            maintenance_operation_id="op-upgrade-42",
+        )
+
+        request = FakeConnection.requests[-1]
+        self.assertNotIn("maintenance_operation_id", snapshot)
+        self.assertEqual(
+            "op-upgrade-42",
+            json.loads(request["body"])["maintenance_operation_id"],
+        )
+
+    def test_put_snapshot_rejects_empty_maintenance_operation_id(self):
+        snapshot = {"generation": 12, "host": "compute-1", "ports": []}
+
+        with self.assertRaises(LocalApiContractError):
+            self.client.put_snapshot(snapshot, maintenance_operation_id="")
+
+        self.assertEqual([], FakeConnection.requests)
+
 
 class StatusContractUdsClientRedTestCase(unittest.TestCase):
     def setUp(self):

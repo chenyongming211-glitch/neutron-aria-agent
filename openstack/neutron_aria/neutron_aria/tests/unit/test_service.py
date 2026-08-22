@@ -158,7 +158,92 @@ class ClassifiedDegradedSynchronizer(FakeSynchronizer):
         }
 
 
+class MaintenanceSynchronizer(FakeSynchronizer):
+    def __init__(self, operation_id="op-maint-service"):
+        FakeSynchronizer.__init__(self)
+        self.operation_id = operation_id
+        self.stable_resync_calls = []
+        self.maintenance_active = True
+
+    def maintenance_status(self):
+        if not self.maintenance_active:
+            return {
+                "active": False,
+                "maintenance_phase": None,
+                "maintenance_operation_id": None,
+            }
+        return {
+            "active": True,
+            "maintenance_phase": "maintenance_bypass",
+            "maintenance_operation_id": self.operation_id,
+        }
+
+    def safe_stable_full_resync(self, operation_id, max_attempts=5):
+        self.stable_resync_calls.append((operation_id, max_attempts))
+        self.resync_calls += 1
+        self.runtime_status.mark_ready(
+            generation=self.resync_calls,
+            snapshot_ports=2,
+            managed_ports=2,
+        )
+        heartbeat = self.report_status()
+        return {
+            "snapshot": {
+                "generation": self.resync_calls,
+                "maintenance_operation_id": operation_id,
+            },
+            "response": {},
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+            "stable_read_attempts": 1,
+            "stable_desired_hash": "hash-maint",
+        }
+
+
 class AgentServiceTestCase(unittest.TestCase):
+    def test_maintenance_initialize_uses_stable_full_host_resync(self):
+        sync = MaintenanceSynchronizer()
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            event_merger=EventMerger(),
+        )
+
+        result = service.initialize()
+
+        self.assertEqual([("op-maint-service", 5)], sync.stable_resync_calls)
+        self.assertEqual(
+            "op-maint-service",
+            result["snapshot"]["maintenance_operation_id"],
+        )
+
+    def test_maintenance_event_batch_suppresses_scoped_apply_and_delete(self):
+        clock = FakeClock()
+        sync = MaintenanceSynchronizer()
+        sync.projected_port_ids.add("p-delete")
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+        merger.record_port_update(
+            "p-update",
+            binding_host="compute-1.example.test",
+        )
+        merger.record_port_delete("p-delete")
+        clock.advance(0.2)
+
+        result = service.run_once()
+
+        self.assertEqual(2, len(sync.stable_resync_calls))
+        self.assertEqual([], sync.scoped_calls)
+        self.assertEqual([], sync.delete_calls)
+        self.assertEqual("op-maint-service", result["snapshot"]["maintenance_operation_id"])
+
     def test_heartbeat_only_initialize_reports_degraded_without_resync(self):
         clock = FakeClock()
         sync = FakeSynchronizer()
