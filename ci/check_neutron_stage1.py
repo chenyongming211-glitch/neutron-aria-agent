@@ -698,7 +698,7 @@ def check_status_v1_contract():
         and isinstance(sample_port["groups"][0]["cidrs"], list)
     ):
         raise SystemExit("ERROR: Status V3 counters group map shape drifted")
-    if set(fixture_v4) != {"fixture_schema_version", "status_contract", "scenarios"} or fixture_v4.get("fixture_schema_version") != 1:
+    if set(fixture_v4) != {"fixture_schema_version", "status_contract", "scenarios", "invalid_scenarios"} or fixture_v4.get("fixture_schema_version") != 1:
         raise SystemExit("ERROR: Status V4 fixture root schema drifted")
     schema_v4 = fixture_v4.get("status_contract")
     if (
@@ -745,6 +745,31 @@ def check_status_v1_contract():
             )
         if decoded.get("status_schema_version") != 4:
             raise SystemExit("ERROR: production Python Status V4 decoder identity drifted")
+    invalid_v4_scenarios = fixture_v4.get("invalid_scenarios")
+    if not isinstance(invalid_v4_scenarios, list) or tuple(
+        item.get("id") for item in invalid_v4_scenarios if isinstance(item, dict)
+    ) != (
+        "ordinary-ready-cannot-carry-maintenance-bypass",
+        "operator-required-action-cannot-claim-maintenance-action",
+    ):
+        raise SystemExit("ERROR: Status V4 invalid scenario inventory drifted")
+    scenarios_by_id = {scenario["id"]: scenario["status"] for scenario in v4_scenarios}
+    for scenario in invalid_v4_scenarios:
+        base = scenarios_by_id.get(scenario.get("base"))
+        patch = scenario.get("patch")
+        if not isinstance(base, dict) or not isinstance(patch, dict):
+            raise SystemExit("ERROR: Status V4 invalid scenario shape drifted")
+        invalid_status = dict(base)
+        invalid_status.update(patch)
+        try:
+            uds._decode_status(invalid_status, uds.STATUS_CONTRACT_V4)
+        except Exception:
+            pass
+        else:
+            raise SystemExit(
+                "ERROR: production Python Status V4 decoder accepted invalid %s"
+                % scenario.get("id")
+            )
     maintenance_contract = contract.get("maintenance")
     if not isinstance(maintenance_contract, dict):
         raise SystemExit("ERROR: maintenance contract is missing")

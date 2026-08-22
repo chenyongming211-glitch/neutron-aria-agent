@@ -3109,4 +3109,253 @@ mod tests {
             Some("maintenance_gate_unknown")
         );
     }
+
+    #[tokio::test]
+    async fn neutron_maintenance_exit_intent_supersedes_conservative_abort_identity_atomically() {
+        let store = FaultStore::new(active_records("op-abort-to-exit"));
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let abort = MaintenanceAbortRequest {
+            operation_id: "op-abort-to-exit".to_string(),
+            expected_phase: MaintenancePhase::MaintenanceBypass,
+            error: Some("candidate_failed".to_string()),
+        };
+        let mut incomplete = convergence();
+        incomplete.pending_generation = Some(42);
+        let aborted = coordinator
+            .abort(abort.clone(), incomplete.clone())
+            .await
+            .expect("conservative abort should remain bypassed");
+        assert!(aborted.1.is_active());
+
+        gate.push_result(Err("exit_clear_response_lost"));
+        gate.push_result(Ok(()));
+        let exit = MaintenanceExitRequest {
+            operation_id: "op-abort-to-exit".to_string(),
+            expected_applied_generation: 41,
+            expected_applied_desired_hash: Some("sha256:host-41".to_string()),
+        };
+        assert!(coordinator.exit(exit, convergence()).await.is_err());
+
+        assert_eq!(
+            *coordinator.pending_transition.read().await,
+            Some(MaintenancePendingTransition::Exit)
+        );
+        assert_eq!(*coordinator.terminal_action.read().await, None);
+        assert_eq!(*coordinator.terminal_expected_phase.read().await, None);
+        let replay = replay_maintenance_records(&store.records()).unwrap();
+        assert_eq!(
+            replay.pending_transition,
+            Some(MaintenancePendingTransition::Exit)
+        );
+        assert_eq!(replay.terminal_action, None);
+        assert_eq!(replay.terminal_expected_phase, None);
+
+        let records_before = store.records();
+        let gate_before = gate.calls();
+        let error = coordinator
+            .abort(abort, incomplete)
+            .await
+            .expect_err("an old Abort retry cannot overtake pending Exit");
+        assert_eq!(error.http_status, 409);
+        assert_eq!(error.code, "maintenance_phase_conflict");
+        assert_eq!(store.records(), records_before);
+        assert_eq!(gate.calls(), gate_before);
+
+        let checkpoint = MaintenanceWalRecord::checkpoint(
+            replay.state,
+            replay.pending_transition,
+            replay.terminal_action,
+            replay.terminal_expected_phase,
+            replay.gate_state,
+            replay.block_cause,
+        );
+        assert!(replay_maintenance_records(&[checkpoint]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_schema_v1_abort_records_restart_and_retry_compatibly() {
+        fn schema_v1_record(
+            record: MaintenanceWalRecord,
+            removed_field: Option<&str>,
+        ) -> MaintenanceWalRecord {
+            let mut value = serde_json::to_value(record).unwrap();
+            value["schema_version"] = serde_json::json!(1);
+            if let Some(field) = removed_field {
+                value.as_object_mut().unwrap().remove(field);
+            }
+            decode_maintenance_record(&serde_json::to_vec(&value).unwrap())
+                .expect("schema-v1 maintenance JSON should migrate on read")
+        }
+
+        let active = active_state("op-legacy-abort", 41, "sha256:host-41");
+        let mut preparing = active.clone();
+        preparing.phase = MaintenancePhase::BypassPreparing;
+        let mut aborted = active.clone();
+        aborted.last_progress_at_ms = 2;
+        aborted.last_error = Some("candidate_failed".to_string());
+        let legacy_records = vec![
+            schema_v1_record(
+                MaintenanceWalRecord::enter_intent_state(preparing),
+                None,
+            ),
+            schema_v1_record(
+                MaintenanceWalRecord::enter_commit_state(active.clone()),
+                None,
+            ),
+            schema_v1_record(
+                MaintenanceWalRecord::abort_intent_state(
+                    aborted.clone(),
+                    MaintenancePhase::MaintenanceBypass,
+                ),
+                Some("expected_phase"),
+            ),
+            schema_v1_record(
+                MaintenanceWalRecord::abort_commit_state(aborted.clone()),
+                None,
+            ),
+        ];
+        let replay = replay_maintenance_records(&legacy_records).unwrap();
+        assert_eq!(replay.terminal_action, Some(MaintenanceTerminalAction::Abort));
+        assert_eq!(
+            replay.terminal_expected_phase,
+            Some(MaintenancePhase::MaintenanceBypass)
+        );
+        let store = FaultStore::new(legacy_records);
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            FaultGate::default(),
+            CapturingAudit::default(),
+        );
+        let mut incomplete = convergence();
+        incomplete.pending_generation = Some(42);
+        let retry = coordinator
+            .abort(
+                MaintenanceAbortRequest {
+                    operation_id: "op-legacy-abort".to_string(),
+                    expected_phase: MaintenancePhase::MaintenanceBypass,
+                    error: Some("candidate_failed".to_string()),
+                },
+                incomplete.clone(),
+            )
+            .await
+            .expect("same-ID retry after schema-v1 restart should be idempotent");
+        assert_eq!(retry.0, MaintenanceDisposition::Idempotent);
+
+        let checkpoint = MaintenanceWalRecord::checkpoint(
+            aborted,
+            None,
+            Some(MaintenanceTerminalAction::Abort),
+            Some(MaintenancePhase::MaintenanceBypass),
+            MaintenanceGateState::Bypass,
+            None,
+        );
+        let legacy_checkpoint = schema_v1_record(checkpoint, Some("terminal_expected_phase"));
+        let checkpoint_replay = replay_maintenance_records(&[legacy_checkpoint.clone()]).unwrap();
+        assert_eq!(
+            checkpoint_replay.terminal_expected_phase,
+            Some(MaintenancePhase::MaintenanceBypass)
+        );
+        let checkpoint_coordinator = coordinator_with_faults(
+            FaultStore::new(vec![legacy_checkpoint]),
+            FaultGate::default(),
+            CapturingAudit::default(),
+        );
+        assert_eq!(
+            checkpoint_coordinator
+                .abort(
+                    MaintenanceAbortRequest {
+                        operation_id: "op-legacy-abort".to_string(),
+                        expected_phase: MaintenancePhase::MaintenanceBypass,
+                        error: Some("candidate_failed".to_string()),
+                    },
+                    incomplete,
+                )
+                .await
+                .unwrap()
+                .0,
+            MaintenanceDisposition::Idempotent
+        );
+
+        let mut invalid_new = serde_json::to_value(MaintenanceWalRecord::abort_intent_state(
+            active,
+            MaintenancePhase::MaintenanceBypass,
+        ))
+        .unwrap();
+        invalid_new["schema_version"] = serde_json::json!(2);
+        invalid_new
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_phase");
+        assert!(decode_maintenance_record(&serde_json::to_vec(&invalid_new).unwrap()).is_err());
+    }
+
+    #[test]
+    fn neutron_maintenance_recovery_commit_gate_phase_and_cause_are_bidirectional() {
+        let active = active_state("op-recovery-semantics", 41, "sha256:host-41");
+        let mut preparing = active.clone();
+        preparing.phase = MaintenancePhase::BypassPreparing;
+        let prefix = vec![
+            MaintenanceWalRecord::enter_intent_state(preparing),
+            MaintenanceWalRecord::enter_commit_state(active.clone()),
+        ];
+        let mut unknown = active.clone();
+        unknown.phase = MaintenancePhase::GateUnknown;
+
+        for invalid in [
+            MaintenanceWalRecord::recovery_commit_state(
+                unknown.clone(),
+                MaintenanceGateState::Bypass,
+                "maintenance_gate_unknown",
+            ),
+            MaintenanceWalRecord::recovery_commit_state(
+                active.clone(),
+                MaintenanceGateState::Unknown,
+                "maintenance_gate_unknown",
+            ),
+            MaintenanceWalRecord::recovery_commit_state(
+                unknown.clone(),
+                MaintenanceGateState::Unknown,
+                "",
+            ),
+            MaintenanceWalRecord::recovery_commit_state(
+                active.clone(),
+                MaintenanceGateState::Bypass,
+                "maintenance_gate_unknown",
+            ),
+            MaintenanceWalRecord::recovery_commit_state(
+                active.clone(),
+                MaintenanceGateState::Enforce,
+                "maintenance_gate_reverified",
+            ),
+        ] {
+            let mut records = prefix.clone();
+            records.push(invalid);
+            assert!(
+                replay_maintenance_records(&records).is_err(),
+                "malformed recovery gate/phase/cause must fail replay"
+            );
+        }
+
+        for valid in [
+            MaintenanceWalRecord::recovery_commit_state(
+                unknown,
+                MaintenanceGateState::Unknown,
+                "maintenance_gate_unknown",
+            ),
+            MaintenanceWalRecord::recovery_commit_state(
+                active,
+                MaintenanceGateState::Bypass,
+                "maintenance_gate_reverified",
+            ),
+        ] {
+            let mut records = prefix.clone();
+            records.push(valid);
+            assert!(replay_maintenance_records(&records).is_ok());
+        }
+    }
 }

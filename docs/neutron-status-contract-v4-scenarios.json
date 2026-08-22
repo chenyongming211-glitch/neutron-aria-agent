@@ -71,5 +71,26 @@
         "mark_ready": true
       }
     }
+  ],
+  "invalid_scenarios": [
+    {
+      "id": "ordinary-ready-cannot-carry-maintenance-bypass",
+      "base": "ordinary-ready-enforce",
+      "patch": {
+        "required_action": "none",
+        "maintenance_phase": "maintenance_bypass",
+        "maintenance_operation_id": "op-invalid-ready",
+        "maintenance_reason": "planned_upgrade_bypass",
+        "maintenance_action": "complete_or_repair_maintenance",
+        "acl_enforcement": "bypass"
+      }
+    },
+    {
+      "id": "operator-required-action-cannot-claim-maintenance-action",
+      "base": "maintenance-gate-unknown",
+      "patch": {
+        "required_action": "operator"
+      }
+    }
   ]
 }
