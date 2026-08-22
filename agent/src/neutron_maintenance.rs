@@ -2405,7 +2405,7 @@ mod tests {
         assert_eq!(gate.calls(), vec![true, true]);
         assert!(matches!(
             store.records().last(),
-            Some(MaintenanceWalRecord::RecoveryCommit { .. })
+            Some(MaintenanceWalRecord::EnterCommit { .. })
         ));
     }
 

@@ -103,6 +103,7 @@ impl MaintenanceState {
             self.phase,
             MaintenancePhase::BypassPreparing
                 | MaintenancePhase::MaintenanceBypass
+                | MaintenancePhase::GateUnknown
                 | MaintenancePhase::Verifying
         )
     }
