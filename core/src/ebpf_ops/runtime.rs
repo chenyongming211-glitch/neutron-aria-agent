@@ -912,6 +912,20 @@ mod tests {
     }
 
     #[test]
+    fn acl_projection_maintenance_private_namespace_and_pins_reject_public_modes() {
+        validate_managed_runtime_private_modes(0o700, &[0o600, 0o600])
+            .expect("root-private namespace and pins must be accepted");
+
+        let namespace_error = validate_managed_runtime_private_modes(0o755, &[0o600, 0o600])
+            .expect_err("0755 managed namespace must be rejected");
+        assert!(namespace_error.contains("private"));
+
+        let pin_error = validate_managed_runtime_private_modes(0o700, &[0o600, 0o644])
+            .expect_err("0644 critical pin must be rejected");
+        assert!(pin_error.contains("private"));
+    }
+
+    #[test]
     fn acl_projection_maintenance_shared_rmw_rejects_full_struct_readback_drift() {
         let base = TestFirewallConfigStore::new(Some(maintenance_test_firewall_config()));
         let mut store = base.corrupting_clone();

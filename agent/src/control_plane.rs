@@ -8935,6 +8935,124 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FakeManagedMaintenanceAuthoritySource {
+        configured_pin_path: PathBuf,
+        configured_mode: TraceMapMode,
+        firewall_config_map_id: u32,
+        registered_instance_count: usize,
+        runtime_identity: Result<ManagedMaintenanceRuntimeIdentity, String>,
+    }
+
+    impl ManagedMaintenanceAuthoritySource for FakeManagedMaintenanceAuthoritySource {
+        fn configured_pin_path(&self) -> PathBuf {
+            self.configured_pin_path.clone()
+        }
+
+        fn configured_mode(&self) -> TraceMapMode {
+            self.configured_mode
+        }
+
+        fn current_firewall_config_map_id(&self) -> Result<u32, String> {
+            Ok(self.firewall_config_map_id)
+        }
+
+        fn registered_instance_count(&self) -> usize {
+            self.registered_instance_count
+        }
+
+        fn live_runtime_identity(&self) -> Result<ManagedMaintenanceRuntimeIdentity, String> {
+            self.runtime_identity.clone()
+        }
+    }
+
+    fn maintenance_tc_program(
+        id: u32,
+        tag: u64,
+        map_ids: &[u32],
+    ) -> ManagedTcProgramIdentity {
+        ManagedTcProgramIdentity {
+            id,
+            tag,
+            map_ids: map_ids.to_vec(),
+        }
+    }
+
+    fn maintenance_live_runtime_identity(
+        ingress_map_ids: &[u32],
+        egress_map_ids: &[u32],
+    ) -> ManagedMaintenanceRuntimeIdentity {
+        ManagedMaintenanceRuntimeIdentity {
+            trace_map_mode: TraceMapMode::Stream,
+            ingress_program: maintenance_tc_program(701, 0x7010, ingress_map_ids),
+            egress_program: maintenance_tc_program(702, 0x7020, egress_map_ids),
+            live_owner_count: 1,
+            complete_mode_inventory: true,
+        }
+    }
+
+    fn maintenance_authority_source(
+        map_id: u32,
+        ingress_map_ids: &[u32],
+        egress_map_ids: &[u32],
+    ) -> FakeManagedMaintenanceAuthoritySource {
+        FakeManagedMaintenanceAuthoritySource {
+            configured_pin_path: PathBuf::from("/sys/fs/bpf/aria/global-v2"),
+            configured_mode: TraceMapMode::Stream,
+            firewall_config_map_id: map_id,
+            registered_instance_count: 0,
+            runtime_identity: Ok(maintenance_live_runtime_identity(
+                ingress_map_ids,
+                egress_map_ids,
+            )),
+        }
+    }
+
+    #[test]
+    fn maintenance_authority_rejects_canonical_map_replaced_before_mint() {
+        let source = maintenance_authority_source(999, &[410, 411], &[410, 412]);
+        let error = acquire_managed_maintenance_authority_facts(&source)
+            .expect_err("replacement map absent from both live programs must fail closed");
+        assert!(error.contains("both live TC programs"));
+    }
+
+    #[test]
+    fn maintenance_authority_rejects_one_direction_only_map_reference() {
+        let source = maintenance_authority_source(410, &[410, 411], &[412]);
+        let error = acquire_managed_maintenance_authority_facts(&source)
+            .expect_err("one-direction-only FIREWALL_CONFIG reference must fail closed");
+        assert!(error.contains("tc_egress"));
+    }
+
+    #[test]
+    fn maintenance_authority_accepts_pre_reconciliation_live_runtime_without_instances() {
+        let source = maintenance_authority_source(410, &[410, 411], &[410, 412]);
+        let facts = acquire_managed_maintenance_authority_facts(&source)
+            .expect("persisted live runtime authority must not require a registered instance");
+        assert_eq!(source.registered_instance_count(), 0);
+        assert_eq!(facts.firewall_config_map_id, 410);
+        assert_eq!(facts.ingress_program.id, 701);
+        assert_eq!(facts.egress_program.id, 702);
+    }
+
+    #[test]
+    fn maintenance_authority_pre_reconciliation_rejects_missing_or_mismatched_live_facts() {
+        let mut missing = maintenance_authority_source(410, &[410], &[410]);
+        missing.runtime_identity = Err("persisted live runtime is absent".to_string());
+        assert!(acquire_managed_maintenance_authority_facts(&missing)
+            .unwrap_err()
+            .contains("absent"));
+
+        let mut mismatched = maintenance_authority_source(410, &[410], &[410]);
+        mismatched.runtime_identity = Ok(ManagedMaintenanceRuntimeIdentity {
+            trace_map_mode: TraceMapMode::Legacy,
+            ..maintenance_live_runtime_identity(&[410], &[410])
+        });
+        assert!(acquire_managed_maintenance_authority_facts(&mismatched)
+            .unwrap_err()
+            .contains("runtime mode"));
+    }
+
     #[test]
     fn maintenance_authority_rejects_root_owned_alternate_bpffs_namespace() {
         let mut facts = maintenance_authority_facts();

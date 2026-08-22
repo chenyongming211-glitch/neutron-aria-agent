@@ -1145,6 +1145,57 @@ mod tests {
     }
 
     #[test]
+    fn acl_maintenance_entry_sample_survives_bypass_to_enforce_for_every_tc_path() {
+        let bypassed = maintenance_test_config(1);
+        let enforcing = maintenance_test_config(0);
+        for direction in [DIR_INGRESS, DIR_EGRESS] {
+            for family in [IP_FAMILY_V4, IP_FAMILY_V6] {
+                let sampled_flags = acl_ct_packet_sample_flags(Some(&bypassed));
+                assert!(!packet_acl_ct_phase_enabled(sampled_flags));
+                assert!(!packet_conntrack_phase_enabled(sampled_flags));
+                assert!(!packet_fragment_phase_enabled(sampled_flags));
+                assert!(!packet_ct_create_allowed(sampled_flags, false));
+
+                // A live global transition after entry must not change this
+                // packet's captured authority in any family or direction.
+                assert!(packet_acl_ct_enforced(Some(&enforcing)));
+                assert!(!packet_acl_ct_phase_enabled(sampled_flags));
+                assert!(!packet_conntrack_phase_enabled(sampled_flags));
+                assert!(!packet_fragment_phase_enabled(sampled_flags));
+                assert!(!packet_ct_create_allowed(sampled_flags, false));
+                assert!(matches!(direction, DIR_INGRESS | DIR_EGRESS));
+                assert!(matches!(family, IP_FAMILY_V4 | IP_FAMILY_V6));
+            }
+        }
+    }
+
+    #[test]
+    fn acl_maintenance_entry_sample_survives_enforce_to_bypass_for_every_tc_path() {
+        let enforcing = maintenance_test_config(0);
+        let bypassed = maintenance_test_config(1);
+        for direction in [DIR_INGRESS, DIR_EGRESS] {
+            for family in [IP_FAMILY_V4, IP_FAMILY_V6] {
+                let sampled_flags = acl_ct_packet_sample_flags(Some(&enforcing));
+                assert!(packet_acl_ct_phase_enabled(sampled_flags));
+                assert!(packet_conntrack_phase_enabled(sampled_flags));
+                assert!(packet_fragment_phase_enabled(sampled_flags));
+                assert!(!packet_ct_create_allowed(sampled_flags, false));
+                assert!(packet_ct_create_allowed(sampled_flags, true));
+
+                // Later mutation is visible to the next packet only.
+                assert!(!packet_acl_ct_enforced(Some(&bypassed)));
+                assert!(packet_acl_ct_phase_enabled(sampled_flags));
+                assert!(packet_conntrack_phase_enabled(sampled_flags));
+                assert!(packet_fragment_phase_enabled(sampled_flags));
+                assert!(!packet_ct_create_allowed(sampled_flags, false));
+                assert!(packet_ct_create_allowed(sampled_flags, true));
+                assert!(matches!(direction, DIR_INGRESS | DIR_EGRESS));
+                assert!(matches!(family, IP_FAMILY_V4 | IP_FAMILY_V6));
+            }
+        }
+    }
+
+    #[test]
     fn fragment_map_layouts_are_stable() {
         assert_eq!(core::mem::size_of::<FragmentKind>(), 1);
 
