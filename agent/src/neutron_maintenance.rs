@@ -961,7 +961,7 @@ fn now_ms() -> u64 {
 #[derive(Clone, Debug)]
 pub(crate) struct MaintenanceStoreReplay {
     pub(crate) state: MaintenanceState,
-    pub(crate) failures: usize,
+    pub(crate) failures: u64,
     pub(crate) pending_transition: Option<MaintenancePendingTransition>,
     pub(crate) terminal_action: Option<MaintenanceTerminalAction>,
 }
