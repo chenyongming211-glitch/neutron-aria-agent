@@ -106,11 +106,15 @@ class KollaContainerHealthcheckContractTest(unittest.TestCase):
             "deploy/kolla/smoke/aria_datapath_container_smoke.sh"
         )
         self.assertIn('ARIA_HEALTH_SOCKET_PATH=${SOCKET_PATH}', content)
-        self.assertIn('ARIA_HEALTH_TCP_URL=${HEALTH_TCP_URL}', content)
         self.assertIn(
-            'HEALTH_TCP_URL="http://${HEALTH_LISTEN_ADDR}/api/v1/health"',
+            'ARIA_HEALTH_TCP_LIVEZ_URL=${HEALTH_TCP_LIVEZ_URL}',
             content,
         )
+        self.assertIn(
+            'HEALTH_TCP_LIVEZ_URL="http://${HEALTH_LISTEN_ADDR}/api/v1/livez"',
+            content,
+        )
+        self.assertNotIn('ARIA_HEALTH_TCP_URL=${HEALTH_TCP_URL}', content)
 
     def test_datapath_smoke_uses_the_kolla_runtime_command(self):
         content = read_repo_file(
