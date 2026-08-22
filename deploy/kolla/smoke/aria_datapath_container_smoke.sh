@@ -17,7 +17,7 @@ STATE_DIR="${STATE_DIR:-/var/lib/aria-agent-smoke}"
 PIN_PATH="${PIN_PATH:-}"
 LISTEN_ADDR="${LISTEN_ADDR:-}"
 HEALTH_LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1:8080}"
-HEALTH_TCP_URL="http://${HEALTH_LISTEN_ADDR}/api/v1/health"
+HEALTH_TCP_LIVEZ_URL="http://${HEALTH_LISTEN_ADDR}/api/v1/livez"
 OVS_BRIDGE="${OVS_BRIDGE:-br-int}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
 START_CONTAINER="${START_CONTAINER:-true}"
@@ -218,7 +218,7 @@ start_container() {
         -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS
         -e KOLLA_SERVICE_NAME=aria-datapath
         -e "ARIA_HEALTH_SOCKET_PATH=${SOCKET_PATH}"
-        -e "ARIA_HEALTH_TCP_URL=${HEALTH_TCP_URL}"
+        -e "ARIA_HEALTH_TCP_LIVEZ_URL=${HEALTH_TCP_LIVEZ_URL}"
         -v "${CONFIG_DIR}/:/var/lib/kolla/config_files/:ro"
         -v /etc/localtime:/etc/localtime:ro
         -v kolla_logs:/var/log/kolla/:rw
