@@ -18469,6 +18469,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_liveness_is_independent_of_ready_maintenance_and_blocked_state() {
+        let ready_root = temp_root("liveness-ready");
+        let ready_state = test_neutron_state(&ready_root);
+        *ready_state.runtime.write().await = healthy_maintenance_runtime();
+        assert_eq!(
+            get_neutron_liveness().await.into_response().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_neutron_readiness(State(ready_state)).await.into_response().status(),
+            StatusCode::OK
+        );
+
+        let maintenance_root = temp_root("liveness-maintenance");
+        seed_active_maintenance(&maintenance_root, "op-liveness-maintenance");
+        let maintenance_state = test_neutron_state(&maintenance_root);
+        *maintenance_state.runtime.write().await = healthy_maintenance_runtime();
+        assert_eq!(
+            get_neutron_liveness().await.into_response().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_neutron_readiness(State(maintenance_state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let blocked_root = temp_root("liveness-blocked");
+        let blocked_state = test_neutron_state(&blocked_root);
+        {
+            let mut runtime = blocked_state.runtime.write().await;
+            *runtime = healthy_maintenance_runtime();
+            runtime.authority_state = "blocked_recovery_required".to_string();
+        }
+        assert_eq!(
+            get_neutron_liveness().await.into_response().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_neutron_readiness(State(blocked_state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let _ = std::fs::remove_dir_all(ready_root);
+        let _ = std::fs::remove_dir_all(maintenance_root);
+        let _ = std::fs::remove_dir_all(blocked_root);
+    }
+
+    #[tokio::test]
+    async fn neutron_schema_blocked_router_remains_live_but_not_ready() {
+        let router = build_acl_runtime_schema_blocked_router(
+            "acl_runtime_schema_recovery_required".to_string(),
+        );
+
+        assert_eq!(
+            request_status(router.clone(), Method::GET, "/livez").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            request_status(router, Method::GET, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
     async fn neutron_maintenance_gate_unknown_status_is_atomic_blocked_and_honest() {
         let root = temp_root("maintenance-gate-unknown-status");
         seed_active_maintenance(&root, "op-gate-unknown-status");
@@ -18534,6 +18604,19 @@ mod tests {
         let tcp = crate::api_routes::build_router(
             state.control_plane.clone(),
             state.maintenance.clone(),
+        );
+
+        assert_eq!(
+            request_status(neutron.clone(), Method::GET, "/livez").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            request_status(neutron.clone(), Method::GET, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            request_status(tcp.clone(), Method::GET, "/api/v1/livez").await,
+            StatusCode::OK
         );
 
         assert_eq!(

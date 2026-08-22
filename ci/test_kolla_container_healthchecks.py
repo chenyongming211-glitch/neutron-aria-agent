@@ -26,7 +26,11 @@ class KollaContainerHealthcheckContractTest(unittest.TestCase):
         content = read_repo_file(relative_path)
 
         self.assertIn("/api/v1/health", content)
+        self.assertIn("/api/v1/livez", content)
+        self.assertIn("/livez", content)
         self.assertIn("/readyz", content)
+        self.assertLess(content.rfind("/livez"), content.rfind("/readyz"))
+        self.assertIn("Docker health authority remains /readyz", content)
         self.assertIn("--unix-socket", content)
         self.assertIn("sudo -u neutron", content)
         self.assertNotIn("docker restart", content)
@@ -40,12 +44,32 @@ class KollaContainerHealthcheckContractTest(unittest.TestCase):
         )
         content = read_repo_file(relative_path)
 
+        self.assertIn("service-liveness.json", content)
+        self.assertIn("/livez", content)
         self.assertIn("/readyz", content)
+        self.assertLess(content.rfind("/livez"), content.rfind("/readyz"))
+        self.assertIn("Docker health authority remains /readyz", content)
         self.assertIn("--unix-socket", content)
         self.assertNotIn("/api/v1/health", content)
         self.assertNotIn("docker restart", content)
         self.assertNotIn("ovs-vsctl", content)
         self.assert_shell_syntax(relative_path)
+
+    def test_liveness_readiness_matrix_keeps_docker_health_strict(self):
+        matrix = (
+            ("ready/enforce", 200, 200, "healthy"),
+            ("planned maintenance bypass", 200, 503, "unhealthy"),
+            ("blocked recovery", 200, 503, "unhealthy"),
+            ("dead loop/socket", None, None, "unhealthy"),
+        )
+
+        for state, live_status, ready_status, expected_docker in matrix:
+            docker_health = (
+                "healthy"
+                if live_status == 200 and ready_status == 200
+                else "unhealthy"
+            )
+            self.assertEqual(expected_docker, docker_health, state)
 
     def test_formal_images_declare_the_frozen_health_policy(self):
         cases = (
