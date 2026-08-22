@@ -209,7 +209,7 @@ pub fn build_router(
             delete(api_handlers::flush_trace),
         )
         .with_state(control_plane)
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             maintenance,
             maintenance_writer_fence,
         ))
