@@ -1680,7 +1680,9 @@ async fn post_maintenance_enter(
     Json(request): Json<MaintenanceEnterRequest>,
 ) -> axum::response::Response {
     let _guard = state.apply_lock.lock().await;
-    let convergence = maintenance_convergence(&state.runtime.read().await);
+    let runtime = state.runtime.read().await;
+    let convergence = maintenance_convergence(&*runtime);
+    drop(runtime);
     match state.maintenance.enter(request, convergence).await {
         Ok((disposition, maintenance)) => {
             let accepted = disposition == MaintenanceDisposition::Mutate;
@@ -1728,7 +1730,9 @@ async fn post_maintenance_exit(
     Json(request): Json<MaintenanceExitRequest>,
 ) -> axum::response::Response {
     let _guard = state.apply_lock.lock().await;
-    let convergence = maintenance_convergence(&state.runtime.read().await);
+    let runtime = state.runtime.read().await;
+    let convergence = maintenance_convergence(&*runtime);
+    drop(runtime);
     match state.maintenance.exit(request, convergence).await {
         Ok((disposition, maintenance)) => Json(MaintenanceResponse {
             status: "committed".to_string(),
@@ -1745,7 +1749,9 @@ async fn post_maintenance_abort(
     Json(request): Json<MaintenanceAbortRequest>,
 ) -> axum::response::Response {
     let _guard = state.apply_lock.lock().await;
-    let convergence = maintenance_convergence(&state.runtime.read().await);
+    let runtime = state.runtime.read().await;
+    let convergence = maintenance_convergence(&*runtime);
+    drop(runtime);
     match state.maintenance.abort(request, convergence).await {
         Ok((disposition, maintenance)) => Json(MaintenanceResponse {
             status: if maintenance.is_active() {

@@ -197,7 +197,7 @@ async fn reconcile(
 /// 2. Cleans orphaned pins
 /// 3. Listens for RTM_NEWLINK/RTM_DELLINK events
 /// 4. Periodically reconciles (every 60s) as a safety net
-pub async fn monitor(
+pub(crate) async fn monitor(
     registry: Arc<TapRegistry>,
     mode: LinkMonitorMode,
     maintenance: Arc<MaintenanceCoordinator>,

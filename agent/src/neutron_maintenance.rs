@@ -824,7 +824,8 @@ impl MaintenanceCoordinator {
                 "maintenance WAL or gate recovery is unresolved",
             ));
         }
-        admit_maintenance_writer(&self.state.read().await, writer, operation_id)
+        let state = self.state.read().await;
+        admit_maintenance_writer(&*state, writer, operation_id)
     }
 
     pub(crate) async fn enter(
@@ -1201,7 +1202,7 @@ mod tests {
 
     #[test]
     fn neutron_maintenance_generation_hash_and_phase_cas_mismatch_do_not_mutate_state() {
-        let mut machine = MaintenanceStateMachine::default();
+        let machine = MaintenanceStateMachine::default();
         let baseline = machine.state().clone();
         let mut wrong_generation = enter_request("op-a");
         wrong_generation.expected_applied_generation = 40;
