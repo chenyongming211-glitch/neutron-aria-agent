@@ -96,6 +96,9 @@ def _state_defaults():
         "stable_read_attempts": 0,
         "stable_desired_hash": None,
         "last_progress_at": None,
+        "maintenance_completed_generation": None,
+        "maintenance_completed_desired_hash": None,
+        "maintenance_completed_managed_port_ids": [],
         "updated_at": None,
     }
 
@@ -776,6 +779,10 @@ class SnapshotStateStore(object):
             )
         if progress_at is None:
             progress_at = _now()
+        if self._state.get("maintenance_operation_id") != operation_id:
+            self._state["maintenance_completed_generation"] = None
+            self._state["maintenance_completed_desired_hash"] = None
+            self._state["maintenance_completed_managed_port_ids"] = []
         self._state["maintenance_operation_id"] = operation_id
         self._state["stable_read_attempts"] = attempts
         self._state["stable_desired_hash"] = desired_hash
@@ -787,6 +794,78 @@ class SnapshotStateStore(object):
             "stable_read_attempts": attempts,
             "stable_desired_hash": desired_hash,
             "last_progress_at": progress_at,
+        }
+
+    def record_maintenance_completion(
+        self,
+        operation_id,
+        generation,
+        desired_hash,
+        managed_port_ids,
+    ):
+        progress = self.maintenance_progress(operation_id)
+        generation = _int_value(generation)
+        if generation < 1:
+            raise ValueError("maintenance completion generation is invalid")
+        if (
+            not isinstance(desired_hash, _STRING_TYPES) or
+            not desired_hash or
+            len(desired_hash) > 128 or
+            desired_hash != progress["stable_desired_hash"]
+        ):
+            raise ValueError("maintenance completion desired hash is invalid")
+        if self.pending_snapshot() is not None:
+            raise RuntimeError("maintenance completion still has pending state")
+        if (
+            _int_value(self._state.get("last_generation")) != generation or
+            self._state.get("last_desired_hash") != desired_hash
+        ):
+            raise RuntimeError("maintenance completion is not committed")
+        if not isinstance(managed_port_ids, list):
+            raise ValueError("maintenance completion ports are invalid")
+        normalized = []
+        for port_id in managed_port_ids:
+            if (
+                not isinstance(port_id, _STRING_TYPES) or
+                not port_id or
+                port_id.strip() != port_id or
+                len(port_id) > 128
+            ):
+                raise ValueError("maintenance completion port is invalid")
+            normalized.append(port_id)
+        normalized = sorted(normalized)
+        if len(normalized) > 4096 or len(normalized) != len(set(normalized)):
+            raise ValueError("maintenance completion ports are invalid")
+        self._state["maintenance_completed_generation"] = generation
+        self._state["maintenance_completed_desired_hash"] = desired_hash
+        self._state["maintenance_completed_managed_port_ids"] = normalized
+        self._state["updated_at"] = _now()
+        self._write()
+        return self.maintenance_progress(operation_id)
+
+    def maintenance_progress(self, operation_id):
+        if operation_id != self._state.get("maintenance_operation_id"):
+            raise ValueError("maintenance operation is not current")
+        generation = _int_value(
+            self._state.get("maintenance_completed_generation")
+        )
+        desired_hash = self._state.get("maintenance_completed_desired_hash")
+        port_ids = list(
+            self._state.get("maintenance_completed_managed_port_ids") or []
+        )
+        complete = bool(generation and desired_hash)
+        return {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "stable_read_attempts": _int_value(
+                self._state.get("stable_read_attempts")
+            ),
+            "stable_desired_hash": self._state.get("stable_desired_hash"),
+            "last_progress_at": self._state.get("last_progress_at"),
+            "completed_generation": generation if complete else None,
+            "completed_desired_hash": desired_hash if complete else None,
+            "completed_managed_port_ids": port_ids if complete else [],
+            "complete": complete,
         }
 
     def pending_delete(self):

@@ -683,7 +683,15 @@ class SnapshotSynchronizer(object):
                     _stable_candidate=second,
                     maintenance_operation_id=operation_id,
                 )
+                snapshot = result["snapshot"]
+                completion = self.state_store.record_maintenance_completion(
+                    operation_id,
+                    snapshot["generation"],
+                    snapshot["desired_hash"],
+                    sorted(self._projected_port_ids(snapshot)),
+                )
                 result.update(progress)
+                result["maintenance_progress"] = completion
                 return result
 
             raise LocalApiTimeoutError("maintenance_snapshot_not_stable")

@@ -15,7 +15,6 @@ JOINT_LOCK_PATH="${JOINT_LOCK_PATH:-/run/lock/aria-joint-release.lock}"
 LEDGER_LOCK_PATH="${LEDGER_LOCK_PATH:-${JOINT_LOCK_PATH}.ledger}"
 ADMIN_SOCKET="${ADMIN_SOCKET:-/run/aria/aria-admin.sock}"
 NEUTRON_SOCKET="${NEUTRON_SOCKET:-/run/aria/aria-agent.sock}"
-OVS_CANARY_COMMAND="${OVS_CANARY_COMMAND:-}"
 DATAPATH_IMAGE_REF="${DATAPATH_IMAGE_REF:-}"
 DATAPATH_EXPECTED_IMAGE_ID="${DATAPATH_EXPECTED_IMAGE_ID:-}"
 AGENT_IMAGE_REF="${AGENT_IMAGE_REF:-}"
@@ -98,15 +97,20 @@ verify_ovs_identity() {
     [ "$(pgrep -xo ovs-vswitchd)" = "${OVS_PID}" ] || return 1
     [ "$(docker inspect -f '{{.Id}}' neutron_openvswitch_agent)" = "${OVS_AGENT_ID}" ] || return 1
     [ "$(docker inspect -f '{{.State.StartedAt}}' neutron_openvswitch_agent)" = "${OVS_AGENT_STARTED}" ] || return 1
-    [ "$(docker exec neutron_openvswitch_agent ovs-vsctl --no-wait get bridge br-int _uuid)" = "${BR_INT_UUID}" ]
+    [ "$(docker exec neutron_openvswitch_agent ovs-vsctl --no-wait get bridge br-int _uuid)" = "${BR_INT_UUID}" ] || return 1
+    local version
+    version="$(docker exec neutron_openvswitch_agent ovs-appctl -t ovs-vswitchd version)" || return 1
+    [ "${#version}" -le 4096 ] || return 1
+    case "${version}" in 'ovs-vswitchd (Open vSwitch) '*) ;; *) return 1 ;; esac
 }
-verify_live_canary() {
-    [ -n "${OVS_CANARY_COMMAND}" ] && [ -x "${OVS_CANARY_COMMAND}" ] || return 1
-    verify_ovs_identity || return 1
-    "${OVS_CANARY_COMMAND}" "${OPERATION_ID}"
+verify_ovs_identity_liveness() {
+    # This is an immutable identity/liveness probe only.  An independent OVS
+    # forwarding canary remains a field acceptance requirement and is not
+    # claimed by this host-side probe.
+    verify_ovs_identity
 }
 component() {
-    local which="$1" action="$2"; verify_live_canary || return 1
+    local which="$1" action="$2"; verify_ovs_identity_liveness || return 1
     if [ "${which}" = datapath ]; then
         IMAGE_REF="${DATAPATH_IMAGE_REF}" EXPECTED_IMAGE_ID="${DATAPATH_EXPECTED_IMAGE_ID}" \
         EXPECTED_ARIA_SHA256="${DATAPATH_EXPECTED_ARIA_SHA256:-}" EXPECTED_EBPF_SHA256="${DATAPATH_EXPECTED_EBPF_SHA256:-}" \
@@ -117,7 +121,7 @@ component() {
         CANDIDATE_CONFIG_SOURCE="${CANDIDATE_AGENT_CONFIG:-}" ROLLBACK_CONFIG_SOURCE="${ROLLBACK_AGENT_CONFIG:-}" \
         OPERATION_ID="${OPERATION_ID}" JOINT_MAINTENANCE_MODE=true "${AGENT_INSTALLER}" "${action}" || return 1
     fi
-    verify_live_canary
+    verify_ovs_identity_liveness
 }
 classify() {
     UPGRADE_CLASS="$("${UPGRADE_CONTROL}" classify --current "${CURRENT_MANIFEST}" --candidate "${CANDIDATE_MANIFEST}" | json_field path)"
@@ -133,12 +137,17 @@ PY
 }
 
 capture_baseline_status() {
-    BASELINE_STATUS="$(agent_curl http://localhost/status)" || return 1
+    BASELINE_STATUS="$(agent_curl http://localhost/api/v1/neutron/status)" || return 1
     read -r PRE_ACCEPTED PRE_APPLIED PRE_HASH PRE_PORTS < <(python3 -c 'import json,sys
-s=json.load(sys.stdin);a=s.get("accepted_generation");p=s.get("applied_generation");h=s.get("last_desired_hash");ports=s.get("last_managed_ports_detail")
-assert type(a)is int and type(p)is int and isinstance(h,str) and len(h)==64 and s.get("pending_generation") is None
-assert isinstance(ports,list) and ports and s.get("last_managed_ports")==len(ports)
-ids=[x.get("port_id") for x in ports];assert all(isinstance(x,str) and x for x in ids) and len(ids)==len(set(ids));print(a,p,h,",".join(sorted(ids)))' <<<"${BASELINE_STATUS}")
+s=json.load(sys.stdin);a=s.get("accepted_generation");p=s.get("applied_generation");h=s.get("desired_hash")
+assert s.get("status_schema_version")==4 and s.get("status_contract_hash")=="v0.9-neutron-status-4"
+assert type(a)is int and type(p)is int and a==p and isinstance(h,str) and len(h)==64 and s.get("applied_desired_hash")==h and s.get("pending_generation") is None
+ports=s.get("managed_ports");rows=s.get("port_statuses");assert isinstance(ports,list) and isinstance(rows,list)
+ids=[x.get("port_id") for x in ports];row_ids=[x.get("port_id") for x in rows]
+assert all(isinstance(x,str) and x for x in ids) and len(ids)==len(set(ids)) and set(ids)==set(row_ids)
+for row in rows:
+ assert row.get("generation")==p and row.get("desired_hash")==h and row.get("status")=="ready"
+print(a,p,h,",".join(sorted(ids)))' <<<"${BASELINE_STATUS}")
 }
 
 preflight() {
@@ -178,14 +187,14 @@ preflight() {
     DATAPATH_EXPECTED_ARIA_SHA256="$(manifest_query "${CANDIDATE_MANIFEST}" artifact aria-agent)"
     DATAPATH_EXPECTED_EBPF_SHA256="$(manifest_query "${CANDIDATE_MANIFEST}" artifact libebpf_firewall.so)"
     DATAPATH_EXPECTED_EBPF_PERF_SHA256="$(manifest_query "${CANDIDATE_MANIFEST}" artifact libebpf_firewall_perf.so)"
-    classify; verify_live_canary || die "initial OVS canary failed"
+    classify; verify_ovs_identity_liveness || die "initial OVS identity/liveness probe failed"
 }
 
 begin_ledger() {
     local evidence host; host="$(hostname -f 2>/dev/null || hostname)"
     evidence="$(python3 - "${OLD_DP}" "${OLD_AGENT}" "${DATAPATH_EXPECTED_IMAGE_ID}" "${AGENT_EXPECTED_IMAGE_ID}" "${PRE_ACCEPTED}" "${PRE_APPLIED}" "${PRE_HASH}" "${OVS_PID}" "${OVS_AGENT_ID}" "${OVS_AGENT_STARTED}" "${BR_INT_UUID}" "${OLD_MANIFEST_HASH}" "${CANDIDATE_MANIFEST_HASH}" "${OLD_CONFIG_HASH}" "${CANDIDATE_CONFIG_HASH}" "${PRE_PORTS}" <<'PY'
 import json,sys
-print(json.dumps({"affected_domains":["acl"],"old_image_ids":{"aria-datapath":sys.argv[1],"neutron-aria-agent":sys.argv[2]},"candidate_image_ids":{"aria-datapath":sys.argv[3],"neutron-aria-agent":sys.argv[4]},"pre_accepted_generation":int(sys.argv[5]),"pre_applied_generation":int(sys.argv[6]),"pre_desired_hash":sys.argv[7],"pre_managed_port_ids":sys.argv[16].split(","),"ovs_vswitchd_pid":int(sys.argv[8]),"ovs_agent_container_id":sys.argv[9],"ovs_agent_started_at":sys.argv[10],"br_int_uuid":sys.argv[11],"old_manifest_hash":sys.argv[12],"candidate_manifest_hash":sys.argv[13],"old_config_hash":sys.argv[14],"candidate_config_hash":sys.argv[15]}))
+print(json.dumps({"affected_domains":["acl"],"old_image_ids":{"aria-datapath":sys.argv[1],"neutron-aria-agent":sys.argv[2]},"candidate_image_ids":{"aria-datapath":sys.argv[3],"neutron-aria-agent":sys.argv[4]},"pre_accepted_generation":int(sys.argv[5]),"pre_applied_generation":int(sys.argv[6]),"pre_desired_hash":sys.argv[7],"pre_managed_port_ids":[x for x in sys.argv[16].split(",") if x],"ovs_vswitchd_pid":int(sys.argv[8]),"ovs_agent_container_id":sys.argv[9],"ovs_agent_started_at":sys.argv[10],"br_int_uuid":sys.argv[11],"old_manifest_hash":sys.argv[12],"candidate_manifest_hash":sys.argv[13],"old_config_hash":sys.argv[14],"candidate_config_hash":sys.argv[15]}))
 PY
 )"
     ledger begin "${OPERATION_ID}" "${host}" "${UPGRADE_CLASS}" "${evidence}" >/dev/null
@@ -193,42 +202,67 @@ PY
 
 prove_bypass() {
     local admin status; admin="$(admin_curl http://localhost/api/v1/admin/maintenance)" || return 1
-    verify_live_canary || return 1; status="$(agent_curl http://localhost/status)" || return 1
+    verify_ovs_identity_liveness || return 1; status="$(agent_curl http://localhost/api/v1/neutron/status)" || return 1
     python3 - "${OPERATION_ID}" "${PRE_APPLIED}" "${PRE_HASH}" "${admin}" "${status}" <<'PY'
 import json,sys
 op,generation,desired=sys.argv[1],int(sys.argv[2]),sys.argv[3];admin,status=json.loads(sys.argv[4]),json.loads(sys.argv[5]);state=admin.get("state")
-assert admin.get("accepted") is True and isinstance(state,dict) and state.get("operation_id")==op and state.get("phase")=="maintenance_bypass"
-assert state.get("active_domains")==["acl"] and state.get("expected_applied_generation")==generation and state.get("expected_desired_hash")==desired
+assert admin.get("accepted") is False and isinstance(state,dict) and state.get("operation_id")==op and state.get("phase")=="maintenance_bypass"
+assert state.get("active_domains")==["acl"] and state.get("expected_generation")==generation and state.get("expected_desired_hash")==desired
+assert type(state.get("applied_generation"))is int and isinstance(state.get("applied_desired_hash"),str)
+assert status.get("status_schema_version")==4 and status.get("status_contract_hash")=="v0.9-neutron-status-4"
 assert status.get("maintenance_operation_id")==op and status.get("maintenance_phase")=="maintenance_bypass" and status.get("acl_enforcement")=="bypass"
-assert status.get("pending_generation") is None and status.get("ingress_bypass") is True and status.get("egress_bypass") is True
-assert status.get("conntrack_mode") in ("neutral","bypass")
+assert status.get("pending_generation") is None and status.get("accepted_generation")==status.get("applied_generation")==state.get("applied_generation")
+assert status.get("desired_hash")==status.get("applied_desired_hash")==state.get("applied_desired_hash")
+ports=status.get("managed_ports");rows=status.get("port_statuses");assert isinstance(ports,list) and isinstance(rows,list)
+ids=[p.get("port_id") for p in ports];assert len(ids)==len(set(ids)) and set(ids)=={p.get("port_id") for p in rows}
+for row in rows:
+ assert row.get("generation")==state.get("applied_generation") and row.get("desired_hash")==state.get("applied_desired_hash") and row.get("status")=="ready"
+ acl=[d for d in row.get("domains",[]) if d.get("domain")=="acl"]
+ assert len(acl)==1 and acl[0].get("status")=="ready" and acl[0].get("effective_action")=="enforce" and acl[0].get("support_disposition")=="supported"
 PY
 }
 
 validate_complete_pair() {
-    python3 - "${OPERATION_ID}" "${PRE_PORTS}" "${UPGRADE_CLASS}" "$1" "$2" <<'PY'
+    python3 - "${OPERATION_ID}" "${UPGRADE_CLASS}" "$1" "$2" "$3" <<'PY'
 import json,sys
-op,expected,upgrade_class=sys.argv[1],set(filter(None,sys.argv[2].split(','))),sys.argv[3];one,two=json.loads(sys.argv[4]),json.loads(sys.argv[5])
-keys=("accepted_generation","applied_generation","pending_generation","last_desired_hash","stable_read_attempts","stable_desired_hash","maintenance_operation_id","buffer_overflow","unsupported_ports","foreign_host_ports","last_managed_ports_detail")
+op,upgrade_class=sys.argv[1],sys.argv[2]
+progress,one,two=json.loads(sys.argv[3]),json.loads(sys.argv[4]),json.loads(sys.argv[5])
+keys=("status_schema_version","status_contract_hash","accepted_generation","applied_generation","pending_generation","desired_hash","applied_desired_hash","maintenance_operation_id","maintenance_phase","acl_enforcement","managed_ports","port_statuses","wal_status","wal_replay_failures","authority_state")
 assert all(one.get(k)==two.get(k) for k in keys)
+assert two.get("status_schema_version")==4 and two.get("status_contract_hash")=="v0.9-neutron-status-4"
 if upgrade_class=="planned_maintenance":
  assert two.get("maintenance_operation_id")==op and two.get("maintenance_phase")=="maintenance_bypass" and two.get("acl_enforcement")=="bypass"
+ assert progress.get("schema_version")==1 and progress.get("operation_id")==op and progress.get("complete") is True
+ assert type(progress.get("stable_read_attempts"))is int and 1<=progress.get("stable_read_attempts")<=5
+ assert progress.get("buffer_overflow") in (None,False) and progress.get("foreign_host_ambiguity") in (None,False)
 else:
  assert two.get("maintenance_operation_id") is None and two.get("maintenance_phase") is None and two.get("acl_enforcement")=="enforce"
-accepted,applied=two.get("accepted_generation"),two.get("applied_generation");assert type(accepted)is int and accepted==applied
-desired=two.get("last_desired_hash");assert isinstance(desired,str) and len(desired)==64 and two.get("stable_desired_hash")==desired and two.get("stable_read_attempts",0)>=2
-assert two.get("pending_generation") is None and two.get("buffer_overflow") is False and two.get("unsupported_ports")==[] and two.get("foreign_host_ports")==[]
-ports=two.get("last_managed_ports_detail");assert isinstance(ports,list) and {p.get("port_id") for p in ports}==expected
-for port in ports:
- acl=[d for d in port.get("domains",[]) if d.get("domain")=="acl"];assert len(acl)==1 and acl[0].get("status")=="complete" and acl[0].get("ingress_complete") is True and acl[0].get("egress_complete") is True
+accepted,applied=two.get("accepted_generation"),two.get("applied_generation")
+assert type(accepted)is int and accepted==applied
+desired=two.get("desired_hash")
+assert isinstance(desired,str) and len(desired)==64 and two.get("applied_desired_hash")==desired
+assert two.get("pending_generation") is None and two.get("wal_status")=="committed" and two.get("wal_replay_failures")==0 and two.get("authority_state")=="ready"
+ports=two.get("managed_ports");rows=two.get("port_statuses")
+assert isinstance(ports,list) and isinstance(rows,list)
+ids=[p.get("port_id") for p in ports];row_ids=[p.get("port_id") for p in rows]
+assert all(isinstance(x,str) and x for x in ids) and len(ids)==len(set(ids)) and set(ids)==set(row_ids)
+if upgrade_class=="planned_maintenance":
+ assert progress.get("completed_generation")==accepted and progress.get("completed_desired_hash")==desired
+ assert progress.get("stable_desired_hash")==desired and set(progress.get("completed_managed_port_ids") or [])==set(ids)
+for row in rows:
+ assert row.get("generation")==applied and row.get("desired_hash")==desired and row.get("status")=="ready"
+ acl=[d for d in row.get("domains",[]) if d.get("domain")=="acl"]
+ assert len(acl)==1 and acl[0].get("status")=="ready" and acl[0].get("effective_action")=="enforce" and acl[0].get("support_disposition")=="supported"
 print(accepted,desired)
 PY
 }
 validate_admin_convergence() {
-    python3 - "${OPERATION_ID}" "$1" "$2" "$3" <<'PY'
+    python3 - "${OPERATION_ID}" "$1" "$2" "$3" "${PRE_APPLIED}" "${PRE_HASH}" <<'PY'
 import json,sys
 op,g,d=sys.argv[1],int(sys.argv[2]),sys.argv[3];b=json.loads(sys.argv[4]);s=b.get("state")
-assert b.get("accepted") is True and isinstance(s,dict) and s.get("operation_id")==op and s.get("phase")=="maintenance_bypass" and s.get("active_domains")==["acl"] and s.get("applied_generation")==g and s.get("applied_desired_hash")==d
+assert b.get("accepted") is False and isinstance(s,dict) and s.get("operation_id")==op and s.get("phase")=="maintenance_bypass" and s.get("active_domains")==["acl"]
+assert s.get("expected_generation")==int(sys.argv[5]) and s.get("expected_desired_hash")==sys.argv[6]
+assert s.get("applied_generation")==g and s.get("applied_desired_hash")==d
 PY
 }
 validate_exit_response() {
@@ -239,11 +273,40 @@ assert b.get("accepted") is True and b.get("status")=="committed" and isinstance
 PY
 }
 
+validate_enter_response() {
+    python3 - "${OPERATION_ID}" "${PRE_APPLIED}" "${PRE_HASH}" "$1" <<'PY'
+import json,sys
+op,g,d=sys.argv[1],int(sys.argv[2]),sys.argv[3];b=json.loads(sys.argv[4]);s=b.get("state")
+assert b.get("accepted") is True and b.get("status")=="accepted" and isinstance(s,dict)
+assert s.get("operation_id")==op and s.get("phase")=="maintenance_bypass" and s.get("active_domains")==["acl"]
+assert s.get("expected_generation")==g and s.get("expected_desired_hash")==d
+PY
+}
+
+validate_active_status() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json,sys
+g,d=int(sys.argv[1]),sys.argv[2];s=json.loads(sys.argv[3])
+assert s.get("status_schema_version")==4 and s.get("pending_generation") is None
+assert s.get("accepted_generation")==g and s.get("applied_generation")==g
+assert s.get("desired_hash")==d and s.get("applied_desired_hash")==d
+assert s.get("maintenance_operation_id") is None and s.get("maintenance_phase") is None and s.get("acl_enforcement")=="enforce"
+ports=s.get("managed_ports");rows=s.get("port_statuses")
+assert isinstance(ports,list) and isinstance(rows,list) and {p.get("port_id") for p in ports}=={p.get("port_id") for p in rows}
+for row in rows:
+ assert row.get("generation")==g and row.get("desired_hash")==d and row.get("status")=="ready"
+PY
+}
+
 full_resync_and_activate() {
-    local first second pair generation desired admin response
-    first="$(agent_curl http://localhost/status)" || { fail_operation "full-resync status unavailable"; return $?; }
-    second="$(agent_curl http://localhost/status)" || { fail_operation "stable second read unavailable"; return $?; }
-    if ! pair="$(validate_complete_pair "${first}" "${second}")"; then fail_operation "full-resync not exact/stable/complete"; return $?; fi
+    local progress='{}' first second pair generation desired admin response active
+    if [ "${UPGRADE_CLASS}" = planned_maintenance ]; then
+        progress="$(component agent resync-status)" || { fail_operation "operation-bound resync progress unavailable"; return $?; }
+    fi
+    first="$(agent_curl http://localhost/api/v1/neutron/status)" || { fail_operation "full-resync status unavailable"; return $?; }
+    verify_ovs_identity_liveness || { fail_operation "stable-read identity probe failed"; return $?; }
+    second="$(agent_curl http://localhost/api/v1/neutron/status)" || { fail_operation "stable second read unavailable"; return $?; }
+    if ! pair="$(validate_complete_pair "${progress}" "${first}" "${second}")"; then fail_operation "full-resync not exact/stable/complete"; return $?; fi
     read -r generation desired <<<"${pair}"; transition shadow_apply "{\"generation\":${generation},\"desired_hash\":\"${desired}\"}"
     if [ "${UPGRADE_CLASS}" = planned_maintenance ]; then
         admin="$(admin_curl http://localhost/api/v1/admin/maintenance)" || { fail_operation "maintenance status unavailable"; return $?; }
@@ -256,19 +319,42 @@ full_resync_and_activate() {
     fi
     transition verifying "{\"generation\":${generation},\"desired_hash\":\"${desired}\"}"
     curl -fsS http://127.0.0.1:8080/api/v1/livez >/dev/null || { fail_operation "datapath liveness failed"; return $?; }
-    agent_curl http://localhost/livez >/dev/null || { fail_operation "agent liveness failed"; return $?; }
-    agent_curl http://localhost/readyz >/dev/null || { fail_operation "agent readiness failed"; return $?; }
     [ "$(docker inspect -f '{{.State.Health.Status}}' aria_datapath)" = healthy ] || { fail_operation "datapath Docker health failed"; return $?; }
     [ "$(docker inspect -f '{{.State.Health.Status}}' neutron_aria_agent)" = healthy ] || { fail_operation "agent Docker health failed"; return $?; }
-    verify_live_canary || { fail_operation "OVS canary changed"; return $?; }; transition committed '{}'
+    active="$(agent_curl http://localhost/api/v1/neutron/status)" || { fail_operation "post-activation status unavailable"; return $?; }
+    validate_active_status "${generation}" "${desired}" "${active}" || { fail_operation "post-activation status mismatch"; return $?; }
+    verify_ovs_identity_liveness || { fail_operation "OVS identity/liveness changed"; return $?; }; transition committed '{}'
+}
+
+enter_and_prove_bypass() {
+    local response
+    verify_ovs_identity_liveness || { fail_operation "pre-bypass OVS identity/liveness failed"; return $?; }
+    response="$(admin_curl -X POST -H 'Content-Type: application/json' --data "{\"operation_id\":\"${OPERATION_ID}\",\"domains\":[\"acl\"],\"reason\":\"planned_upgrade\",\"expected_applied_generation\":${PRE_APPLIED},\"expected_desired_hash\":\"${PRE_HASH}\"}" http://localhost/api/v1/admin/maintenance/enter)" || { fail_operation "maintenance enter not accepted"; return $?; }
+    validate_enter_response "${response}" || { fail_operation "maintenance enter response mismatch"; return $?; }
+    if ! prove_bypass; then fail_operation "maintenance bypass gate not proven"; return $?; fi
+    transition bypass_confirmed
+}
+
+complete_planned_components() {
+    if [ "${CURRENT_PHASE}" = bypass_confirmed ]; then transition datapath_upgrading; fi
+    if [ "${LIVE_DP:-${BOUND_OLD_DP:-${OLD_DP}}}" != "${DATAPATH_EXPECTED_IMAGE_ID}" ]; then
+        run_phase "datapath replacement" component datapath replace || return $?
+    fi
+    run_phase "datapath verification" component datapath verify || return $?
+    if [ "${CURRENT_PHASE}" = datapath_upgrading ]; then transition datapath_live; transition agent_upgrading; fi
+    if [ "${LIVE_AGENT:-${BOUND_OLD_AGENT:-${OLD_AGENT}}}" != "${AGENT_EXPECTED_IMAGE_ID}" ]; then
+        run_phase "agent replacement" component agent replace || return $?
+    fi
+    run_phase "agent verification" component agent verify || return $?
+    if [ "${CURRENT_PHASE}" = agent_upgrading ]; then transition agent_buffering; fi
+    if [ "${CURRENT_PHASE}" = agent_buffering ] || [ "${CURRENT_PHASE}" = maintenance_bypass ]; then transition full_resync; fi
+    full_resync_and_activate
 }
 
 planned_install() {
     transition quiescing; transition bypass_preparing
-    verify_live_canary || { fail_operation "pre-bypass OVS canary failed"; return $?; }
-    admin_curl -X POST -H 'Content-Type: application/json' --data "{\"operation_id\":\"${OPERATION_ID}\",\"domains\":[\"acl\"],\"reason\":\"planned_upgrade\",\"expected_applied_generation\":${PRE_APPLIED},\"expected_desired_hash\":\"${PRE_HASH}\"}" http://localhost/api/v1/admin/maintenance/enter >/dev/null || { fail_operation "maintenance enter not accepted"; return $?; }
-    if ! prove_bypass; then fail_operation "maintenance bypass gate not proven"; return $?; fi
-    transition bypass_confirmed; transition datapath_upgrading
+    enter_and_prove_bypass || return $?
+    transition datapath_upgrading
     run_phase "datapath replacement" component datapath replace || return $?; run_phase "datapath verification" component datapath verify || return $?
     transition datapath_live; transition agent_upgrading
     run_phase "agent replacement" component agent replace || return $?; run_phase "agent verification" component agent verify || return $?
@@ -284,8 +370,9 @@ do_install() {
 }
 
 recover_bound_operation() {
-    local state="$1" expected="$2" expected_dp expected_agent
-    UPGRADE_CLASS="$(printf '%s' "${state}"|json_field upgrade_class)"; [ "${UPGRADE_CLASS}" = planned_maintenance ] || die "recovered class mismatch"
+    local state="$1" expected="$2"
+    UPGRADE_CLASS="$(printf '%s' "${state}"|json_field upgrade_class)"
+    case "${UPGRADE_CLASS}" in planned_maintenance|hot_agent) ;; *) die "recovered class mismatch" ;; esac
     [ "$(printf '%s' "${state}"|json_field operation_id)" = "${OPERATION_ID}" ] || die "recovered operation mismatch"
     [ "$(file_sha256 "${CURRENT_MANIFEST}")" = "$(printf '%s' "${state}"|json_field old_manifest_hash)" ] || die "recovered current manifest mismatch"
     [ "$(file_sha256 "${CANDIDATE_MANIFEST}")" = "$(printf '%s' "${state}"|json_field candidate_manifest_hash)" ] || die "recovered candidate manifest mismatch"
@@ -293,35 +380,74 @@ recover_bound_operation() {
     [ "$(config_pair_sha256 "${CANDIDATE_DATAPATH_CONFIG}" "${CANDIDATE_AGENT_CONFIG}")" = "$(printf '%s' "${state}"|json_field candidate_config_hash)" ] || die "recovered candidate config mismatch"
     OVS_PID="$(printf '%s' "${state}"|json_field ovs_vswitchd_pid)"; OVS_AGENT_ID="$(printf '%s' "${state}"|json_field ovs_agent_container_id)"
     OVS_AGENT_STARTED="$(printf '%s' "${state}"|json_field ovs_agent_started_at)"; BR_INT_UUID="$(printf '%s' "${state}"|json_field br_int_uuid)"
+    PRE_ACCEPTED="$(printf '%s' "${state}"|json_field pre_accepted_generation)"
+    PRE_APPLIED="$(printf '%s' "${state}"|json_field pre_applied_generation)"
+    PRE_HASH="$(printf '%s' "${state}"|json_field pre_desired_hash)"
     PRE_PORTS="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(",".join(sorted(json.load(sys.stdin)["pre_managed_port_ids"])))')"
     BOUND_OLD_DP="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(json.load(sys.stdin)["old_image_ids"]["aria-datapath"])')"
     BOUND_OLD_AGENT="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(json.load(sys.stdin)["old_image_ids"]["neutron-aria-agent"])')"
+    BOUND_CANDIDATE_DP="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(json.load(sys.stdin)["candidate_image_ids"]["aria-datapath"])')"
+    BOUND_CANDIDATE_AGENT="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(json.load(sys.stdin)["candidate_image_ids"]["neutron-aria-agent"])')"
+    [ "${BOUND_CANDIDATE_DP}" = "${DATAPATH_EXPECTED_IMAGE_ID}" ] || die "recovered datapath candidate input mismatch"
+    [ "${BOUND_CANDIDATE_AGENT}" = "${AGENT_EXPECTED_IMAGE_ID}" ] || die "recovered agent candidate input mismatch"
+    LIVE_DP="$(docker inspect -f '{{.Image}}' aria_datapath)"
+    LIVE_AGENT="$(docker inspect -f '{{.Image}}' neutron_aria_agent)"
+    case "${LIVE_DP}" in "${BOUND_OLD_DP}"|"${BOUND_CANDIDATE_DP}") ;; *) die "recovered datapath image is not ledger-bound" ;; esac
+    case "${LIVE_AGENT}" in "${BOUND_OLD_AGENT}"|"${BOUND_CANDIDATE_AGENT}") ;; *) die "recovered agent image is not ledger-bound" ;; esac
     if [ "${expected}" = candidate ]; then
-        expected_dp="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(json.load(sys.stdin)["candidate_image_ids"]["aria-datapath"])')"
-        expected_agent="$(printf '%s' "${state}"|python3 -c 'import json,sys;print(json.load(sys.stdin)["candidate_image_ids"]["neutron-aria-agent"])')"
-        [ "$(docker inspect -f '{{.Image}}' aria_datapath)" = "${expected_dp}" ] || die "recovered datapath image mismatch"
-        [ "$(docker inspect -f '{{.Image}}' neutron_aria_agent)" = "${expected_agent}" ] || die "recovered agent image mismatch"
+        [ "${LIVE_DP}" = "${BOUND_CANDIDATE_DP}" ] || die "recovered datapath image mismatch"
+        [ "${LIVE_AGENT}" = "${BOUND_CANDIDATE_AGENT}" ] || die "recovered agent image mismatch"
     fi
-    verify_live_canary || die "recovered OVS identity/canary mismatch"
+    DATAPATH_EXPECTED_ARIA_SHA256="$(manifest_query "${CANDIDATE_MANIFEST}" artifact aria-agent)"
+    DATAPATH_EXPECTED_EBPF_SHA256="$(manifest_query "${CANDIDATE_MANIFEST}" artifact libebpf_firewall.so)"
+    DATAPATH_EXPECTED_EBPF_PERF_SHA256="$(manifest_query "${CANDIDATE_MANIFEST}" artifact libebpf_firewall_perf.so)"
+    verify_ovs_identity_liveness || die "recovered OVS identity/liveness mismatch"
 }
 do_resume() {
     local state; state="$(ledger recover "${OPERATION_ID}")" || return 1; CURRENT_PHASE="$(printf '%s' "${state}"|json_field phase)"
-    [ "${CURRENT_PHASE}" = maintenance_bypass ] || die "resume blocked outside proven maintenance_bypass"
-    recover_bound_operation "${state}" candidate; transition full_resync; full_resync_and_activate
+    recover_bound_operation "${state}" any
+    if [ "${UPGRADE_CLASS}" = hot_agent ]; then
+        case "${CURRENT_PHASE}" in
+            agent_upgrading)
+                if [ "${LIVE_AGENT}" = "${BOUND_OLD_AGENT}" ]; then
+                    run_phase "agent replacement" component agent replace || return $?
+                fi
+                run_phase "agent verification" component agent verify || return $?
+                transition agent_buffering; transition full_resync; full_resync_and_activate ;;
+            agent_buffering) transition full_resync; full_resync_and_activate ;;
+            full_resync) full_resync_and_activate ;;
+            *) die "hot-agent resume phase is not safely resumable" ;;
+        esac
+        return
+    fi
+    case "${CURRENT_PHASE}" in
+        quiescing) transition bypass_preparing; enter_and_prove_bypass || return $?; complete_planned_components ;;
+        bypass_preparing) enter_and_prove_bypass || return $?; complete_planned_components ;;
+        agent_buffering) [ "${LIVE_DP}" = "${BOUND_CANDIDATE_DP}" ] && [ "${LIVE_AGENT}" = "${BOUND_CANDIDATE_AGENT}" ] || die "agent-buffering live state mismatch"; transition full_resync; full_resync_and_activate ;;
+        maintenance_bypass) prove_bypass || die "durable maintenance bypass is not live/proven"; complete_planned_components ;;
+        full_resync) prove_bypass || die "full-resync maintenance transaction is not proven"; full_resync_and_activate ;;
+        *) die "planned-maintenance resume phase is not safely resumable" ;;
+    esac
 }
 do_rollback() {
-    local state status generation desired
+    local state response
     state="$(ledger recover "${OPERATION_ID}")" || return 1; CURRENT_PHASE="$(printf '%s' "${state}"|json_field phase)"
     [ "${CURRENT_PHASE}" = maintenance_bypass ] || die "rollback requires proven maintenance_bypass"
-    recover_bound_operation "${state}" candidate; status="$(agent_curl http://localhost/status)" || die "rollback status unavailable"
-    read -r generation desired < <(python3 -c 'import json,sys;s=json.load(sys.stdin);g=s.get("applied_generation");h=s.get("last_desired_hash");assert type(g)is int and isinstance(h,str);print(g,h)' <<<"${status}")
+    recover_bound_operation "${state}" any
+    [ "${UPGRADE_CLASS}" = planned_maintenance ] || die "hot-agent rollback is not a maintenance transaction"
+    response="$(admin_curl -X POST -H 'Content-Type: application/json' --data "{\"operation_id\":\"${OPERATION_ID}\",\"domains\":[\"acl\"],\"reason\":\"same_operation_rollback\",\"expected_applied_generation\":${PRE_APPLIED},\"expected_desired_hash\":\"${PRE_HASH}\"}" http://localhost/api/v1/admin/maintenance/enter)" || { fail_operation "rollback bypass confirmation failed"; return $?; }
+    validate_enter_response "${response}" || { fail_operation "rollback enter response mismatch"; return $?; }
+    prove_bypass || { fail_operation "rollback bypass transaction not proven"; return $?; }
     transition rollback
-    admin_curl -X POST -H 'Content-Type: application/json' --data "{\"operation_id\":\"${OPERATION_ID}\",\"domains\":[\"acl\"],\"reason\":\"same_operation_rollback\",\"expected_applied_generation\":${generation},\"expected_desired_hash\":\"${desired}\"}" http://localhost/api/v1/admin/maintenance/enter >/dev/null || { fail_operation "rollback bypass confirmation failed"; return $?; }
-    run_phase "datapath restore" component datapath restore || return $?
+    if [ "${LIVE_DP}" = "${BOUND_CANDIDATE_DP}" ] && [ "${BOUND_CANDIDATE_DP}" != "${BOUND_OLD_DP}" ]; then
+        run_phase "datapath restore" component datapath restore || return $?
+    fi
     [ "$(docker inspect -f '{{.Image}}' aria_datapath)" = "${BOUND_OLD_DP}" ] || { fail_operation "restored datapath identity mismatch"; return $?; }
-    run_phase "agent restore" component agent restore || return $?
+    if [ "${LIVE_AGENT}" = "${BOUND_CANDIDATE_AGENT}" ] && [ "${BOUND_CANDIDATE_AGENT}" != "${BOUND_OLD_AGENT}" ]; then
+        run_phase "agent restore" component agent restore || return $?
+    fi
     [ "$(docker inspect -f '{{.Image}}' neutron_aria_agent)" = "${BOUND_OLD_AGENT}" ] || { fail_operation "restored agent identity mismatch"; return $?; }
-    verify_live_canary || { fail_operation "rollback OVS canary failed"; return $?; }
+    verify_ovs_identity_liveness || { fail_operation "rollback OVS identity/liveness failed"; return $?; }
     transition full_resync; full_resync_and_activate
 }
 

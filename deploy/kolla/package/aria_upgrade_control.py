@@ -446,6 +446,11 @@ class UpgradeLedger(object):
                     {}, "recovered", phase,
                     {"recovery_action": "resume_exact_phase"},
                 )
+            if state.get("upgrade_class") == "hot_agent":
+                return self._update_same_phase(
+                    {}, "recovered", phase,
+                    {"recovery_action": "resume_exact_phase"},
+                )
             if "maintenance_bypass" in ALLOWED.get(phase, ()):
                 return self._transition(
                     phase, "maintenance_bypass", {}, "recovered",

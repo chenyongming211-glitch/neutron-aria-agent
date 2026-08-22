@@ -6,9 +6,13 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "openstack/neutron_aria"))
+from neutron_aria.agent.state import SnapshotStateStore, desired_snapshot_hash
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -126,9 +130,11 @@ case "$args" in
   *" image inspect -f {{.Id}} registry/agent"*) printf '%s\n' "$NEW_AGENT" ;;
   *" inspect -f {{.Image}} aria_datapath "*) if [ -f "$DP_IMAGE_STATE" ]; then cat "$DP_IMAGE_STATE"; else printf '%s\n' "$OLD_DP"; fi ;;
   *" inspect -f {{.Image}} neutron_aria_agent "*) if [ -f "$AGENT_IMAGE_STATE" ]; then cat "$AGENT_IMAGE_STATE"; else printf '%s\n' "$OLD_AGENT"; fi ;;
+  *" inspect -f {{.State.Running}} neutron_aria_agent "*) printf 'true\n' ;;
+  *" exec neutron_aria_agent python -c "*) shift 3; exec python "$@" ;;
   *" exec neutron_openvswitch_agent ovs-vsctl --no-wait get bridge br-int _uuid"*) printf 'br-int-test\n' ;;
   *" exec neutron_openvswitch_agent ovs-appctl -t ovs-vswitchd version"*)
-    [ "${FAIL_AT:-}" != ovs_canary ] || exit 71
+    [ "${FAIL_AT:-}" != ovs_canary ] || [ ! -f "$API_STATE" ] || [ "$(cat "$API_STATE")" != bypass ] || exit 71
     printf 'ovs-vswitchd (Open vSwitch) 2.17.9\n' ;;
   *" inspect -f {{.Id}} neutron_openvswitch_agent "*) printf 'ovs-agent-id\n' ;;
   *" inspect -f {{.State.StartedAt}} neutron_openvswitch_agent "*) printf '2026-08-22T00:00:00Z\n' ;;
@@ -138,56 +144,6 @@ case "$args" in
 esac
 ''',
         )
-        self.write_executable(
-            "curl",
-            r'''#!/usr/bin/env bash
-set -eu
-printf 'curl %s\n' "$*" >>"$TRACE_FILE"
-args=" $* "
-if [[ "$args" == *"/maintenance/enter"* ]]; then
-  [ "${FAIL_AT:-}" != enter ] || exit 40
-  printf bypass >"$API_STATE"
-  printf '{"status":"accepted","accepted":true,"state":{"schema_version":1,"operation_id":"%s","phase":"maintenance_bypass","active_domains":["acl"],"expected_applied_generation":41,"expected_desired_hash":"%s","applied_generation":41,"applied_desired_hash":"%s","entered_at":1,"updated_at":2,"last_error":null}}\n' "$OPERATION_ID" "$OLD_HASH" "$OLD_HASH"
-elif [[ "$args" == *"/maintenance/exit"* ]]; then
-  [ "${FAIL_AT:-}" != activation ] || exit 43
-  [[ "$args" == *'"operation_id":"'"$OPERATION_ID"'"'* ]] || exit 91
-  [[ "$args" == *'"expected_applied_generation":42'* ]] || exit 92
-  [[ "$args" == *'"expected_applied_desired_hash":"'"$NEW_HASH"'"'* ]] || exit 93
-  printf active >"$API_STATE"
-  printf '{"status":"committed","accepted":true,"state":{"schema_version":1,"operation_id":"%s","phase":"committed","active_domains":[],"expected_applied_generation":42,"expected_desired_hash":"%s","applied_generation":42,"applied_desired_hash":"%s","entered_at":1,"updated_at":3,"last_error":null}}\n' "$OPERATION_ID" "$NEW_HASH" "$NEW_HASH"
-elif [[ "$args" == *"/api/v1/livez"* || "$args" == *"/livez"* ]]; then
-  printf '{"service_liveness":"alive"}\n'
-elif [[ "$args" == *"/readyz"* ]]; then
-  printf '{"overall_readiness":"ready"}\n'
-elif [[ "$args" == *"/api/v1/admin/maintenance"* ]]; then
-  state=baseline
-  [ ! -f "$API_STATE" ] || state=$(cat "$API_STATE")
-  if [ "$state" = bypass ] || [ "$state" = resynced ]; then
-    if [ "$state" = resynced ]; then applied_generation=42; applied_hash="$NEW_HASH"; else applied_generation=41; applied_hash="$OLD_HASH"; fi
-    printf '{"status":"active","accepted":true,"state":{"schema_version":1,"operation_id":"%s","phase":"%s","active_domains":["%s"],"expected_applied_generation":41,"expected_desired_hash":"%s","applied_generation":%s,"applied_desired_hash":"%s","entered_at":1,"updated_at":2,"last_error":null}}\n' "${ADMIN_OPERATION_ID:-$OPERATION_ID}" "${ADMIN_PHASE:-maintenance_bypass}" "${ADMIN_DOMAIN:-acl}" "$OLD_HASH" "$applied_generation" "$applied_hash"
-  else
-    printf '{"status":"ready","accepted":true,"state":{"schema_version":1,"operation_id":null,"phase":"ready","active_domains":[],"expected_applied_generation":null,"expected_desired_hash":null,"applied_generation":42,"applied_desired_hash":"%s","entered_at":null,"updated_at":3,"last_error":null}}\n' "$NEW_HASH"
-  fi
-else
-  state=baseline
-  [ ! -f "$API_STATE" ] || state=$(cat "$API_STATE")
-  if [ "$state" = bypass ] && [ "${FAIL_AT:-}" = after_bypass ]; then exit 41; fi
-  if [ "$state" = baseline ]; then
-    printf '{"accepted_generation":41,"applied_generation":41,"pending_generation":null,"desired_hash":"%s","last_desired_hash":"%s","managed_port_ids":["tap-a","tap-b"],"last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"enforce"}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"enforce"}]}],"overall_readiness":"ready","acl_enforcement":"enforce","maintenance_phase":null,"maintenance_operation_id":null,"buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"neutral"}\n' "$OLD_HASH" "$OLD_HASH"
-  elif [ "$state" = active ]; then
-    printf '{"accepted_generation":42,"applied_generation":42,"pending_generation":null,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"ready","acl_enforcement":"enforce","maintenance_phase":null,"maintenance_operation_id":null,"buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"neutral","stable_read_attempts":2,"stable_desired_hash":"%s"}\n' "$NEW_HASH" "$NEW_HASH"
-  elif [ "$state" = hot-resynced ]; then
-    printf '{"accepted_generation":42,"applied_generation":42,"pending_generation":null,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"ready","acl_enforcement":"enforce","maintenance_phase":null,"maintenance_operation_id":null,"buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"neutral","stable_read_attempts":2,"stable_desired_hash":"%s"}\n' "$NEW_HASH" "$NEW_HASH"
-  elif [ "$state" = resynced ]; then
-    printf '{"accepted_generation":%s,"applied_generation":%s,"pending_generation":%s,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"%s","effective_action":"bypass","ingress_complete":%s,"egress_complete":%s}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"degraded","acl_enforcement":"bypass","maintenance_phase":"maintenance_bypass","maintenance_operation_id":"%s","buffer_overflow":%s,"unsupported_ports":%s,"foreign_host_ports":%s,"conntrack_mode":"neutral","stable_read_attempts":%s,"stable_desired_hash":"%s","ingress_bypass":true,"egress_bypass":true}\n' "${SYNC_ACCEPTED:-42}" "${SYNC_APPLIED:-42}" "${SYNC_PENDING:-null}" "${SYNC_HASH:-$NEW_HASH}" "${SYNC_PORT_STATUS:-complete}" "${SYNC_INGRESS:-true}" "${SYNC_EGRESS:-true}" "${SYNC_OPERATION_ID:-$OPERATION_ID}" "${SYNC_BUFFER_OVERFLOW:-false}" "${SYNC_UNSUPPORTED:-[]}" "${SYNC_FOREIGN:-[]}" "${SYNC_STABLE_READS:-2}" "${SYNC_STABLE_HASH:-$NEW_HASH}"
-  else
-    printf '{"accepted_generation":42,"applied_generation":42,"pending_generation":%s,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"degraded","acl_enforcement":"%s","maintenance_phase":"maintenance_bypass","maintenance_operation_id":"%s","buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"%s","stable_read_attempts":2,"stable_desired_hash":"%s","ingress_bypass":%s,"egress_bypass":%s}\n' "${BYPASS_PENDING:-null}" "$NEW_HASH" "${BYPASS_ACL_ENFORCEMENT:-bypass}" "${STATUS_OPERATION_ID:-$OPERATION_ID}" "${BYPASS_CONNTRACK:-neutral}" "$NEW_HASH" "${BYPASS_INGRESS:-true}" "${BYPASS_EGRESS:-true}"
-  fi
-fi
-''',
-        )
-        # Override the legacy hybrid-status fake above with the exact production
-        # V4 Neutron/admin wire contracts.  The legacy block is removed in GREEN.
         self.write_executable(
             "curl",
             r'''#!/usr/bin/env python3
@@ -281,7 +237,9 @@ elif "/api/v1/neutron/status" in text:
     generation = int(env("SYNC_ACCEPTED", "42")) if resynced else 41
     applied = int(env("SYNC_APPLIED", str(generation))) if resynced else 41
     desired = env("SYNC_HASH", env("NEW_HASH")) if resynced else env("OLD_HASH")
-    pending_text = env("SYNC_PENDING", "null") if resynced else env("BYPASS_PENDING", "null")
+    pending_text = env("SYNC_PENDING", "null") if resynced else (
+        env("BYPASS_PENDING", "null") if current == "bypass" else "null"
+    )
     pending = None if pending_text == "null" else int(pending_text)
     port_ids = [] if env("ZERO_PORTS", "false") == "true" else env(
         "SYNC_PORTS" if resynced else "BASELINE_PORTS", "tap-a,tap-b"
@@ -295,7 +253,7 @@ elif "/api/v1/neutron/status" in text:
              "desired_hash": desired, "status": port_status, "reason": None,
              "managed_domains": ["acl"], "domains": [{"domain": "acl",
              "status": port_status, "reason": None, "effective_action": "enforce",
-             "support_disposition": env("SYNC_SUPPORT", "supported")}]}
+             "support_disposition": env("SYNC_SUPPORT", "supported") if resynced else "supported"}]}
             for item in port_ids]
     maintenance = current in ("bypass", "resynced")
     emit({"status_schema_version": 4,
@@ -323,6 +281,14 @@ else:
         self.write_executable(
             "pgrep",
             "#!/usr/bin/env bash\nprintf 'pgrep %s\\n' \"$*\" >>\"$TRACE_FILE\"\nprintf '9001\\n'\n",
+        )
+        self.write_executable(
+            "id",
+            "#!/usr/bin/env bash\nif [ \"${1:-}\" = -u ]; then printf '0\\n'; else exec /usr/bin/id \"$@\"; fi\n",
+        )
+        self.write_executable(
+            "stat",
+            "#!/usr/bin/env bash\ncase \"${2:-}\" in %u) printf '0\\n' ;; %a) printf '600\\n' ;; *) exit 2 ;; esac\n",
         )
         self.write_executable(
             "df",
@@ -630,7 +596,7 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             ("pending", {"SYNC_PENDING": "43"}),
             ("hash", {"SYNC_HASH": OLD_HASH}),
             ("stable-hash", {"SYNC_STABLE_HASH": OLD_HASH}),
-            ("stable-double-read", {"SYNC_STABLE_READS": "1"}),
+            ("stable-proof", {"SYNC_STABLE_READS": "0"}),
             ("buffer-overflow", {"SYNC_BUFFER_OVERFLOW": "true"}),
             ("unsupported", {"SYNC_SUPPORT": "unsupported"}),
             ("foreign-host", {"SYNC_FOREIGN": '["tap-y"]'}),
@@ -882,6 +848,55 @@ verify_candidate_convergence
         self.assertIn("/api/v1/admin/maintenance", trace)
         self.assertNotIn("docker exec -u neutron", trace)
         self.assertNotIn("grep", trace)
+
+    def test_agent_resync_status_entrypoint_reads_operation_bound_completion(self):
+        runtime = self.root / "runtime-state"
+        store = SnapshotStateStore(str(runtime))
+        snapshot = {"host": "compute-1", "ports": [],
+                    "maintenance_operation_id": "task7-op"}
+        desired_hash = desired_snapshot_hash(snapshot)
+        store.record_maintenance_progress("task7-op", 1, desired_hash)
+        prepared = store.prepare_snapshot(snapshot)
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+        store.record_maintenance_completion(
+            "task7-op", prepared["generation"], prepared["desired_hash"], []
+        )
+        release_state = self.root / "agent-release"
+        release_state.mkdir()
+        state_file = release_state / "active.env"
+        state_file.write_text("\n".join((
+            "IMAGE_REF=registry/agent:task7",
+            "OPERATION_ID=task7-op",
+            "EXPECTED_IMAGE_ID=%s" % NEW_AGENT,
+            "BACKUP_CONTAINER=neutron_aria_agent_pre_rc_test",
+            "BACKUP_IMAGE_ID=%s" % OLD_AGENT,
+            "BACKUP_IMAGE_REF=registry/agent:old",
+            "SERVICE_HOSTNAME=compute-1",
+            "DATAPATH_ID=datapath-id",
+            "DATAPATH_STARTED=2026-08-22T00:00:00Z",
+            "OVS_AGENT_ID=ovs-agent-id",
+            "OVS_AGENT_STARTED=2026-08-22T00:00:00Z",
+            "RUNTIME_STATE_SOURCE=%s" % runtime,
+            "CONTAINER_STATE_DIR=%s" % runtime,
+            "",
+        )), encoding="utf-8")
+        state_file.chmod(0o600)
+        env = self.environment()
+        env.update({
+            "STATE_DIR": str(release_state),
+            "STATE_FILE": str(state_file),
+            "CONTAINER_STATE_DIR": str(runtime),
+            "PYTHONPATH": str(ROOT / "openstack/neutron_aria"),
+        })
+        result = subprocess.run(
+            ["bash", str(AGENT_INSTALLER), "resync-status"], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr + self.read_trace())
+        progress = json.loads(result.stdout)
+        self.assertEqual("task7-op", progress["operation_id"])
+        self.assertTrue(progress["complete"])
+        self.assertEqual([], progress["completed_managed_port_ids"])
 
     def test_datapath_suite_does_not_reexport_joint_testcase(self):
         source = (ROOT / "ci/test_kolla_datapath_runtime_upgrade.py").read_text(

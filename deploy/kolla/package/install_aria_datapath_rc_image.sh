@@ -697,10 +697,14 @@ verify_candidate_convergence() {
             http://localhost/api/v1/admin/maintenance | \
             python3 -c 'import json,sys
 body=json.load(sys.stdin); state=body.get("state")
-assert body.get("accepted") is True and isinstance(state,dict)
+assert body.get("accepted") is False and isinstance(state,dict)
 assert state.get("operation_id")==sys.argv[1]
 assert state.get("phase") in ("maintenance_bypass","verifying")
-assert state.get("active_domains")==["acl"]' "${OPERATION_ID}"
+assert state.get("active_domains")==["acl"]
+assert type(state.get("expected_generation")) is int
+assert isinstance(state.get("expected_desired_hash"),str)
+assert type(state.get("applied_generation")) is int
+assert isinstance(state.get("applied_desired_hash"),str)' "${OPERATION_ID}"
         return $?
     fi
     verify_running_candidate

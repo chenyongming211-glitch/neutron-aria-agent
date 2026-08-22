@@ -369,6 +369,27 @@ rollback_candidate() {
     log "rollback passed image=${BACKUP_IMAGE_REF}"
 }
 
+maintenance_resync_status() {
+    [ "$(id -u)" = "0" ] || die "must run as root"
+    case "${OPERATION_ID}" in
+        ''|*[!A-Za-z0-9_.-]*) die "OPERATION_ID is invalid" ;;
+    esac
+    [ "${#OPERATION_ID}" -le 128 ] || die "OPERATION_ID is invalid"
+    validate_absolute_path "${CONTAINER_STATE_DIR}" CONTAINER_STATE_DIR
+    container_running "${SERVICE_NAME}" || die "agent container is not running"
+    docker exec "${SERVICE_NAME}" python -c '
+from __future__ import print_function
+import json
+import sys
+from neutron_aria.agent.state import SnapshotStateStore
+payload = SnapshotStateStore(sys.argv[1]).maintenance_progress(sys.argv[2])
+text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+if len(text) > 1048576:
+    raise SystemExit("maintenance progress exceeds bound")
+print(text)
+' "${CONTAINER_STATE_DIR}" "${OPERATION_ID}"
+}
+
 case "${1:-}" in
     prepare)
         [ "$(id -u)" = "0" ] || die "must run as root"
@@ -380,9 +401,10 @@ case "${1:-}" in
         ;;
     replace) install_candidate ;;
     verify) check_candidate ;;
+    resync-status) maintenance_resync_status ;;
     restore) rollback_candidate ;;
     install) install_candidate ;;
     check) check_candidate ;;
     rollback) rollback_candidate ;;
-    *) echo "Usage: $0 install|check|rollback" >&2; exit 2 ;;
+    *) echo "Usage: $0 prepare|replace|verify|resync-status|restore|install|check|rollback" >&2; exit 2 ;;
 esac
