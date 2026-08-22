@@ -609,6 +609,7 @@ pub const FLAG_ACL_ON: u16 = 1 << 3;
 pub const FLAG_MIRROR_ON: u16 = 1 << 4;
 pub const FLAG_CT_HIT: u16 = 1 << 5;
 pub const FLAG_IS_FORWARD: u16 = 1 << 6;
+pub const FLAG_ACL_CT_ENFORCE: u16 = 1 << 7;
 pub const FLAG_POLICY_HIT: u16 = 1 << 8;
 pub const FLAG_CT_STALE_BANK: u16 = 1 << 9;
 
@@ -757,6 +758,11 @@ pub fn packet_acl_ct_gate(global: Option<&FirewallConfig>) -> PacketAclCtGate {
     } else {
         PacketAclCtGate::Enforce
     }
+}
+
+#[inline(always)]
+pub fn packet_acl_ct_enforced(global: Option<&FirewallConfig>) -> bool {
+    matches!(packet_acl_ct_gate(global), PacketAclCtGate::Enforce)
 }
 
 #[inline(always)]

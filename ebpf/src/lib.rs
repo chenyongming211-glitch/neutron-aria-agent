@@ -28,14 +28,14 @@ mod trace;
 
 use common::{
     acl_banked_tap_id, fragment_ct_create_point, set_fragment_resolve_drop_ids, CtKey4, CtKey6,
-    AclCtPacketAccessPlan, FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind,
-    PipelineCtx,
+    FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
     DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON,
-    FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT,
-    FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, IP_FAMILY_V4, IP_FAMILY_V6,
+    FLAG_ACL_CT_ENFORCE, FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON,
+    FLAG_POLICY_HIT, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, IP_FAMILY_V4,
+    IP_FAMILY_V6,
     TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
     TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_FRAGMENT, TRACE_RESULT_DROP_QOS,
     TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
@@ -155,9 +155,9 @@ unsafe fn try_tc_egress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    let acl_ct_plan = runtime::acl_ct_packet_access_plan(p.direction);
-    load_feature_flags_tc(p, info, &acl_ct_plan);
-    if acl_ct_plan.reads_fragment_authority {
+    runtime::apply_acl_ct_packet_access_plan(p);
+    load_feature_flags_tc(p, info);
+    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 {
         fragment::snapshot_authority(p);
         fragment::record_first_observation(info, p);
     }
@@ -360,9 +360,9 @@ unsafe fn try_tc_ingress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    let acl_ct_plan = runtime::acl_ct_packet_access_plan(p.direction);
-    load_feature_flags_tc(p, info, &acl_ct_plan);
-    if acl_ct_plan.reads_fragment_authority {
+    runtime::apply_acl_ct_packet_access_plan(p);
+    load_feature_flags_tc(p, info);
+    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 {
         fragment::snapshot_authority(p);
         fragment::record_first_observation(info, p);
     }
@@ -519,18 +519,14 @@ unsafe fn try_tc_ingress_v6(
 // --- Helpers ---
 
 #[inline(always)]
-unsafe fn load_feature_flags_tc(
-    p: &mut PipelineCtx,
-    info: &parser::PacketInfo,
-    acl_ct_plan: &AclCtPacketAccessPlan,
-) {
+unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) {
     if qos::qos_enabled(p.tap_id) {
         p.flags |= FLAG_QOS_ON;
     }
     if tcprt::tcprt_enabled(p.tap_id) {
         p.flags |= FLAG_TCPRT_ON;
     }
-    if acl_ct_plan.reads_acl_state && policy::acl_enabled(p.tap_id) {
+    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 && policy::acl_enabled(p.tap_id) {
         p.flags |= FLAG_ACL_ON;
     }
     if mirror::mirror_enabled(p.tap_id) {

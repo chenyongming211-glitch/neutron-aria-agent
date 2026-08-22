@@ -172,7 +172,7 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)",
+            "replay_state_from_snapshot(&mut bpf, pin_path, state_path, &quiesced_desired)",
             source,
         )
 

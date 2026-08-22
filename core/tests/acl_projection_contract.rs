@@ -9,7 +9,7 @@ use aria_core::ebpf_ops::{
     ManagedReplayRoute, ProjectionDirection, ProjectionDrift, ProjectionEntry,
     ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry, StandaloneReplayRoute,
 };
-use aria_core::common::{TapMapRuntime, IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6};
+use aria_core::common::{IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6};
 use aria_core::state::{
     migrate_legacy_rule_families, FirewallState, GroupInfo, LegacyAclMigrationAuthority,
     MirrorRuleInfo, QosRuleInfo, RuleInfo,
@@ -75,13 +75,13 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
     );
     for body in [egress, ingress] {
         let gate = body
-            .find("runtime::acl_ct_packet_access_plan(p.direction)")
+            .find("runtime::apply_acl_ct_packet_access_plan(p)")
             .expect("packet path must classify maintenance before ACL/fragment state");
         let feature_flags = body.find("load_feature_flags_tc").unwrap();
         let snapshot = body.find("fragment::snapshot_authority").unwrap();
         assert!(gate < feature_flags);
         assert!(gate < snapshot);
-        assert!(body.contains("acl_ct_plan.reads_fragment_authority"));
+        assert!(body.contains("FLAG_ACL_CT_ENFORCE"));
     }
 }
 

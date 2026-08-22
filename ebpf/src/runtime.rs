@@ -1,6 +1,6 @@
 use crate::common::{
-    acl_ct_runtime_source, normalize_acl_bank, AclCtPacketAccessPlan, AclCtRuntimeSource,
-    FirewallConfig, ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED,
+    acl_ct_runtime_source, normalize_acl_bank, AclCtRuntimeSource, FirewallConfig, PipelineCtx,
+    ACL_BANK_PRIMARY, FLAG_ACL_CT_ENFORCE, TAP_ID_UNASSIGNED,
 };
 use crate::maps::{FIREWALL_CONFIG, TAP_CONFIG_MAP};
 
@@ -11,12 +11,11 @@ fn read_global_config() -> Option<FirewallConfig> {
 }
 
 #[inline(always)]
-pub fn acl_ct_packet_access_plan(direction: u8) -> AclCtPacketAccessPlan {
+pub fn apply_acl_ct_packet_access_plan(p: &mut PipelineCtx) {
     let global = read_global_config();
-    crate::common::acl_ct_packet_access_plan(
-        crate::common::packet_acl_ct_gate(global.as_ref()),
-        direction,
-    )
+    if crate::common::packet_acl_ct_enforced(global.as_ref()) {
+        p.flags |= FLAG_ACL_CT_ENFORCE;
+    }
 }
 
 #[inline(always)]
