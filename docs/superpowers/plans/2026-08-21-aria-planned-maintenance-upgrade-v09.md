@@ -283,21 +283,21 @@ git commit -m "feat(kolla): persist Aria upgrade transactions"
 - Produces: `set_acl_maintenance_bypass(runtime: TapMapRuntime, enabled: bool) -> Result<(), String>`.
 - `FirewallConfig.acl_maintenance_bypass` is a new ABI byte and requires incrementing `ebpf_abi_version` and `map_schema_version`.
 
-- [ ] **Step 1: Write failing ABI and packet-gate tests**
+- [x] **Step 1: Write failing ABI and packet-gate tests**
 
 Assert that maintenance bypass disables both `acl_enabled(tap_id)` and `conntrack_enabled(tap_id)` before `TAP_CONFIG_MAP` is consulted, while monitoring, QoS, Mirror, and TCP-RT retain their values.
 
-- [ ] **Step 2: Run behavior tests and observe failure**
+- [x] **Step 2: Run behavior tests and observe failure**
 
 Run: `cargo test -p aria-ebpf --lib runtime -- --nocapture && cargo test -p aria-core acl_maintenance -- --nocapture`
 
 Expected: FAIL because the field and helper are absent.
 
-- [ ] **Step 3: Extend the shared ABI explicitly**
+- [x] **Step 3: Extend the shared ABI explicitly**
 
 Add `acl_maintenance_bypass: u8` to `FirewallConfig`, update every constructor, and increment both compatibility versions. Do not reuse `acl_active_bank` or any feature byte.
 
-- [ ] **Step 4: Check the host gate before per-tap state**
+- [x] **Step 4: Check the host gate before per-tap state**
 
 ```rust
 #[inline(always)]
@@ -320,17 +320,17 @@ pub fn conntrack_enabled(tap_id: u32) -> bool {
 
 Missing gate state defaults to enforcement-capable behavior for legacy runtime adoption; an active durable maintenance ledger forces the value to `1` before reconciliation.
 
-- [ ] **Step 5: Implement userspace read/write and strict verification**
+- [x] **Step 5: Implement userspace read/write and strict verification**
 
 The setter opens only the proven managed shared `FIREWALL_CONFIG`, updates key `0`, reads it back, and fails if the observed value differs. No TC link, qdisc, or OVS operation belongs in this helper.
 
-- [ ] **Step 6: Run Rust behavior tests**
+- [x] **Step 6: Run Rust behavior tests**
 
 Run: `cargo test -p aria-ebpf --lib runtime -- --nocapture && cargo test -p aria-core --all-targets && cargo test -p aria-agent acl_maintenance -- --nocapture`
 
 Expected: PASS. eBPF compilation and 4.18 verifier acceptance remain CI/field gates, not local claims.
 
-- [ ] **Step 7: Commit the packet gate**
+- [x] **Step 7: Commit the packet gate**
 
 ```bash
 git add abi/src/lib.rs ebpf/src/runtime.rs core/src/ebpf_ops/runtime.rs \
@@ -355,29 +355,29 @@ git commit -m "feat(datapath): add host ACL maintenance gate"
 - Routes: `POST /api/v1/admin/maintenance/enter`, `GET /api/v1/admin/maintenance`, `POST /api/v1/admin/maintenance/exit`, `POST /api/v1/admin/maintenance/abort`.
 - Snapshot requests add optional `maintenance_operation_id`; when maintenance is active, only matching full-host snapshots are accepted.
 
-- [ ] **Step 1: Write failing state-machine, authorization, and restart tests**
+- [x] **Step 1: Write failing state-machine, authorization, and restart tests**
 
 Cover same-ID idempotency, conflicting-ID HTTP 409, generation/hash CAS mismatch, normal Neutron write rejection during maintenance, port-scoped rejection, startup replay forcing bypass, and admin socket mode/owner.
 
-- [ ] **Step 2: Run focused Rust tests and observe failure**
+- [x] **Step 2: Run focused Rust tests and observe failure**
 
 Run: `cargo test -p aria-agent neutron_maintenance -- --nocapture`
 
 Expected: FAIL because maintenance state and routes are absent.
 
-- [ ] **Step 3: Define typed contract objects**
+- [x] **Step 3: Define typed contract objects**
 
 `MaintenanceState` contains only schema version, operation ID, phase, active domains, expected/applied generation and hash, bypass start time, last progress time, and last error. Snapshot policy remains absent.
 
-- [ ] **Step 4: Persist maintenance intent and commit in the Neutron WAL**
+- [x] **Step 4: Persist maintenance intent and commit in the Neutron WAL**
 
 Entering maintenance writes intent, flips and verifies the shared gate, then writes commit. Startup with committed active maintenance forces the gate to bypass before normal runtime reconciliation. A dangling enter intent is recovered conservatively as active bypass.
 
-- [ ] **Step 5: Bind a separate root-only listener**
+- [x] **Step 5: Bind a separate root-only listener**
 
 Do not route admin calls through the neutron-owned `0660` socket. `main.rs` binds the separate `0600` socket and serves only the maintenance router on it. Normal snapshot routes remain on `/run/aria/aria-agent.sock`.
 
-- [ ] **Step 6: Fence normal writers by operation identity**
+- [x] **Step 6: Fence normal writers by operation identity**
 
 While active:
 
@@ -390,13 +390,13 @@ delete route                              -> 409 maintenance_requires_full_host
 
 Exit succeeds only when the operation ID, applied generation, applied desired hash, zero pending generation, and complete ready/enforce port set all match.
 
-- [ ] **Step 7: Run API, WAL, and contract tests**
+- [x] **Step 7: Run API, WAL, and contract tests**
 
 Run: `cargo test -p aria-agent neutron_maintenance -- --nocapture && cargo test -p aria-agent neutron_api -- --nocapture && cargo test -p aria-api`
 
 Expected: PASS for enter, replay, stage, exit, abort, and conflict paths.
 
-- [ ] **Step 8: Commit the D3 control gate**
+- [x] **Step 8: Commit the D3 control gate**
 
 ```bash
 git add agent/src/neutron_maintenance.rs agent/src/neutron_wal.rs \
@@ -404,6 +404,17 @@ git add agent/src/neutron_maintenance.rs agent/src/neutron_wal.rs \
   docs/neutron-uds-contract.json
 git commit -m "feat(agent): add durable ACL maintenance API"
 ```
+
+**D3 closure evidence (2026-08-22):** accepted code SHA
+`1f9fe513899f08a72f7c5b55649a4215fe719814`; exact-head GitHub Actions run
+`32565203326` passed the 60-test maintenance batch, static Rust agent build,
+and linked `tc_ingress=480` / `tc_egress=480` stack gates. The independent
+bounded review found no remaining Critical or Important issue and recorded
+`Ready: Yes`; the governing closure plan is
+`docs/superpowers/plans/2026-08-22-d3-maintenance-control-closure.md`.
+`maintenance_gate_capable` remains `false`. Real EL 4.18 verifier/load/attach,
+dual-stack traffic, restart/rollback, and root-socket field evidence remain
+`deferred/pending`; this is not production-readiness approval.
 
 ### Task 5: Implement Revisionless Stable Full Resync In The Python Agent
 
