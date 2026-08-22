@@ -24,9 +24,11 @@ PYTHON_TEST_ROOT = os.path.join(
 )
 RUST_TESTS = [
     ["test", "--locked", "-p", "aria-core", "acl_projection_"],
+    ["test", "--locked", "-p", "aria-core", "maintenance_stream_authority_"],
     ["test", "--locked", "-p", "aria-core", "managed_projection_replay_"],
     ["test", "--locked", "-p", "aria-core", "managed_projection_inventory_"],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_replay_mode_"],
+    ["test", "--locked", "-p", "aria-agent", "maintenance_authority_"],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_inventory_handoff_"],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_health_"],
     ["test", "--locked", "-p", "aria-agent", "managed_acl_shadow_"],
