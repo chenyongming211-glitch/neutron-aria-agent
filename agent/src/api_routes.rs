@@ -59,6 +59,7 @@ pub fn build_router(
         .merge(SwaggerUi::new("/docs").url("/openapi.json", crate::openapi::ApiDoc::openapi()))
         // Health & instances
         .route("/metrics", get(api_handlers::metrics))
+        .route("/api/v1/livez", get(api_handlers::liveness))
         .route("/api/v1/health", get(api_handlers::health))
         .route("/api/v1/instances", get(api_handlers::list_instances))
         // System start/stop

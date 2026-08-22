@@ -1,7 +1,13 @@
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 use super::common::{kernel_drop_mode_name, AppState};
 use aria_api::HealthResponse;
+
+/// Bounded process/API liveness response. Deliberately does not inspect
+/// instances, ACL state, ports, or OVS.
+pub async fn liveness() -> StatusCode {
+    StatusCode::OK
+}
 
 #[utoipa::path(
     get,

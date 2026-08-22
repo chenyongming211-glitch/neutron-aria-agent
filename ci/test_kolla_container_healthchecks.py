@@ -25,7 +25,7 @@ class KollaContainerHealthcheckContractTest(unittest.TestCase):
         )
         content = read_repo_file(relative_path)
 
-        self.assertIn("/api/v1/health", content)
+        self.assertNotIn("/api/v1/health", content)
         self.assertIn("/api/v1/livez", content)
         self.assertIn("/livez", content)
         self.assertIn("/readyz", content)

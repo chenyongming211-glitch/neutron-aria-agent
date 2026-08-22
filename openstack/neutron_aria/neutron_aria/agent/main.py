@@ -12,6 +12,7 @@ from neutron_aria.agent.config import sync_mode
 from neutron_aria.agent.config import validate_config
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
+from neutron_aria.agent.liveness import ServiceLivenessPublisher
 from neutron_aria.agent.neutron_client import NeutronClientFactoryError
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.neutron_client import UnavailablePortSource
@@ -326,6 +327,7 @@ def main(argv=None):
         event_max_merge_delay=config.event_max_merge_delay,
         incremental_rpc_enabled=config.incremental_rpc_enabled,
         revisionless_incremental_mode=config.revisionless_incremental_mode,
+        liveness_publisher=ServiceLivenessPublisher(config.state_dir, host),
     )
     if options.report_once:
         result = service.initialize()

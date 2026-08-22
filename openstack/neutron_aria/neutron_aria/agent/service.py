@@ -46,6 +46,7 @@ class AgentService(object):
         revisionless_incremental_mode=REVISIONLESS_INCREMENTAL_DISABLED,
         clock=None,
         sleeper=None,
+        liveness_publisher=None,
     ):
         self.synchronizer = synchronizer
         self.full_resync_enabled = bool(full_resync_enabled)
@@ -66,6 +67,7 @@ class AgentService(object):
         self.event_max_merge_delay = float(event_max_merge_delay)
         self.clock = clock or time.time
         self.sleeper = sleeper or time.sleep
+        self.liveness_publisher = liveness_publisher
         self.initialized = False
         self.next_report_at = 0
         self.next_resync_at = 0
@@ -74,6 +76,11 @@ class AgentService(object):
             self.synchronizer.maintenance_event_merger = self.event_merger
 
     def initialize(self):
+        result = self._initialize()
+        self._publish_liveness()
+        return result
+
+    def _initialize(self):
         now = self.clock()
         self.initialized = True
         self._refresh_maintenance_status()
@@ -112,6 +119,11 @@ class AgentService(object):
         return result
 
     def run_once(self):
+        result = self._run_once()
+        self._publish_liveness()
+        return result
+
+    def _run_once(self):
         if not self.initialized:
             return self.initialize()
 
@@ -147,6 +159,10 @@ class AgentService(object):
             return result
 
         return None
+
+    def _publish_liveness(self):
+        if self.liveness_publisher is not None:
+            self.liveness_publisher.publish()
 
     def sleep_interval(self):
         now = self.clock()

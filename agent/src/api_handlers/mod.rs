@@ -22,7 +22,7 @@ pub use self::config::{get_config, update_config};
 pub use self::conntrack::{flush_conntrack, list_conntrack};
 pub use self::drops::{flush_drops, flush_kernel_drops, list_drops, list_kernel_drops};
 pub use self::groups::{add_group, delete_group, list_groups, list_groups_with_stats};
-pub use self::health::health;
+pub use self::health::{health, liveness};
 pub use self::metrics::metrics;
 pub use self::mirror::{
     add_mirror, delete_mirror, list_mirror, list_mirror_with_stats, stats_mirror,

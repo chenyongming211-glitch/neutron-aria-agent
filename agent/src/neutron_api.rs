@@ -1615,6 +1615,12 @@ async fn get_acl_runtime_schema_blocked_readiness(
     )
 }
 
+/// Bounded UDS liveness response. Readiness and detailed state remain on
+/// `/readyz` and `/api/v1/neutron/status` respectively.
+async fn get_neutron_liveness() -> StatusCode {
+    StatusCode::OK
+}
+
 async fn reject_acl_runtime_schema_blocked_mutation(
     State(state): State<AclRuntimeSchemaBlockedState>,
 ) -> impl IntoResponse {
@@ -1630,6 +1636,7 @@ async fn reject_acl_runtime_schema_blocked_mutation(
 pub(crate) fn build_acl_runtime_schema_blocked_router(reason: String) -> Router {
     let state = AclRuntimeSchemaBlockedState { reason };
     Router::new()
+        .route("/livez", get(get_neutron_liveness))
         .route("/readyz", get(get_acl_runtime_schema_blocked_readiness))
         .route(
             "/api/v1/neutron/capabilities",
@@ -1972,6 +1979,7 @@ pub(crate) fn build_router(
         }
     });
     let router = Router::new()
+        .route("/livez", get(get_neutron_liveness))
         .route("/readyz", get(get_neutron_readiness))
         .route(
             "/api/v1/neutron/capabilities",
