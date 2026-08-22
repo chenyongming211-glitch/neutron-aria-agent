@@ -166,3 +166,19 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         )
         .with_state(control_plane)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Method;
+
+    #[test]
+    fn neutron_maintenance_tcp_mutation_methods_are_exhaustively_classified() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(is_maintenance_mutation_method(&method));
+        }
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(!is_maintenance_mutation_method(&method));
+        }
+    }
+}

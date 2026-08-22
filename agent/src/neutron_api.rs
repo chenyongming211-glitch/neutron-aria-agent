@@ -7904,7 +7904,11 @@ fn can_skip_neutron_domain_reconcile(
 mod tests {
     use super::*;
     use crate::ebpf_binary::TraceBackendKind;
+    use crate::neutron_maintenance::MaintenanceWalRecord;
+    use axum::body::Body;
+    use axum::http::{Method, Request};
     use std::sync::{Arc, OnceLock};
+    use tower::ServiceExt;
 
     const STATUS_V1_SCENARIOS_JSON: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -18072,6 +18076,189 @@ mod tests {
         assert!(!transition.quiesce.acl_enabled);
         assert_eq!(error.effective_action, "bypass");
         assert!(error.details.contains("unknown active selector"));
+    }
+
+    fn seed_active_maintenance(root: &std::path::Path, operation_id: &str) {
+        let wal = NeutronWal::new(root.join("state"));
+        let active = aria_api::MaintenanceState {
+            schema_version: aria_api::MAINTENANCE_SCHEMA_VERSION,
+            operation_id: Some(operation_id.to_string()),
+            phase: aria_api::MaintenancePhase::MaintenanceBypass,
+            active_domains: vec!["acl".to_string()],
+            expected_generation: 41,
+            expected_desired_hash: Some("sha256:host-41".to_string()),
+            applied_generation: 41,
+            applied_desired_hash: Some("sha256:host-41".to_string()),
+            bypass_started_at_ms: Some(1),
+            last_progress_at_ms: 1,
+            last_error: None,
+        };
+        let mut preparing = active.clone();
+        preparing.phase = aria_api::MaintenancePhase::BypassPreparing;
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(preparing))
+            .unwrap();
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_commit_state(active.clone()))
+            .unwrap();
+    }
+
+    fn healthy_maintenance_runtime() -> NeutronRuntimeState {
+        let port = ManagedNeutronPort {
+            port_id: "port-maintenance".to_string(),
+            ifname: "tap-maintenance".to_string(),
+            ifindex: Some(41),
+            managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
+        };
+        let status = port_runtime_status(
+            &port.port_id,
+            &port.ifname,
+            41,
+            Some("sha256:host-41".to_string()),
+            vec!["acl".to_string()],
+            "ready",
+            None,
+            vec![domain_status_with_action(
+                "acl",
+                "ready",
+                None,
+                Some("enforce".to_string()),
+            )],
+        );
+        NeutronRuntimeState {
+            accepted_generation: 41,
+            applied_generation: 41,
+            pending_generation: None,
+            desired_hash: Some("sha256:host-41".to_string()),
+            applied_desired_hash: Some("sha256:host-41".to_string()),
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([(port.port_id.clone(), port)]),
+            port_statuses: BTreeMap::from([(status.port_id.clone(), status)]),
+            wal_status: "commit_written".to_string(),
+            recovery_cause: None,
+            wal_replay_failures: 0,
+            ..NeutronRuntimeState::default()
+        }
+    }
+
+    #[test]
+    fn neutron_maintenance_convergence_requires_exact_accepted_identity_and_clean_wal() {
+        let healthy = healthy_maintenance_runtime();
+        assert!(maintenance_convergence(&healthy).is_complete());
+
+        let mut accepted_drift = healthy.clone();
+        accepted_drift.accepted_generation += 1;
+        accepted_drift.desired_hash = Some("sha256:host-42".to_string());
+        assert!(!maintenance_convergence(&accepted_drift).is_complete());
+
+        let mut wal_failed = healthy.clone();
+        wal_failed.wal_replay_failures = 1;
+        wal_failed.recovery_cause = Some("intent_recovery_blocked".to_string());
+        assert!(!maintenance_convergence(&wal_failed).is_complete());
+
+        let mut missing_port = healthy;
+        missing_port.port_statuses.clear();
+        assert!(!maintenance_convergence(&missing_port).is_complete());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_status_body_overrides_ordinary_ready_projection() {
+        let root = temp_root("maintenance-status-truth");
+        seed_active_maintenance(&root, "op-status");
+        let state = test_neutron_state(&root);
+        *state.runtime.write().await = healthy_maintenance_runtime();
+
+        let response = build_neutron_status_response(&state, false).await;
+        let body = serde_json::to_value(response).unwrap();
+
+        assert_eq!(body["transaction_state"], "blocked");
+        assert!(matches!(
+            body["overall_readiness"].as_str(),
+            Some("degraded" | "blocked")
+        ));
+        assert_eq!(body["maintenance_phase"], "maintenance_bypass");
+        assert_eq!(body["maintenance_operation_id"], "op-status");
+        assert_eq!(body["maintenance_reason"], "planned_upgrade_bypass");
+        assert_eq!(body["maintenance_action"], "complete_or_repair_maintenance");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn request_status(router: Router, method: Method, path: &str) -> StatusCode {
+        router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_actual_routers_isolate_admin_routes_and_fence_tcp_mutations() {
+        let root = temp_root("maintenance-real-routers");
+        seed_active_maintenance(&root, "op-router");
+        let state = test_neutron_state(&root);
+        let admin = build_admin_router(state.clone());
+        let runtime = build_router(
+            state.registry.clone(),
+            state.control_plane.clone(),
+            state.ovs_bridge.clone(),
+            state.wal.clone(),
+            state.maintenance.clone(),
+        );
+        let neutron = runtime.router.clone();
+        let tcp = crate::api_routes::build_router(
+            state.control_plane.clone(),
+            state.maintenance.clone(),
+        );
+
+        assert_eq!(
+            request_status(
+                admin.clone(),
+                Method::GET,
+                "/api/v1/admin/maintenance"
+            )
+            .await,
+            StatusCode::OK
+        );
+        for (method, path) in [
+            (Method::POST, "/api/v1/admin/maintenance/enter"),
+            (Method::GET, "/api/v1/admin/maintenance"),
+            (Method::POST, "/api/v1/admin/maintenance/exit"),
+            (Method::POST, "/api/v1/admin/maintenance/abort"),
+        ] {
+            assert_ne!(
+                request_status(admin.clone(), method.clone(), path).await,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                request_status(neutron.clone(), method.clone(), path).await,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                request_status(tcp.clone(), method, path).await,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(
+            request_status(admin.clone(), Method::GET, "/metrics").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request_status(
+                tcp,
+                Method::POST,
+                "/api/v1/tap-test/groups"
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
+        runtime.background.abort().await;
+        let _ = std::fs::remove_dir_all(root);
     }
 
 }

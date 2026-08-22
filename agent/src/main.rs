@@ -1983,4 +1983,60 @@ ipv6_timeout_seconds = 43
         .unwrap_err()
         .contains("FRAG_CONTEXT_V4"));
     }
+
+    #[tokio::test]
+    async fn neutron_maintenance_admin_binder_anchors_directory_and_enforces_private_socket() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+        let root = startup_config_path("maintenance-admin-bind");
+        let parent = root.join("run-aria");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let policy = AdminSocketBindPolicy::for_owner(uid, gid);
+        let directory = AdminSocketDirectory::open(&parent, policy).unwrap();
+
+        std::fs::rename(&parent, root.join("anchored")).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let listener = directory.bind("aria-admin.sock").await.unwrap();
+
+        let anchored_socket = root.join("anchored/aria-admin.sock");
+        assert!(anchored_socket.exists());
+        assert!(!parent.join("aria-admin.sock").exists());
+        let metadata = std::fs::symlink_metadata(&anchored_socket).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(metadata.gid(), gid);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        drop(listener);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_admin_binder_rejects_symlink_and_group_world_writable_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = startup_config_path("maintenance-admin-parent-policy");
+        let unsafe_parent = root.join("unsafe");
+        let real_parent = root.join("real");
+        let linked_parent = root.join("linked");
+        std::fs::create_dir_all(&unsafe_parent).unwrap();
+        std::fs::create_dir_all(&real_parent).unwrap();
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let policy = AdminSocketBindPolicy::for_owner(
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+        );
+
+        assert!(AdminSocketDirectory::open(&unsafe_parent, policy).is_err());
+        assert!(AdminSocketDirectory::open(&linked_parent, policy).is_err());
+        let production = AdminSocketBindPolicy::production();
+        assert_eq!(production.required_uid, 0);
+        assert_eq!(production.required_gid, 0);
+        assert_eq!(production.socket_mode, 0o600);
+        assert_eq!(production.parent_forbidden_mode, 0o022);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

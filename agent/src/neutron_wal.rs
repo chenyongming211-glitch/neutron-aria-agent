@@ -2942,4 +2942,39 @@ mod tests {
             let _ = fs::remove_dir_all(root);
         }
     }
+
+    #[test]
+    fn neutron_maintenance_wal_compaction_retains_only_canonical_state_and_pending_transition() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let preparing = maintenance_state("op-compact");
+        let mut active = preparing.clone();
+        active.phase = MaintenancePhase::MaintenanceBypass;
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(preparing))
+            .unwrap();
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_commit_state(active.clone()))
+            .unwrap();
+        for progress in 1..=128 {
+            let mut next = active.clone();
+            next.last_progress_at_ms += progress;
+            wal.append_maintenance_record(MaintenanceWalRecord::progress_commit_state(next))
+                .unwrap();
+        }
+
+        wal.compact_now_for_test().unwrap();
+
+        let scan = wal.scan();
+        assert!(scan.maintenance_failures == 0);
+        assert!(
+            scan.maintenance_records.len() <= 2,
+            "checkpoint must retain one canonical state plus at most one pending transition"
+        );
+        let replay = wal.replay();
+        assert!(replay.maintenance.requires_bypass);
+        assert_eq!(
+            replay.maintenance.state.operation_id.as_deref(),
+            Some("op-compact")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

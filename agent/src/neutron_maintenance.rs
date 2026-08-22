@@ -1143,6 +1143,126 @@ pub(crate) fn tcp_route_specs() -> &'static [(&'static str, &'static str)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Clone)]
+    struct FaultStore {
+        records: Arc<StdMutex<Vec<MaintenanceWalRecord>>>,
+        append_results: Arc<StdMutex<VecDeque<Result<(), String>>>>,
+    }
+
+    impl FaultStore {
+        fn new(records: Vec<MaintenanceWalRecord>) -> Self {
+            Self {
+                records: Arc::new(StdMutex::new(records)),
+                append_results: Arc::new(StdMutex::new(VecDeque::new())),
+            }
+        }
+
+        fn push_append_result(&self, result: Result<(), &str>) {
+            self.append_results
+                .lock()
+                .unwrap()
+                .push_back(result.map_err(str::to_string));
+        }
+
+        fn records(&self) -> Vec<MaintenanceWalRecord> {
+            self.records.lock().unwrap().clone()
+        }
+    }
+
+    impl MaintenanceStore for FaultStore {
+        fn load(&self) -> MaintenanceStoreReplay {
+            match replay_maintenance_records(&self.records()) {
+                Ok(replay) => MaintenanceStoreReplay {
+                    state: replay.state,
+                    failures: 0,
+                    pending_transition: replay.pending_transition,
+                    terminal_action: replay.terminal_action,
+                },
+                Err(_) => MaintenanceStoreReplay {
+                    state: MaintenanceState::inactive(),
+                    failures: 1,
+                    pending_transition: None,
+                    terminal_action: None,
+                },
+            }
+        }
+
+        fn append(&self, record: MaintenanceWalRecord) -> Result<(), String> {
+            if let Some(result) = self.append_results.lock().unwrap().pop_front() {
+                result?;
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FaultGate {
+        results: Arc<StdMutex<VecDeque<Result<(), String>>>>,
+        calls: Arc<StdMutex<Vec<bool>>>,
+    }
+
+    impl FaultGate {
+        fn push_result(&self, result: Result<(), &str>) {
+            self.results
+                .lock()
+                .unwrap()
+                .push_back(result.map_err(str::to_string));
+        }
+
+        fn calls(&self) -> Vec<bool> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl MaintenanceGateRuntime for FaultGate {
+        fn set_bypass_verified(&self, enabled: bool) -> MaintenanceIoFuture<'_> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(enabled);
+                self.results
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingAudit {
+        events: Arc<StdMutex<Vec<MaintenanceAuditEvent>>>,
+    }
+
+    impl MaintenanceAuditSink for CapturingAudit {
+        fn emit(&self, event: MaintenanceAuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn active_records(operation_id: &str) -> Vec<MaintenanceWalRecord> {
+        let active = active_state(operation_id, 41, "sha256:host-41");
+        let mut preparing = active.clone();
+        preparing.phase = MaintenancePhase::BypassPreparing;
+        vec![
+            MaintenanceWalRecord::enter_intent_state(preparing),
+            MaintenanceWalRecord::enter_commit_state(active),
+        ]
+    }
+
+    fn coordinator_with_faults(
+        store: FaultStore,
+        gate: FaultGate,
+        audit: CapturingAudit,
+    ) -> Arc<MaintenanceCoordinator> {
+        Arc::new(MaintenanceCoordinator::new_with_dependencies(
+            Arc::new(store),
+            Arc::new(gate),
+            Arc::new(audit),
+        ))
+    }
 
     fn active_state(operation_id: &str, generation: u64, desired_hash: &str) -> MaintenanceState {
         MaintenanceState {
@@ -1425,6 +1545,241 @@ mod tests {
         for (_, path) in admin_route_specs() {
             assert!(!neutron_route_specs().iter().any(|(_, route)| route == path));
             assert!(!tcp_route_specs().iter().any(|(_, route)| route == path));
+        }
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_recovery_failure_blocks_restore_and_same_id_repairs_after_proof() {
+        let mut preparing = active_state("op-repair", 41, "sha256:host-41");
+        preparing.phase = MaintenancePhase::BypassPreparing;
+        let store = FaultStore::new(vec![MaintenanceWalRecord::enter_intent_state(preparing)]);
+        let gate = FaultGate::default();
+        gate.push_result(Err("authority_identity_drift"));
+        gate.push_result(Ok(()));
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+
+        assert!(coordinator.recover_before_reconciliation().await.is_err());
+        let failed = coordinator.status().await;
+        assert!(failed.is_active());
+        assert!(coordinator.is_blocked());
+        assert!(failed
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("authority_identity_drift"));
+        assert!(coordinator
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+            .is_err());
+
+        let (disposition, repaired) = coordinator
+            .enter(enter_request("op-repair"), convergence())
+            .await
+            .unwrap();
+        assert_eq!(disposition, MaintenanceDisposition::Mutate);
+        assert!(!coordinator.is_blocked());
+        assert!(repaired.last_error.is_none());
+        assert_eq!(gate.calls(), vec![true, true]);
+        assert!(matches!(
+            store.records().last(),
+            Some(MaintenanceWalRecord::EnterCommit { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_atomic_writer_lease_serializes_enter_and_mutation() {
+        let store = FaultStore::new(Vec::new());
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store,
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let writer_lease = coordinator
+            .acquire_writer(MaintenanceWriter::Direct, None)
+            .await
+            .unwrap();
+        let mutation_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enter_coordinator = coordinator.clone();
+        let enter_task = tokio::spawn(async move {
+            enter_coordinator
+                .enter(enter_request("op-race"), convergence())
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(gate.calls().is_empty(), "enter must wait behind writer lease");
+        mutation_count.fetch_add(1, Ordering::SeqCst);
+        drop(writer_lease);
+        enter_task.await.unwrap().unwrap();
+
+        assert_eq!(mutation_count.load(Ordering::SeqCst), 1);
+        assert!(coordinator
+            .acquire_writer(MaintenanceWriter::Direct, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_exit_retry_resumes_pending_intent_without_duplicate_and_is_idempotent() {
+        let store = FaultStore::new(active_records("op-exit"));
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let request = MaintenanceExitRequest {
+            operation_id: "op-exit".to_string(),
+            expected_applied_generation: 41,
+            expected_applied_desired_hash: Some("sha256:host-41".to_string()),
+        };
+        store.push_append_result(Ok(()));
+        store.push_append_result(Err("terminal_commit_io"));
+
+        assert!(coordinator
+            .exit(request.clone(), convergence())
+            .await
+            .is_err());
+        assert!(!coordinator.is_blocked(), "verified restore is retryable");
+        assert!(coordinator.status().await.is_active());
+        let (disposition, terminal) = coordinator
+            .exit(request.clone(), convergence())
+            .await
+            .unwrap();
+        assert_eq!(disposition, MaintenanceDisposition::Mutate);
+        assert_eq!(terminal.phase, MaintenancePhase::Committed);
+        assert_eq!(
+            store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, MaintenanceWalRecord::ExitIntent { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            coordinator.exit(request, convergence()).await.unwrap().0,
+            MaintenanceDisposition::Idempotent
+        );
+        assert_eq!(gate.calls(), vec![false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_uncertain_gate_clear_and_restore_failure_marks_blocked() {
+        let store = FaultStore::new(active_records("op-uncertain"));
+        let gate = FaultGate::default();
+        gate.push_result(Err("clear_readback_unknown"));
+        gate.push_result(Err("bypass_restore_unknown"));
+        let coordinator = coordinator_with_faults(
+            store,
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let request = MaintenanceExitRequest {
+            operation_id: "op-uncertain".to_string(),
+            expected_applied_generation: 41,
+            expected_applied_desired_hash: Some("sha256:host-41".to_string()),
+        };
+
+        assert!(coordinator.exit(request, convergence()).await.is_err());
+        assert_eq!(gate.calls(), vec![false, true]);
+        assert!(coordinator.is_blocked());
+        assert!(coordinator.status().await.is_active());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_abort_terminal_lost_response_retry_is_idempotent() {
+        let store = FaultStore::new(active_records("op-abort"));
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let request = MaintenanceAbortRequest {
+            operation_id: "op-abort".to_string(),
+            expected_phase: MaintenancePhase::MaintenanceBypass,
+            error: Some("candidate_failed".to_string()),
+        };
+
+        let first = coordinator
+            .abort(request.clone(), convergence())
+            .await
+            .unwrap();
+        assert_eq!(first.0, MaintenanceDisposition::Mutate);
+        assert_eq!(first.1.phase, MaintenancePhase::Committed);
+        let before = store.records().len();
+        assert_eq!(
+            coordinator.abort(request, convergence()).await.unwrap().0,
+            MaintenanceDisposition::Idempotent
+        );
+        assert_eq!(store.records().len(), before);
+        assert_eq!(gate.calls(), vec![false]);
+    }
+
+    #[test]
+    fn neutron_maintenance_replay_accepts_exact_pending_retry_and_rejects_identity_drift() {
+        let records = active_records("op-pending");
+        let active = active_state("op-pending", 41, "sha256:host-41");
+        let mut verifying = active.clone();
+        verifying.phase = MaintenancePhase::Verifying;
+        let intent = MaintenanceWalRecord::exit_intent_state(verifying.clone());
+        let mut exact_retry = records.clone();
+        exact_retry.extend([intent.clone(), intent]);
+        let replay = replay_maintenance_records(&exact_retry).unwrap();
+        assert!(replay.requires_bypass);
+        assert_eq!(
+            replay.pending_transition,
+            Some(MaintenancePendingTransition::Exit)
+        );
+
+        verifying.expected_generation += 1;
+        let mut drift = records;
+        drift.extend([
+            MaintenanceWalRecord::exit_intent_state(active_state(
+                "op-pending",
+                41,
+                "sha256:host-41",
+            )),
+            MaintenanceWalRecord::exit_intent_state(verifying),
+        ]);
+        assert!(replay_maintenance_records(&drift).is_err());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_audit_events_are_bounded_structured_and_redacted() {
+        let store = FaultStore::new(Vec::new());
+        let gate = FaultGate::default();
+        let audit = CapturingAudit::default();
+        let coordinator = coordinator_with_faults(store, gate, audit.clone());
+        let mut request = enter_request("op-audit");
+        request.reason = "r".repeat(MAX_REASON_BYTES);
+
+        coordinator
+            .enter(request, convergence())
+            .await
+            .unwrap();
+        coordinator.audited_status().await;
+        let events = audit.events.lock().unwrap().clone();
+        assert!(events.iter().any(|event| {
+            event.action == MaintenanceAuditAction::Enter
+                && event.outcome == MaintenanceAuditOutcome::Attempt
+                && event.operation_id.as_deref() == Some("op-audit")
+                && event.authorization == "root_only_uds"
+        }));
+        assert!(events.iter().any(|event| {
+            event.action == MaintenanceAuditAction::Get
+                && event.outcome == MaintenanceAuditOutcome::Success
+        }));
+        for event in events {
+            let encoded = serde_json::to_value(event).unwrap();
+            assert!(encoded.get("policy").is_none());
+            assert!(encoded.get("token").is_none());
+            assert!(encoded.get("secret").is_none());
+            assert!(encoded["reason"].as_str().unwrap_or("").len() <= MAX_REASON_BYTES);
         }
     }
 }
