@@ -432,21 +432,21 @@ dual-stack traffic, restart/rollback, and root-socket field evidence remain
 - Produces: `LocalClient.maintenance_status()` and typed `maintenance_operation_id` submission.
 - Produces bounded status fields: `maintenance_phase`, `maintenance_operation_id`, `stable_read_attempts`, `stable_desired_hash`, `last_progress_at`.
 
-- [ ] **Step 1: Write failing double-read tests**
+- [x] **Step 1: Write failing double-read tests**
 
 Cover equal hash, changed hash, event arriving between reads, queue overflow, Neutron timeout, foreign-host ambiguity, and five-attempt exhaustion. Assert that no snapshot is submitted before two equal reads.
 
-- [ ] **Step 2: Run Python 2-compatible unit tests and observe failure**
+- [x] **Step 2: Run Python 2-compatible unit tests and observe failure**
 
 Run: `python -m unittest neutron_aria.tests.unit.test_event_loop neutron_aria.tests.unit.test_service neutron_aria.tests.unit.test_uds_client`
 
 Expected: FAIL because stable resync is absent.
 
-- [ ] **Step 3: Extract snapshot construction from submission**
+- [x] **Step 3: Extract snapshot construction from submission**
 
 Create `_build_host_snapshot_candidate()` from the existing read/build portion of `full_resync()`. It returns a canonical snapshot and desired hash but does not mutate the local state store or call UDS.
 
-- [ ] **Step 4: Implement the bounded stability loop**
+- [x] **Step 4: Implement the bounded stability loop**
 
 ```python
 for attempt in range(1, max_attempts + 1):
@@ -460,15 +460,15 @@ raise LocalApiTimeoutError("maintenance_snapshot_not_stable")
 
 Stability requires equal desired hashes, equal projected port IDs, no overflow, no unclassified foreign-host decision, and no pending merged event at the decision point.
 
-- [ ] **Step 5: Make maintenance startup full-host only**
+- [x] **Step 5: Make maintenance startup full-host only**
 
 The agent subscribes to RPC before its initial read. If datapath status reports active maintenance, `AgentService.initialize()` invokes stable full resync, suppresses port-scoped apply/delete, and includes the matching operation ID in the request.
 
-- [ ] **Step 6: Persist only progress identity**
+- [x] **Step 6: Persist only progress identity**
 
 Store operation ID, attempt count, desired hash, and timestamp. Do not persist Neutron policy as a second authority and do not transfer the old process event buffer.
 
-- [ ] **Step 7: Run Python unit suites in Python 2.7 and Python 3**
+- [x] **Step 7: Run Python unit suites in Python 2.7 and Python 3**
 
 Run in the clean legacy container: `python -m unittest discover -s neutron_aria/tests/unit -p 'test_*.py'`.
 
@@ -476,7 +476,7 @@ Run on CI Python 3: `python3 -m unittest discover -s openstack/neutron_aria/neut
 
 Expected: PASS on both runtimes.
 
-- [ ] **Step 8: Commit the D4 source barrier**
+- [x] **Step 8: Commit the D4 source barrier**
 
 ```bash
 git add openstack/neutron_aria/neutron_aria/agent/event_loop.py \
@@ -486,6 +486,23 @@ git add openstack/neutron_aria/neutron_aria/agent/event_loop.py \
   openstack/neutron_aria/neutron_aria/tests/unit
 git commit -m "feat(neutron): add maintenance stable full resync"
 ```
+
+**D4 closure evidence (2026-08-22):** The tests-only RED commit
+`79e7acd802963251c51962784777dbf3b9f93ecf` failed as intended in Actions
+run `32571387258` because the production stable-resync interfaces were absent.
+The GREEN source barrier is
+`3e8f34073ef47dbd80f1d06467b5019273a4cfe0`; its push-triggered run
+`32571840278` passed fast contracts, Neutron DB contracts, and the Python 2.7
+clean-install/compile gate. Local Python 3 verification passed all 767 unit
+tests with 19 skips. The exact-source forced run `32571874114` additionally
+passed Rust behavior, eBPF, static userspace/agent builds, and the linked
+`tc_ingress=480` / `tc_egress=480` stack gate. Stable full resync is bounded to
+five attempts, admits only two equal full-host reads with no intervening merged
+event/overflow/foreign-host ambiguity, persists progress identity only, and
+binds submission to the active maintenance operation ID. Real OpenStack/EL
+4.18 verifier/load/attach, dual-stack traffic, restart/rollback, and root-socket
+field evidence remain `deferred/pending`; `maintenance_gate_capable` remains
+`false`, so this closure is not production-readiness approval.
 
 ### Task 6: Add Diagnostic Liveness Without Weakening Docker Health
 
