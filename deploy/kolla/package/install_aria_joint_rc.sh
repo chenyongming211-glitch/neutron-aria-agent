@@ -90,6 +90,7 @@ component() {
         EXPECTED_EBPF_SHA256="${DATAPATH_EXPECTED_EBPF_SHA256:-}" \
         EXPECTED_EBPF_PERF_SHA256="${DATAPATH_EXPECTED_EBPF_PERF_SHA256:-}" \
         OPERATION_ID="${OPERATION_ID}" JOINT_MAINTENANCE_MODE=true \
+        FORCE_RUNTIME_MIGRATION=true \
             "${DATAPATH_INSTALLER}" "${action}"
     else
         IMAGE_REF="${AGENT_IMAGE_REF}" EXPECTED_IMAGE_ID="${AGENT_EXPECTED_IMAGE_ID}" \
@@ -274,9 +275,13 @@ main() {
     lock_dir="${JOINT_LOCK_PATH}.held"
     mkdir "${lock_dir}" 2>/dev/null || die "another joint upgrade owns the host"
     trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
+    if [ -z "${OPERATION_ID}" ] && [ "${action}" != install ] && [ "${action}" != dry-run ]; then
+        die "OPERATION_ID is required for ${action}"
+    fi
     if [ -z "${OPERATION_ID}" ]; then
         OPERATION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
     fi
+    [ "${action}" != install ] || echo "operation_id=${OPERATION_ID}"
     case "${action}" in
         dry-run) preflight; component datapath prepare; component agent prepare ;;
         install) do_install ;;
