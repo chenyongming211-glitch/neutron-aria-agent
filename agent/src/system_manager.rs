@@ -1566,7 +1566,7 @@ mod tests {
         assert!(start.contains("quiesced_desired.conntrack_enabled = false;"));
         assert!(start.contains("quiesced_desired.acl_enabled = false;"));
         assert!(start.contains(
-            "replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)"
+            "replay_state_from_snapshot(&mut bpf, pin_path, state_path, &quiesced_desired)"
         ));
         assert!(start.contains(
             "replay_standalone_state_to_pinned_maps_from_snapshot"

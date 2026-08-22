@@ -1055,6 +1055,36 @@ mod tests {
     }
 
     #[test]
+    fn acl_maintenance_packet_plan_skips_all_acl_ct_fragment_reads_in_both_directions() {
+        for direction in [DIR_INGRESS, DIR_EGRESS] {
+            let plan = acl_ct_packet_access_plan(PacketAclCtGate::Bypass, direction);
+            assert!(plan.gate_checked_first);
+            assert!(!plan.reads_tap_config);
+            assert!(!plan.reads_acl_active_bank);
+            assert!(!plan.reads_fragment_epoch);
+            assert!(!plan.reads_fragment_authority);
+            assert!(!plan.reads_acl_state);
+            assert!(!plan.reads_conntrack_state);
+            assert!(plan.runs_unrelated_pipeline);
+        }
+    }
+
+    #[test]
+    fn acl_maintenance_packet_plan_enforces_only_after_gate_in_both_directions() {
+        for direction in [DIR_INGRESS, DIR_EGRESS] {
+            let plan = acl_ct_packet_access_plan(PacketAclCtGate::Enforce, direction);
+            assert!(plan.gate_checked_first);
+            assert!(plan.reads_tap_config);
+            assert!(plan.reads_acl_active_bank);
+            assert!(plan.reads_fragment_epoch);
+            assert!(plan.reads_fragment_authority);
+            assert!(plan.reads_acl_state);
+            assert!(plan.reads_conntrack_state);
+            assert!(plan.runs_unrelated_pipeline);
+        }
+    }
+
+    #[test]
     fn fragment_map_layouts_are_stable() {
         assert_eq!(core::mem::size_of::<FragmentKind>(), 1);
 

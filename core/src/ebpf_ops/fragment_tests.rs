@@ -6,8 +6,9 @@ use super::fragment::{
     validate_fragment_runtime_maps_with, FragmentRemoveOutcome, FragmentRuntimeMapKind,
 };
 use super::{
-    advance_fragment_epoch_strict, read_fragment_epoch, ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES,
-    NETWORK_MAP_NAMES, STREAM_CRITICAL_NETWORK_MAP_NAMES,
+    advance_fragment_epoch_strict, missing_critical_network_maps, read_fragment_epoch,
+    TraceMapMode, ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
+    STREAM_CRITICAL_NETWORK_MAP_NAMES,
 };
 use crate::common::{
     FragmentConfig, FragmentContextKey4, FragmentContextKey6, FRAGMENT_CONFIG_DISABLED,
@@ -192,6 +193,20 @@ fn fragment_epoch_maps_are_in_every_runtime_pin_inventory() {
         assert!(CRITICAL_NETWORK_MAP_NAMES.contains(&map_name));
         assert!(STREAM_CRITICAL_NETWORK_MAP_NAMES.contains(&map_name));
     }
+}
+
+#[test]
+fn maintenance_stream_authority_rejects_inventory_without_trace_events() {
+    let observed = STREAM_CRITICAL_NETWORK_MAP_NAMES
+        .iter()
+        .copied()
+        .filter(|name| *name != "TRACE_EVENTS")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        missing_critical_network_maps(TraceMapMode::Stream, &observed),
+        vec!["TRACE_EVENTS"]
+    );
+    assert!(missing_critical_network_maps(TraceMapMode::Legacy, &observed).is_empty());
 }
 
 #[test]

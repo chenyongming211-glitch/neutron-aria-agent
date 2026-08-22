@@ -30,7 +30,7 @@ COMPATIBILITY = {
     "runtime_state_schema_version": 1,
     "minimum_kernel_profile": "rhel8-4.18",
     "managed_domain_contract_version": "2026-06-v0.9",
-    "maintenance_gate_capable": True,
+    "maintenance_gate_capable": False,
     "ebpf_abi_hash": "a" * 64,
     "map_schema_hash": "b" * 64,
 }

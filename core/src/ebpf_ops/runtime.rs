@@ -739,8 +739,9 @@ pub fn update_firewall_config(
 mod tests {
     use super::{
         firewall_config_with_acl_bank, firewall_config_with_acl_maintenance_bypass,
-        firewall_config_with_runtime_updates, required_firewall_config, required_tap_config,
-        serialized_firewall_config_rmw, tap_config_with_acl_bank,
+        firewall_config_with_runtime_updates, initialize_firewall_config_serialized,
+        required_firewall_config, required_tap_config, serialized_firewall_config_rmw,
+        tap_config_with_acl_bank,
         tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
         validate_managed_firewall_config_proof_facts, FirewallConfigPatch,
         FirewallConfigStore, ManagedFirewallConfigProofFacts,
@@ -957,6 +958,26 @@ mod tests {
         assert!(error.contains("ssl_enabled"));
         assert_eq!(base.writes.load(Ordering::SeqCst), 1);
         assert_eq!(base.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn acl_projection_maintenance_pinned_replay_initialization_uses_serialized_full_readback() {
+        let mut store = TestFirewallConfigStore::new(None);
+        let update_lock = StdMutex::new(());
+        let expected = maintenance_test_firewall_config();
+
+        let observed = initialize_firewall_config_serialized(
+            &update_lock,
+            &mut store,
+            "pinned replay initialization",
+            expected,
+        )
+        .unwrap();
+
+        assert_eq!(observed, expected);
+        assert_eq!(*store.state.lock().unwrap(), Some(expected));
+        assert_eq!(store.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(store.reads.load(Ordering::SeqCst), 2);
     }
 
     #[test]

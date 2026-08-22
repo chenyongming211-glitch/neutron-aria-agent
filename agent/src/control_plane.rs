@@ -8657,14 +8657,68 @@ impl ControlPlane {
 mod tests {
     use super::*;
 
+    fn maintenance_authority_facts() -> ManagedMaintenanceAuthorityFacts {
+        ManagedMaintenanceAuthorityFacts {
+            configured_pin_path: PathBuf::from("/sys/fs/bpf/aria/global-v2"),
+            candidate_pin_path: PathBuf::from("/sys/fs/bpf/aria/global-v2"),
+            configured_mode: TraceMapMode::Stream,
+            persisted_mode: TraceMapMode::Stream,
+            expected_firewall_config_map_id: 410,
+            current_firewall_config_map_id: 410,
+            expected_owner_program_ids: vec![701, 702],
+            current_owner_program_ids: vec![701, 702],
+            live_owner_count: 2,
+            complete_mode_inventory: true,
+        }
+    }
+
+    #[test]
+    fn maintenance_authority_rejects_root_owned_alternate_bpffs_namespace() {
+        let mut facts = maintenance_authority_facts();
+        facts.candidate_pin_path = PathBuf::from("/sys/fs/bpf/alternate/global-v2");
+        let error = validate_managed_maintenance_authority_facts(&facts)
+            .expect_err("caller-chosen alternate bpffs must not self-attest");
+        assert!(error.contains("configured managed authority"));
+    }
+
+    #[test]
+    fn maintenance_authority_rejects_current_pin_or_live_owner_replacement() {
+        let mut replaced_map = maintenance_authority_facts();
+        replaced_map.current_firewall_config_map_id = 999;
+        assert!(validate_managed_maintenance_authority_facts(&replaced_map)
+            .unwrap_err()
+            .contains("FIREWALL_CONFIG map identity"));
+
+        let mut replaced_owner = maintenance_authority_facts();
+        replaced_owner.current_owner_program_ids = vec![701, 999];
+        assert!(validate_managed_maintenance_authority_facts(&replaced_owner)
+            .unwrap_err()
+            .contains("live Aria runtime identity"));
+    }
+
+    #[test]
+    fn maintenance_authority_rejects_mode_metadata_or_inventory_drift() {
+        let mut wrong_mode = maintenance_authority_facts();
+        wrong_mode.persisted_mode = TraceMapMode::Legacy;
+        assert!(validate_managed_maintenance_authority_facts(&wrong_mode)
+            .unwrap_err()
+            .contains("runtime mode"));
+
+        let mut incomplete = maintenance_authority_facts();
+        incomplete.complete_mode_inventory = false;
+        assert!(validate_managed_maintenance_authority_facts(&incomplete)
+            .unwrap_err()
+            .contains("mode-aware inventory"));
+    }
+
     #[test]
     fn neutron_acl_maintenance_gate_has_no_ovs_tc_or_qdisc_lifecycle_side_effects() {
-        let runtime = include_str!("../../core/src/ebpf_ops/runtime.rs");
-        let setter = runtime
-            .split("pub fn set_acl_maintenance_bypass(")
+        let source = include_str!("control_plane.rs");
+        let setter = source
+            .split("pub(crate) async fn set_acl_maintenance_bypass(")
             .nth(1)
-            .expect("shared ACL maintenance setter must exist")
-            .split("pub fn update_firewall_config(")
+            .expect("agent-owned ACL maintenance setter must exist")
+            .split("pub async fn")
             .next()
             .unwrap();
 
