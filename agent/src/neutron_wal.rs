@@ -261,6 +261,57 @@ fn matching_delete_commit_valid(
         }))
 }
 
+fn snapshot_maintenance_commit_valid(
+    state: &NeutronWalState,
+    intent: &PendingNeutronIntent,
+    maintenance: &MaintenanceWalRecord,
+    maintenance_prefix: &[MaintenanceWalRecord],
+) -> Result<MaintenanceWalRecord, String> {
+    if intent.kind != "snapshot" || is_protected_inventory_intent(intent) {
+        return Err("maintenance snapshot commit requires an ordinary snapshot intent".to_string());
+    }
+    if state.status_hash.is_none()
+        || !state.status_hash_valid()?
+        || state.accepted_generation != intent.generation
+        || state.applied_generation != intent.generation
+        || state.pending_generation.is_some()
+        || state.desired_hash != intent.desired_hash
+        || state.applied_desired_hash != intent.desired_hash
+        || state.authority_state != "ready"
+        || state.recovery_cause.is_some()
+    {
+        return Err("maintenance snapshot commit state does not match its intent".to_string());
+    }
+
+    let encoded = serde_json::to_vec(maintenance)
+        .map_err(|error| format!("encode maintenance snapshot progress: {}", error))?;
+    let decoded = decode_maintenance_record(&encoded)?;
+    let progress = match &decoded {
+        MaintenanceWalRecord::ProgressCommit { state, .. } => state,
+        _ => {
+            return Err(
+                "maintenance snapshot commit must contain a progress commit".to_string(),
+            )
+        }
+    };
+    if progress.applied_generation != intent.generation
+        || progress.applied_generation != state.applied_generation
+        || progress.applied_desired_hash != intent.desired_hash
+        || progress.applied_desired_hash != state.applied_desired_hash
+    {
+        return Err("maintenance snapshot progress identity drifted".to_string());
+    }
+
+    let before = replay_maintenance_records(maintenance_prefix)?;
+    if !before.state.is_active() || before.pending_transition.is_some() {
+        return Err("maintenance snapshot progress has no active transaction".to_string());
+    }
+    let mut candidate = maintenance_prefix.to_vec();
+    candidate.push(decoded.clone());
+    replay_maintenance_records(&candidate)?;
+    Ok(decoded)
+}
+
 fn empty_neutron_wal_state() -> NeutronWalState {
     NeutronWalState {
         authority_state: "idle".to_string(),
@@ -634,33 +685,27 @@ impl NeutronWal {
                     scan.pending_intent = None;
                 }
                 NeutronWalEntry::SnapshotMaintenanceCommit { state, maintenance } => {
-                    if scan.pending_intent.as_ref().is_some_and(|intent| {
-                        intent.kind != "snapshot" || is_protected_inventory_intent(intent)
-                    })
-                        || !matches!(state.status_hash_valid(), Ok(true))
-                    {
+                    let Some(intent) = scan.pending_intent.as_ref() else {
                         scan.failures += 1;
                         scan.maintenance_failures += 1;
                         continue;
-                    }
-                    let encoded = match serde_json::to_vec(&maintenance) {
-                        Ok(encoded) => encoded,
-                        Err(_) => {
-                            scan.failures += 1;
-                            scan.maintenance_failures += 1;
-                            continue;
-                        }
                     };
-                    match decode_maintenance_record(&encoded) {
-                        Ok(record) => scan.maintenance_records.push(record),
+                    match snapshot_maintenance_commit_valid(
+                        &state,
+                        intent,
+                        &maintenance,
+                        &scan.maintenance_records,
+                    ) {
+                        Ok(record) => {
+                            scan.maintenance_records.push(record);
+                            scan.last_committed_state = Some(state);
+                            scan.pending_intent = None;
+                        }
                         Err(_) => {
                             scan.failures += 1;
                             scan.maintenance_failures += 1;
-                            continue;
                         }
                     }
-                    scan.last_committed_state = Some(state);
-                    scan.pending_intent = None;
                 }
             }
         }
@@ -817,6 +862,7 @@ impl NeutronWal {
                     maintenance.state,
                     maintenance.pending_transition,
                     maintenance.terminal_action,
+                    maintenance.terminal_expected_phase,
                     maintenance.gate_state,
                     maintenance.block_cause,
                 ),

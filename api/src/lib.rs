@@ -35,14 +35,14 @@ pub const NEUTRON_UDS_SCHEMA_VERSION_MIN: u32 = 1;
 pub const NEUTRON_UDS_SCHEMA_VERSION_MAX: u32 = 1;
 pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
 pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
-pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-3";
+pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-4";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
 pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-6";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
 pub const NEUTRON_STATUS_SCHEMA_VERSION_MIN: u32 = 2;
-pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 3;
-pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-3";
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 4;
+pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-4";
 pub const NEUTRON_COUNTERS_SCHEMA_VERSION: u32 = 2;
 pub const NEUTRON_MAX_COUNTER_BUCKET_ROWS_PER_PORT: usize = 512;
 
@@ -660,11 +660,11 @@ pub struct NeutronCapabilitiesResponse {
     pub status_schema_version_min: u32,
     /// Maximum supported Status response schema version.
     #[serde(default)]
-    #[schema(example = 3)]
+    #[schema(example = 4)]
     pub status_schema_version_max: u32,
     /// Stable hash/version for the independent Status response vocabulary.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-status-3")]
+    #[schema(example = "v0.9-neutron-status-4")]
     pub status_contract_hash: String,
     /// Authority model for attach/detach operations.
     #[schema(example = "neutron_snapshot")]
@@ -694,7 +694,7 @@ pub struct NeutronCapabilitiesResponse {
     pub timeout_ms: u64,
     /// Stable hash/version for UDS error code vocabulary.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-errors-3")]
+    #[schema(example = "v0.9-neutron-errors-4")]
     pub error_codes_hash: String,
     /// Expected local Unix peer authentication policy.
     #[serde(default)]
@@ -841,7 +841,7 @@ pub struct NeutronStatusV1Response {
     #[serde(default)]
     pub port_statuses: Vec<NeutronStatusPortEvidence>,
     pub active_instances: Vec<String>,
-    /// Optional v2 counters section (schema v3 status responses).
+    /// Optional v2 counters section (schema v3+ status responses).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counters: Option<NeutronStatusCountersV2>,
 }
@@ -2778,14 +2778,14 @@ mod tests {
             .expect("current Neutron capabilities must serialize");
 
         assert_eq!(capabilities["status_schema_version_min"], 2);
-        assert_eq!(capabilities["status_schema_version_max"], 3);
+        assert_eq!(capabilities["status_schema_version_max"], 4);
         assert_eq!(
             capabilities["status_contract_hash"],
-            "v0.9-neutron-status-3"
+            "v0.9-neutron-status-4"
         );
         assert_eq!(
             capabilities["error_codes_hash"],
-            "v0.9-neutron-errors-3"
+            "v0.9-neutron-errors-4"
         );
         assert_eq!(
             capabilities["capability_hash"],
@@ -2801,8 +2801,8 @@ mod tests {
         let caps = NeutronCapabilitiesResponse::current();
         assert!(caps.counters_v1);
         assert_eq!(caps.status_schema_version_min, 2);
-        assert_eq!(caps.status_schema_version_max, 3);
-        assert_eq!(caps.status_contract_hash, "v0.9-neutron-status-3");
+        assert_eq!(caps.status_schema_version_max, 4);
+        assert_eq!(caps.status_contract_hash, "v0.9-neutron-status-4");
         assert_eq!(caps.capability_hash, "v0.9-neutron-capabilities-6");
         assert!(caps.acl_ipv6_v1);
         assert!(caps.counters_v2);

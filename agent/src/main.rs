@@ -907,7 +907,7 @@ impl AdminPeerAuth {
 
     fn authorize(&self, cred: Option<UnixPeerCred>) -> PeerAuthDecision {
         match cred {
-            Some(cred) if cred.uid == 0 && cred.gid == 0 => PeerAuthDecision {
+            Some(cred) if cred.uid == 0 => PeerAuthDecision {
                 allowed: true,
                 reason: "admin_root_peer",
             },

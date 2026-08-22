@@ -235,6 +235,7 @@ UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 STATUS_FIXTURE_PATH = "docs/neutron-status-contract-v1-scenarios.json"
 STATUS_V2_FIXTURE_PATH = "docs/neutron-status-contract-v2-scenarios.json"
 STATUS_V3_FIXTURE_PATH = "docs/neutron-status-contract-v3-scenarios.json"
+STATUS_V4_FIXTURE_PATH = "docs/neutron-status-contract-v4-scenarios.json"
 DOMAIN_STATUS_DOC_PATH = os.path.join(
     "docs", "openstack-neutron-aria-details", "05-domain-status-heartbeat.md"
 )
@@ -456,7 +457,7 @@ def check_uds_contract_artifact():
         "supports_port_delete": True,
         "body_max_bytes": uds.NEUTRON_BODY_MAX_BYTES,
         "timeout_ms": uds.NEUTRON_TIMEOUT_MS,
-        "error_codes_hash": uds.NEUTRON_ERROR_CODES_HASH_V2,
+        "error_codes_hash": uds.NEUTRON_ERROR_CODES_HASH_V4,
         "capability_hash": uds.NEUTRON_CAPABILITY_HASH_V4,
         "counters_v1": True,
         "acl_ipv6_v1": True,
@@ -604,6 +605,7 @@ def check_status_v1_contract():
     fixture = read_json(STATUS_FIXTURE_PATH)
     fixture_v2 = read_json(STATUS_V2_FIXTURE_PATH)
     fixture_v3 = read_json(STATUS_V3_FIXTURE_PATH)
+    fixture_v4 = read_json(STATUS_V4_FIXTURE_PATH)
     expected_contract = {
         "status_schema_version_min": 2, "status_schema_version_max": 4,
         "status_contract_hash": "v0.9-neutron-status-4", "status_contract_scenarios_path": "docs/neutron-status-contract-v4-scenarios.json",
@@ -696,7 +698,74 @@ def check_status_v1_contract():
         and isinstance(sample_port["groups"][0]["cidrs"], list)
     ):
         raise SystemExit("ERROR: Status V3 counters group map shape drifted")
+    if set(fixture_v4) != {"fixture_schema_version", "status_contract", "scenarios"} or fixture_v4.get("fixture_schema_version") != 1:
+        raise SystemExit("ERROR: Status V4 fixture root schema drifted")
+    schema_v4 = fixture_v4.get("status_contract")
+    if (
+        not isinstance(schema_v4, dict)
+        or schema_v4.get("version") != 4
+        or schema_v4.get("hash") != "v0.9-neutron-status-4"
+        or schema_v4.get("error_codes_hash") != "v0.9-neutron-errors-4"
+        or schema_v4.get("capability_hash") != "v0.9-neutron-capabilities-6"
+        or schema_v4.get("new_required_action") != "complete_or_repair_maintenance"
+        or schema_v4.get("compatibility") != "status schemas 2-3 remain readable; schema 4 adds maintenance transaction truth"
+    ):
+        raise SystemExit("ERROR: Status V4 fixture contract metadata drifted")
+    v4_scenarios = fixture_v4.get("scenarios")
+    if not isinstance(v4_scenarios, list) or tuple(
+        item.get("id") for item in v4_scenarios if isinstance(item, dict)
+    ) != ("maintenance-gate-unknown", "ordinary-ready-enforce"):
+        raise SystemExit("ERROR: Status V4 scenario inventory drifted")
+    for scenario in v4_scenarios:
+        status = scenario.get("status")
+        if (
+            not isinstance(status, dict)
+            or status.get("status_schema_version") != 4
+            or status.get("status_contract_hash") != "v0.9-neutron-status-4"
+        ):
+            raise SystemExit("ERROR: Status V4 scenario identity drifted")
+    unknown = v4_scenarios[0]["status"]
+    if (
+        (unknown.get("transaction_state"), unknown.get("overall_readiness"), unknown.get("required_action"))
+        != ("blocked", "blocked", "complete_or_repair_maintenance")
+        or unknown.get("maintenance_phase") != "gate_unknown"
+        or unknown.get("acl_enforcement") != "unknown"
+        or not unknown.get("maintenance_operation_id")
+        or unknown.get("maintenance_reason") != "maintenance_gate_unknown"
+    ):
+        raise SystemExit("ERROR: Status V4 gate-unknown truth drifted")
+    uds = python_client()
+    for scenario in v4_scenarios:
+        try:
+            decoded = uds._decode_status(scenario["status"], uds.STATUS_CONTRACT_V4)
+        except Exception as error:
+            raise SystemExit(
+                "ERROR: production Python Status V4 decoder rejected %s: %s"
+                % (scenario.get("id"), error)
+            )
+        if decoded.get("status_schema_version") != 4:
+            raise SystemExit("ERROR: production Python Status V4 decoder identity drifted")
+    maintenance_contract = contract.get("maintenance")
+    if not isinstance(maintenance_contract, dict):
+        raise SystemExit("ERROR: maintenance contract is missing")
+    if tuple(maintenance_contract.get("phase_values", ())) != (
+        "ready", "bypass_preparing", "maintenance_bypass", "gate_unknown", "verifying", "committed",
+    ):
+        raise SystemExit("ERROR: maintenance phase vocabulary drifted")
+    if tuple(maintenance_contract.get("status_fields", ())) != (
+        "maintenance_phase", "maintenance_operation_id", "maintenance_reason", "maintenance_action", "acl_enforcement",
+    ):
+        raise SystemExit("ERROR: maintenance status field vocabulary drifted")
+    if maintenance_contract.get("compatibility") != "status schemas 2-3 remain readable; schema 4 adds maintenance transaction truth":
+        raise SystemExit("ERROR: maintenance Status compatibility policy drifted")
+    required_maintenance_errors = {
+        "maintenance_phase_conflict", "maintenance_gate_unknown",
+        "maintenance_wal_commit_failed", "maintenance_terminal_transition_pending",
+    }
+    if not required_maintenance_errors.issubset(set(maintenance_contract.get("error_codes", ()))):
+        raise SystemExit("ERROR: maintenance error vocabulary drifted")
     expected_enums = {
+        "MaintenancePhase": ("Ready", "BypassPreparing", "MaintenanceBypass", "GateUnknown", "Verifying", "Committed"),
         "NeutronStatusTransactionState": ("Idle", "Pending", "Classified", "Blocked", "Recovery"),
         "NeutronStatusOverallReadiness": ("Ready", "Degraded", "Blocked", "Unknown"),
         "NeutronStatusRequiredAction": ("None", "Poll", "RetrySnapshot", "RecoverPending", "FullResync", "Operator", "CompleteOrRepairMaintenance"),

@@ -32,6 +32,9 @@ NEUTRON_CAPABILITY_HASH_V3 = "v0.9-neutron-capabilities-5"
 NEUTRON_CAPABILITY_HASH_V4 = "v0.9-neutron-capabilities-6"
 NEUTRON_STATUS_SCHEMA_VERSION_V3 = 3
 NEUTRON_STATUS_CONTRACT_HASH_V3 = "v0.9-neutron-status-3"
+NEUTRON_STATUS_SCHEMA_VERSION_V4 = 4
+NEUTRON_STATUS_CONTRACT_HASH_V4 = "v0.9-neutron-status-4"
+NEUTRON_ERROR_CODES_HASH_V4 = "v0.9-neutron-errors-4"
 DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 
 SUPPORTED_CAPABILITY_HASHES = frozenset((
@@ -43,6 +46,7 @@ SUPPORTED_CAPABILITY_HASHES = frozenset((
 STATUS_CONTRACT_V1 = "v1"
 STATUS_CONTRACT_V2 = "v2"
 STATUS_CONTRACT_V3 = "v3"
+STATUS_CONTRACT_V4 = "v4"
 STATUS_CONTRACT_LEGACY_V0 = "legacy_v0"
 
 _STATUS_CONTRACTS = {
@@ -66,6 +70,16 @@ _STATUS_CONTRACTS = {
         NEUTRON_STATUS_SCHEMA_VERSION_V3,
         NEUTRON_STATUS_CONTRACT_HASH_V3,
     ): STATUS_CONTRACT_V3,
+    (
+        NEUTRON_STATUS_SCHEMA_VERSION_V2,
+        NEUTRON_STATUS_SCHEMA_VERSION_V4,
+        NEUTRON_STATUS_CONTRACT_HASH_V4,
+    ): STATUS_CONTRACT_V4,
+    (
+        NEUTRON_STATUS_SCHEMA_VERSION_V4,
+        NEUTRON_STATUS_SCHEMA_VERSION_V4,
+        NEUTRON_STATUS_CONTRACT_HASH_V4,
+    ): STATUS_CONTRACT_V4,
 }
 _STATUS_CONTRACT_PROFILES = {
     STATUS_CONTRACT_V1: (
@@ -79,6 +93,10 @@ _STATUS_CONTRACT_PROFILES = {
     STATUS_CONTRACT_V3: (
         NEUTRON_ERROR_CODES_HASH_V2,
         NEUTRON_CAPABILITY_HASH_V3,
+    ),
+    STATUS_CONTRACT_V4: (
+        NEUTRON_ERROR_CODES_HASH_V4,
+        NEUTRON_CAPABILITY_HASH_V4,
     ),
     STATUS_CONTRACT_LEGACY_V0: (
         NEUTRON_ERROR_CODES_HASH,
@@ -108,6 +126,12 @@ _STATUS_V1_TRIPLES = frozenset((
 _STATUS_V2_TRIPLES = frozenset(
     tuple(_STATUS_V1_TRIPLES) + (
         ("blocked", "blocked", "retry_snapshot"),
+    )
+)
+_STATUS_V4_TRIPLES = frozenset(
+    tuple(_STATUS_V2_TRIPLES) + (
+        ("blocked", "blocked", "complete_or_repair_maintenance"),
+        ("blocked", "degraded", "complete_or_repair_maintenance"),
     )
 )
 _STATUS_V1_RECOVERY_CAUSES = frozenset((None, "inventory_unavailable"))
@@ -1028,6 +1052,79 @@ def _decode_status_v3(body):
     return decoded
 
 
+def _decode_status_v4(body):
+    decoded = _decode_status_versioned(
+        body,
+        NEUTRON_STATUS_SCHEMA_VERSION_V4,
+        NEUTRON_STATUS_CONTRACT_HASH_V4,
+        _STATUS_V4_TRIPLES,
+        allow_retry_snapshot=True,
+    )
+    maintenance_action = body.get("maintenance_action")
+    acl_enforcement = _strict_string(
+        _required(body, "acl_enforcement"),
+        "acl_enforcement",
+        nonempty=True,
+    )
+    if acl_enforcement not in ("enforce", "bypass", "unknown"):
+        raise LocalApiContractError(
+            "unknown acl_enforcement %r" % acl_enforcement
+        )
+    if maintenance_action == "complete_or_repair_maintenance":
+        phase = _strict_string(
+            _required(body, "maintenance_phase"),
+            "maintenance_phase",
+            nonempty=True,
+        )
+        if phase not in (
+            "bypass_preparing", "maintenance_bypass", "gate_unknown",
+            "verifying",
+        ):
+            raise LocalApiContractError("invalid active maintenance_phase %r" % phase)
+        _strict_string(
+            _required(body, "maintenance_operation_id"),
+            "maintenance_operation_id",
+            nonempty=True,
+        )
+        _strict_string(
+            _required(body, "maintenance_reason"),
+            "maintenance_reason",
+            nonempty=True,
+        )
+        expected_enforcement = "unknown" if phase == "gate_unknown" else "bypass"
+        if acl_enforcement != expected_enforcement:
+            raise LocalApiContractError(
+                "maintenance phase/enforcement truth mismatch"
+            )
+    else:
+        if maintenance_action is not None:
+            raise LocalApiContractError(
+                "unknown maintenance_action %r" % maintenance_action
+            )
+        if any(body.get(field) is not None for field in (
+            "maintenance_phase", "maintenance_operation_id", "maintenance_reason",
+        )):
+            raise LocalApiContractError("inactive status retains maintenance identity")
+        if acl_enforcement != "enforce":
+            raise LocalApiContractError("inactive status must report ACL enforce")
+    if "counters" in body:
+        decoder = None
+        try:
+            decoder, error_code, schema_version = _counter_decoder(body["counters"])
+            decoded["counters"] = decoder(body["counters"])
+        except LocalApiContractError as exc:
+            if decoder is None:
+                error_code = "invalid_counters_version"
+                schema_version = 0
+            decoded["counters"] = {
+                "counters_schema_version": schema_version,
+                "sampled_at_ms": 0,
+                "counters_error": "%s: %s" % (error_code, exc),
+                "ports": [],
+            }
+    return decoded
+
+
 def _legacy_identity_is_applied(values):
     applied = values["applied_generation"]
     if (
@@ -1216,6 +1313,8 @@ def _decode_status(body, negotiated_mode=None):
         return _decode_status_v2(body)
     if declared_mode == STATUS_CONTRACT_V3:
         return _decode_status_v3(body)
+    if declared_mode == STATUS_CONTRACT_V4:
+        return _decode_status_v4(body)
     return _decode_legacy_status_v0(body)
 
 
@@ -1559,7 +1658,7 @@ class LocalClient(object):
             raise LocalApiContractError("empty peer_auth_policy")
 
         capability_hash = body.get("capability_hash")
-        if status_contract_mode == STATUS_CONTRACT_V3:
+        if status_contract_mode in (STATUS_CONTRACT_V3, STATUS_CONTRACT_V4):
             supported_hashes = SUPPORTED_CAPABILITY_HASHES
         else:
             supported_hashes = frozenset((expected_capability_hash,))

@@ -589,6 +589,8 @@ pub(crate) enum MaintenanceWalRecord {
         pending_transition: Option<MaintenancePendingTransition>,
         terminal_action: Option<MaintenanceTerminalAction>,
         #[serde(default)]
+        terminal_expected_phase: Option<MaintenancePhase>,
+        #[serde(default)]
         gate_state: Option<MaintenanceGateState>,
         #[serde(default)]
         block_cause: Option<String>,
@@ -612,6 +614,8 @@ pub(crate) enum MaintenanceWalRecord {
     AbortIntent {
         schema_version: u32,
         state: MaintenanceState,
+        #[serde(default)]
+        expected_phase: Option<MaintenancePhase>,
     },
     AbortCommit {
         schema_version: u32,
@@ -656,6 +660,7 @@ impl MaintenanceWalRecord {
             | Self::AbortIntent {
                 schema_version,
                 state,
+                ..
             }
             | Self::AbortCommit {
                 schema_version,
@@ -701,10 +706,14 @@ impl MaintenanceWalRecord {
         }
     }
 
-    pub(crate) fn abort_intent_state(state: MaintenanceState) -> Self {
+    pub(crate) fn abort_intent_state(
+        state: MaintenanceState,
+        expected_phase: MaintenancePhase,
+    ) -> Self {
         Self::AbortIntent {
             schema_version: MAINTENANCE_SCHEMA_VERSION,
             state,
+            expected_phase: Some(expected_phase),
         }
     }
 
@@ -726,6 +735,7 @@ impl MaintenanceWalRecord {
         state: MaintenanceState,
         pending_transition: Option<MaintenancePendingTransition>,
         terminal_action: Option<MaintenanceTerminalAction>,
+        terminal_expected_phase: Option<MaintenancePhase>,
         gate_state: MaintenanceGateState,
         block_cause: Option<String>,
     ) -> Self {
@@ -734,6 +744,7 @@ impl MaintenanceWalRecord {
             state,
             pending_transition,
             terminal_action,
+            terminal_expected_phase,
             gate_state: Some(gate_state),
             block_cause,
         }
@@ -803,6 +814,7 @@ pub(crate) struct MaintenanceReplay {
     pub(crate) requires_bypass: bool,
     pub(crate) pending_transition: Option<MaintenancePendingTransition>,
     pub(crate) terminal_action: Option<MaintenanceTerminalAction>,
+    pub(crate) terminal_expected_phase: Option<MaintenancePhase>,
     pub(crate) gate_state: MaintenanceGateState,
     pub(crate) block_cause: Option<String>,
 }
@@ -814,6 +826,7 @@ impl Default for MaintenanceReplay {
             requires_bypass: false,
             pending_transition: None,
             terminal_action: None,
+            terminal_expected_phase: None,
             gate_state: MaintenanceGateState::Enforce,
             block_cause: None,
         }
@@ -833,6 +846,7 @@ pub(crate) fn replay_maintenance_records(
     let mut state = MaintenanceState::inactive();
     let mut pending: Option<MaintenancePendingTransition> = None;
     let mut terminal_action = None;
+    let mut terminal_expected_phase = None;
     let mut gate_state = MaintenanceGateState::Enforce;
     let mut block_cause = None;
     for record in records {
@@ -858,6 +872,7 @@ pub(crate) fn replay_maintenance_records(
             MaintenanceWalRecord::Checkpoint {
                 pending_transition,
                 terminal_action: checkpoint_terminal,
+                terminal_expected_phase: checkpoint_expected_phase,
                 gate_state: checkpoint_gate,
                 block_cause: checkpoint_cause,
                 ..
@@ -868,22 +883,73 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 pending = *pending_transition;
                 terminal_action = *checkpoint_terminal;
+                terminal_expected_phase = checkpoint_expected_phase.clone();
+                if let Some(cause) = checkpoint_cause.as_deref() {
+                    bounded_text(cause, "block_cause", MAX_ERROR_BYTES)
+                        .map_err(|error| error.details)?;
+                }
                 gate_state = checkpoint_gate.unwrap_or(if state.is_active() {
                     MaintenanceGateState::Bypass
                 } else {
                     MaintenanceGateState::Enforce
                 });
                 block_cause = checkpoint_cause.clone();
+                let gate_identity_valid = match gate_state {
+                    MaintenanceGateState::Enforce => {
+                        !state.is_active() && block_cause.is_none()
+                    }
+                    MaintenanceGateState::Bypass => {
+                        state.is_active()
+                            && state.phase != MaintenancePhase::GateUnknown
+                            && block_cause.is_none()
+                    }
+                    MaintenanceGateState::Unknown => {
+                        state.phase == MaintenancePhase::GateUnknown
+                            && block_cause
+                                .as_deref()
+                                .is_some_and(|cause| !cause.trim().is_empty())
+                    }
+                };
+                if !gate_identity_valid {
+                    return Err(
+                        "maintenance checkpoint gate state and block cause are inconsistent"
+                            .to_string(),
+                    );
+                }
                 if pending.is_some() && !state.is_active() {
                     return Err("maintenance checkpoint pending transition is inactive".to_string());
                 }
                 let terminal_state_valid = match terminal_action {
-                    None => true,
+                    None => match pending {
+                        Some(MaintenancePendingTransition::Abort) => terminal_expected_phase
+                            .as_ref()
+                            .is_some_and(|phase| {
+                                matches!(
+                                    phase,
+                                    MaintenancePhase::BypassPreparing
+                                        | MaintenancePhase::MaintenanceBypass
+                                        | MaintenancePhase::GateUnknown
+                                        | MaintenancePhase::Verifying
+                                )
+                            }),
+                        _ => terminal_expected_phase.is_none(),
+                    },
                     Some(MaintenanceTerminalAction::Exit) => {
-                        pending.is_none() && state.phase == MaintenancePhase::Committed
+                        pending.is_none()
+                            && terminal_expected_phase.is_none()
+                            && state.phase == MaintenancePhase::Committed
                     }
                     Some(MaintenanceTerminalAction::Abort) => {
                         pending.is_none()
+                            && terminal_expected_phase.as_ref().is_some_and(|phase| {
+                                matches!(
+                                    phase,
+                                    MaintenancePhase::BypassPreparing
+                                        | MaintenancePhase::MaintenanceBypass
+                                        | MaintenancePhase::GateUnknown
+                                        | MaintenancePhase::Verifying
+                                )
+                            })
                             && matches!(
                                 state.phase,
                                 MaintenancePhase::Committed | MaintenancePhase::MaintenanceBypass
@@ -910,6 +976,7 @@ pub(crate) fn replay_maintenance_records(
                 state.last_error = Some("recovered_dangling_enter_intent".to_string());
                 pending = Some(MaintenancePendingTransition::Enter);
                 terminal_action = None;
+                terminal_expected_phase = None;
                 gate_state = MaintenanceGateState::Bypass;
                 block_cause = None;
             }
@@ -942,6 +1009,7 @@ pub(crate) fn replay_maintenance_records(
                 state.phase = MaintenancePhase::MaintenanceBypass;
                 state.last_error = Some("recovered_dangling_exit_intent".to_string());
                 pending = Some(MaintenancePendingTransition::Exit);
+                terminal_expected_phase = None;
             }
             MaintenanceWalRecord::ExitCommit { .. } => {
                 if pending != Some(MaintenancePendingTransition::Exit) {
@@ -956,12 +1024,16 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 pending = None;
                 terminal_action = Some(MaintenanceTerminalAction::Exit);
+                terminal_expected_phase = None;
                 gate_state = MaintenanceGateState::Enforce;
                 block_cause = None;
             }
-            MaintenanceWalRecord::AbortIntent { .. } => {
+            MaintenanceWalRecord::AbortIntent { expected_phase, .. } => {
                 if !state.is_active() || pending.is_some() {
                     return Err("maintenance abort intent without active operation".to_string());
+                }
+                if expected_phase.as_ref() != Some(&state.phase) {
+                    return Err("maintenance abort intent expected phase changed".to_string());
                 }
                 if !same_transaction_identity(&state, next)
                     || !matches!(
@@ -974,9 +1046,11 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 state.phase = MaintenancePhase::MaintenanceBypass;
                 pending = Some(MaintenancePendingTransition::Abort);
+                terminal_expected_phase = expected_phase.clone();
             }
             MaintenanceWalRecord::AbortCommit { .. } => {
                 if pending != Some(MaintenancePendingTransition::Abort)
+                    || terminal_expected_phase.is_none()
                     || !(if next.phase == MaintenancePhase::Committed {
                         same_terminal_transaction_identity(&state, next)
                     } else {
@@ -1041,6 +1115,7 @@ pub(crate) fn replay_maintenance_records(
         state,
         pending_transition: pending,
         terminal_action,
+        terminal_expected_phase,
         gate_state,
         block_cause,
     })
@@ -1059,6 +1134,7 @@ pub(crate) struct MaintenanceStoreReplay {
     pub(crate) failures: u64,
     pub(crate) pending_transition: Option<MaintenancePendingTransition>,
     pub(crate) terminal_action: Option<MaintenanceTerminalAction>,
+    pub(crate) terminal_expected_phase: Option<MaintenancePhase>,
     pub(crate) gate_state: MaintenanceGateState,
     pub(crate) block_cause: Option<String>,
 }
@@ -1080,6 +1156,7 @@ impl MaintenanceStore for WalMaintenanceStore {
             failures: replay.maintenance_failures,
             pending_transition: replay.maintenance.pending_transition,
             terminal_action: replay.maintenance.terminal_action,
+            terminal_expected_phase: replay.maintenance.terminal_expected_phase,
             gate_state: replay.maintenance.gate_state,
             block_cause: replay.maintenance.block_cause,
         }
@@ -1116,6 +1193,7 @@ pub(crate) struct MaintenanceCoordinator {
     state: Arc<RwLock<MaintenanceState>>,
     pending_transition: Arc<RwLock<Option<MaintenancePendingTransition>>>,
     terminal_action: Arc<RwLock<Option<MaintenanceTerminalAction>>>,
+    terminal_expected_phase: Arc<RwLock<Option<MaintenancePhase>>>,
     gate_state: Arc<RwLock<MaintenanceGateState>>,
     block_cause: Arc<RwLock<Option<String>>>,
     replay_failures: u64,
@@ -1147,6 +1225,7 @@ impl MaintenanceCoordinator {
             state: Arc::new(RwLock::new(replay.state)),
             pending_transition: Arc::new(RwLock::new(replay.pending_transition)),
             terminal_action: Arc::new(RwLock::new(replay.terminal_action)),
+            terminal_expected_phase: Arc::new(RwLock::new(replay.terminal_expected_phase)),
             gate_state: Arc::new(RwLock::new(replay.gate_state)),
             block_cause: Arc::new(RwLock::new(replay.block_cause)),
             replay_failures: replay.failures,
@@ -1250,11 +1329,21 @@ impl MaintenanceCoordinator {
         let _transaction = self.transaction_lock.clone().write_owned().await;
         let replay = self.store.load();
         let mut recovered = replay.state;
-        if recovered.is_active() || replay.pending_transition.is_some() || replay.failures != 0 {
-            recovered.phase = MaintenancePhase::MaintenanceBypass;
+        if recovered.is_active()
+            || replay.pending_transition.is_some()
+            || replay.failures != 0
+            || replay.gate_state == MaintenanceGateState::Unknown
+            || replay.block_cause.is_some()
+        {
+            recovered.phase = if replay.gate_state == MaintenanceGateState::Unknown {
+                MaintenancePhase::GateUnknown
+            } else {
+                MaintenancePhase::MaintenanceBypass
+            };
             *self.state.write().await = recovered.clone();
             *self.pending_transition.write().await = replay.pending_transition;
             *self.terminal_action.write().await = replay.terminal_action;
+            *self.terminal_expected_phase.write().await = replay.terminal_expected_phase;
             self.blocked.store(true, Ordering::Release);
             *self.gate_state.write().await = if replay.failures != 0 {
                 MaintenanceGateState::Unknown
@@ -1268,12 +1357,13 @@ impl MaintenanceCoordinator {
                     "maintenance_startup_gate_failed:{}",
                     error
                 )));
+                recovered.phase = MaintenancePhase::GateUnknown;
                 *self.state.write().await = recovered;
                 *self.gate_state.write().await = MaintenanceGateState::Unknown;
-                *self.block_cause.write().await =
-                    Some("maintenance_authority_unavailable".to_string());
+                *self.block_cause.write().await = Some("maintenance_gate_unknown".to_string());
                 return Err(format!("force maintenance bypass before reconciliation: {}", error));
             }
+            recovered.phase = MaintenancePhase::MaintenanceBypass;
             *self.gate_state.write().await = MaintenanceGateState::Bypass;
         }
         if replay.failures != 0 {
@@ -1479,6 +1569,7 @@ impl MaintenanceCoordinator {
             .map_err(|error| MaintenanceError::internal("maintenance_wal_intent_failed", error))?;
         *self.pending_transition.write().await = Some(MaintenancePendingTransition::Enter);
         *self.terminal_action.write().await = None;
+        *self.terminal_expected_phase.write().await = None;
         *self.state.write().await = preparing.clone();
 
         if let Err(error) = self.gate.set_bypass_verified(true).await {
@@ -1491,19 +1582,14 @@ impl MaintenanceCoordinator {
             self.blocked.store(true, Ordering::Release);
             *self.gate_state.write().await = MaintenanceGateState::Unknown;
             *self.block_cause.write().await = Some("maintenance_gate_unknown".to_string());
-            self.emit_audit(
-                MaintenanceAuditAction::Enter,
-                MaintenanceAuditOutcome::Failure,
-                Some(&request.operation_id),
-                machine.state().phase.clone(),
-                Some(&error),
-            );
             return Err(MaintenanceError::internal(
                 "maintenance_gate_enable_failed",
                 error,
             ));
         }
 
+        *self.gate_state.write().await = MaintenanceGateState::Bypass;
+        *self.block_cause.write().await = None;
         machine.commit_enter(preparing);
         let mut active = machine.state().clone();
         active.last_progress_at_ms = now_ms();
@@ -1714,6 +1800,7 @@ impl MaintenanceCoordinator {
         *self.state.write().await = committed.clone();
         *self.pending_transition.write().await = None;
         *self.terminal_action.write().await = Some(MaintenanceTerminalAction::Exit);
+        *self.terminal_expected_phase.write().await = None;
         *self.gate_state.write().await = MaintenanceGateState::Enforce;
         self.emit_audit(
             MaintenanceAuditAction::Exit,
@@ -1750,38 +1837,76 @@ impl MaintenanceCoordinator {
             attempted.phase,
             request.error.as_deref(),
         );
-        self.repair_unknown_gate_for(MaintenancePendingTransition::Abort)
-            .await?;
         let current = self.state.read().await.clone();
         let terminal_action = *self.terminal_action.read().await;
-        let exact_terminal_phase = current.phase == request.expected_phase
-            || (current.phase == MaintenancePhase::Committed
-                && request.expected_phase == MaintenancePhase::MaintenanceBypass);
-        if current.operation_id.as_deref() == Some(&request.operation_id)
-            && exact_terminal_phase
-            && terminal_action == Some(MaintenanceTerminalAction::Abort)
-        {
+        let terminal_expected_phase = self.terminal_expected_phase.read().await.clone();
+        if terminal_action.is_some() {
+            if current.operation_id.as_deref() != Some(&request.operation_id)
+                || terminal_action != Some(MaintenanceTerminalAction::Abort)
+                || terminal_expected_phase.as_ref() != Some(&request.expected_phase)
+            {
+                return Err(MaintenanceError::conflict(
+                    "maintenance_phase_conflict",
+                    "abort retry does not match the persisted terminal compare-and-swap",
+                ));
+            }
+            self.repair_unknown_gate_for(MaintenancePendingTransition::Abort)
+                .await?;
+            let repaired = self.state.read().await.clone();
             self.emit_audit(
                 MaintenanceAuditAction::Abort,
                 MaintenanceAuditOutcome::Success,
-                current.operation_id.as_deref(),
-                current.phase.clone(),
+                repaired.operation_id.as_deref(),
+                repaired.phase.clone(),
                 request.error.as_deref(),
             );
-            return Ok((MaintenanceDisposition::Idempotent, current));
+            return Ok((MaintenanceDisposition::Idempotent, repaired));
         }
+        self.repair_unknown_gate_for(MaintenancePendingTransition::Abort)
+            .await?;
+        let current = self.state.read().await.clone();
+        let pending = *self.pending_transition.read().await;
         let mut machine = MaintenanceStateMachine::with_state(current.clone());
-        let plan = machine.plan_abort(&request, &convergence, now_ms())?;
-        let mut next = plan
-            .next_state
-            .expect("mutating maintenance abort plan carries state");
-        if *self.pending_transition.read().await != Some(MaintenancePendingTransition::Abort) {
+        let mut next = if pending == Some(MaintenancePendingTransition::Abort) {
+            if current.operation_id.as_deref() != Some(&request.operation_id)
+                || terminal_expected_phase.as_ref() != Some(&request.expected_phase)
+            {
+                return Err(MaintenanceError::conflict(
+                    "maintenance_phase_conflict",
+                    "abort retry does not match the persisted active-phase compare-and-swap",
+                ));
+            }
+            let mut resumed = current.clone();
+            resumed.last_progress_at_ms = now_ms();
+            resumed.last_error = Some(bounded_error(
+                request.error.as_deref().unwrap_or("maintenance_aborted"),
+            ));
+            resumed.phase = if convergence.is_complete()
+                && convergence.applied_generation == current.applied_generation
+                && convergence.applied_desired_hash == current.applied_desired_hash
+            {
+                MaintenancePhase::Verifying
+            } else {
+                MaintenancePhase::MaintenanceBypass
+            };
+            resumed
+        } else {
+            machine
+                .plan_abort(&request, &convergence, now_ms())?
+                .next_state
+                .expect("mutating maintenance abort plan carries state")
+        };
+        if pending != Some(MaintenancePendingTransition::Abort) {
             self.store
-                .append(MaintenanceWalRecord::abort_intent_state(next.clone()))
+                .append(MaintenanceWalRecord::abort_intent_state(
+                    next.clone(),
+                    request.expected_phase.clone(),
+                ))
                 .map_err(|error| {
                     MaintenanceError::internal("maintenance_wal_intent_failed", error)
                 })?;
             *self.pending_transition.write().await = Some(MaintenancePendingTransition::Abort);
+            *self.terminal_expected_phase.write().await = Some(request.expected_phase.clone());
         }
         *self.state.write().await = next.clone();
 
@@ -1860,6 +1985,7 @@ impl MaintenanceCoordinator {
         *self.state.write().await = machine.state().clone();
         *self.pending_transition.write().await = None;
         *self.terminal_action.write().await = Some(MaintenanceTerminalAction::Abort);
+        *self.terminal_expected_phase.write().await = Some(request.expected_phase.clone());
         *self.gate_state.write().await = if next.phase == MaintenancePhase::Committed {
             MaintenanceGateState::Enforce
         } else {
@@ -1988,6 +2114,7 @@ mod tests {
                     failures: 0,
                     pending_transition: replay.pending_transition,
                     terminal_action: replay.terminal_action,
+                    terminal_expected_phase: replay.terminal_expected_phase,
                     gate_state: replay.gate_state,
                     block_cause: replay.block_cause,
                 },
@@ -1996,6 +2123,7 @@ mod tests {
                     failures: 1,
                     pending_transition: None,
                     terminal_action: None,
+                    terminal_expected_phase: None,
                     gate_state: MaintenanceGateState::Unknown,
                     block_cause: Some("maintenance_wal_corrupt".to_string()),
                 },
@@ -2287,7 +2415,10 @@ mod tests {
         let replay = replay_maintenance_records(&[
             MaintenanceWalRecord::enter_intent_state(preparing),
             MaintenanceWalRecord::enter_commit_state(active),
-            MaintenanceWalRecord::abort_intent_state(machine.state().clone()),
+            MaintenanceWalRecord::abort_intent_state(
+                machine.state().clone(),
+                request.expected_phase.clone(),
+            ),
             MaintenanceWalRecord::abort_commit(machine.state().clone()),
         ])
         .unwrap();
@@ -2609,6 +2740,7 @@ mod tests {
             failures: 1,
             pending_transition: None,
             terminal_action: None,
+            terminal_expected_phase: None,
             gate_state: MaintenanceGateState::Unknown,
             block_cause: Some("maintenance_wal_corrupt".to_string()),
         };
@@ -2637,6 +2769,8 @@ mod tests {
                 failures: 0,
                 pending_transition: Some(pending),
                 terminal_action: None,
+                terminal_expected_phase: (pending == MaintenancePendingTransition::Abort)
+                    .then_some(MaintenancePhase::MaintenanceBypass),
                 gate_state: MaintenanceGateState::Bypass,
                 block_cause: None,
             };
@@ -2865,6 +2999,7 @@ mod tests {
             failures: 0,
             pending_transition: None,
             terminal_action: None,
+            terminal_expected_phase: None,
             gate_state: MaintenanceGateState::Unknown,
             block_cause: Some("maintenance_gate_unknown".to_string()),
         };
@@ -2924,11 +3059,13 @@ mod tests {
                 MaintenanceState::inactive(),
                 None,
                 None,
+                None,
                 MaintenanceGateState::Unknown,
                 Some("maintenance_gate_unknown".to_string()),
             ),
             MaintenanceWalRecord::checkpoint(
                 active.clone(),
+                None,
                 None,
                 None,
                 MaintenanceGateState::Enforce,
@@ -2938,11 +3075,13 @@ mod tests {
                 unknown.clone(),
                 None,
                 None,
+                None,
                 MaintenanceGateState::Unknown,
                 None,
             ),
             MaintenanceWalRecord::checkpoint(
                 unknown.clone(),
+                None,
                 None,
                 None,
                 MaintenanceGateState::Unknown,
@@ -2957,6 +3096,7 @@ mod tests {
 
         let valid = MaintenanceWalRecord::checkpoint(
             unknown,
+            None,
             None,
             None,
             MaintenanceGateState::Unknown,

@@ -3291,6 +3291,18 @@ struct PreparedSnapshotApply {
 }
 
 #[derive(Debug)]
+struct AdmittedSnapshotApply {
+    intent: PendingNeutronIntent,
+    transaction: SnapshotApplyTransaction,
+    current_ports: BTreeMap<String, ManagedNeutronPort>,
+    runtime_before_apply: NeutronRuntimeState,
+    same_generation_retry: bool,
+    lock_wait_ms: u64,
+    preflight_ms: u64,
+    wal_intent_ms: u64,
+}
+
+#[derive(Debug)]
 struct SnapshotSubmitDecision {
     response: NeutronSnapshotResponse,
     prepared: Option<PreparedSnapshotApply>,
@@ -3349,14 +3361,6 @@ async fn submit_neutron_snapshot(
                         details = %error.details,
                         "neutron_snapshot_background_apply_failed"
                     );
-                    mark_snapshot_background_error(
-                        &apply_state,
-                        generation,
-                        desired_hash,
-                        error.code,
-                        error.details,
-                    )
-                    .await;
                 }
             }
         });
@@ -3698,6 +3702,7 @@ async fn accept_neutron_snapshot_submit(
 
 async fn mark_snapshot_background_error(
     state: &NeutronApiState,
+    _maintenance_lease: MaintenanceWriterLease,
     generation: u64,
     desired_hash: Option<String>,
     code: &'static str,
@@ -3906,10 +3911,61 @@ async fn apply_neutron_snapshot_for_scope(
     scope: ApplyScope,
     prepared: PreparedSnapshotApply,
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
-    let profile_started = Instant::now();
     let PreparedSnapshotApply {
-        _maintenance_lease,
+        _maintenance_lease: maintenance_lease,
         _apply_guard,
+        intent,
+        transaction,
+        current_ports,
+        runtime_before_apply,
+        same_generation_retry,
+        lock_wait_ms,
+        preflight_ms,
+        wal_intent_ms,
+    } = prepared;
+    let marker_generation = snapshot.generation;
+    let marker_hash = snapshot.desired_hash.clone();
+    // Lock order is maintenance writer lease -> apply lock -> runtime.  Both
+    // guards deliberately remain in this wrapper until the failure marker has
+    // published the admitted operation identity.
+    let result = apply_neutron_snapshot_for_scope_admitted(
+        state.clone(),
+        snapshot,
+        scope,
+        AdmittedSnapshotApply {
+            intent,
+            transaction,
+            current_ports,
+            runtime_before_apply,
+            same_generation_retry,
+            lock_wait_ms,
+            preflight_ms,
+            wal_intent_ms,
+        },
+    )
+    .await;
+    if let Err(error) = &result {
+        mark_snapshot_background_error(
+            &state,
+            maintenance_lease,
+            marker_generation,
+            marker_hash,
+            error.code,
+            error.details.clone(),
+        )
+        .await;
+    }
+    result
+}
+
+async fn apply_neutron_snapshot_for_scope_admitted(
+    state: NeutronApiState,
+    snapshot: NeutronSnapshotRequest,
+    scope: ApplyScope,
+    prepared: AdmittedSnapshotApply,
+) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
+    let profile_started = Instant::now();
+    let AdmittedSnapshotApply {
         intent,
         transaction,
         current_ports,
@@ -13543,8 +13599,8 @@ mod tests {
         let (status, body) = response_json_value(response).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status_schema_version"], 3);
-        assert_eq!(body["status_contract_hash"], "v0.9-neutron-status-3");
+        assert_eq!(body["status_schema_version"], 4);
+        assert_eq!(body["status_contract_hash"], "v0.9-neutron-status-4");
         assert_eq!(body["transaction_state"], "blocked");
         assert_eq!(body["overall_readiness"], "blocked");
         assert_eq!(body["required_action"], "retry_snapshot");
@@ -14791,8 +14847,14 @@ mod tests {
             runtime.wal_status = "recovery_commit_failed".to_string();
         }
 
+        let lease = state
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+            .unwrap();
         mark_snapshot_background_error(
             &state,
+            lease,
             41,
             Some("hash-41".to_string()),
             "wal_commit_failed",
@@ -18507,6 +18569,7 @@ mod tests {
                     failures: 0,
                     pending_transition: None,
                     terminal_action: None,
+                    terminal_expected_phase: None,
                     gate_state: crate::neutron_maintenance::MaintenanceGateState::Enforce,
                     block_cause: None,
                 }
