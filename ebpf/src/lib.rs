@@ -147,6 +147,7 @@ unsafe fn try_tc_egress(
     let info = &mut *info;
     let p = &mut *pipe;
 
+    runtime::apply_acl_ct_packet_access_plan(p);
     p.ip_family = if info.is_ipv6 {
         IP_FAMILY_V6
     } else {
@@ -155,12 +156,7 @@ unsafe fn try_tc_egress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    runtime::apply_acl_ct_packet_access_plan(p);
     load_feature_flags_tc(p, info);
-    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 {
-        fragment::snapshot_authority(p);
-        fragment::record_first_observation(info, p);
-    }
 
     if info.is_ipv6 {
         return Ok(try_tc_egress_v6(ctx, info, p));
@@ -352,6 +348,7 @@ unsafe fn try_tc_ingress(
     let info = &mut *info;
     let p = &mut *pipe;
 
+    runtime::apply_acl_ct_packet_access_plan(p);
     p.ip_family = if info.is_ipv6 {
         IP_FAMILY_V6
     } else {
@@ -360,12 +357,7 @@ unsafe fn try_tc_ingress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    runtime::apply_acl_ct_packet_access_plan(p);
     load_feature_flags_tc(p, info);
-    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 {
-        fragment::snapshot_authority(p);
-        fragment::record_first_observation(info, p);
-    }
 
     if info.is_ipv6 {
         return Ok(try_tc_ingress_v6(ctx, info, p));
@@ -520,6 +512,10 @@ unsafe fn try_tc_ingress_v6(
 
 #[inline(always)]
 unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) {
+    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 {
+        fragment::snapshot_authority(p);
+        fragment::record_first_observation(info, p);
+    }
     if qos::qos_enabled(p.tap_id) {
         p.flags |= FLAG_QOS_ON;
     }

@@ -56,8 +56,8 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
     let abi = include_str!("../../abi/src/lib.rs");
     let gate = source_function(
         abi,
-        "pub fn acl_ct_runtime_source(",
-        "/// Runtime lookup result for a managed interface",
+        "pub fn packet_acl_ct_gate(",
+        "pub fn packet_acl_ct_enforced(",
     );
     assert!(gate.contains("config.acl_maintenance_bypass != 0"));
     assert!(gate.contains(".unwrap_or(false)"));
@@ -78,11 +78,15 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
             .find("runtime::apply_acl_ct_packet_access_plan(p)")
             .expect("packet path must classify maintenance before ACL/fragment state");
         let feature_flags = body.find("load_feature_flags_tc").unwrap();
-        let snapshot = body.find("fragment::snapshot_authority").unwrap();
         assert!(gate < feature_flags);
-        assert!(gate < snapshot);
-        assert!(body.contains("FLAG_ACL_CT_ENFORCE"));
     }
+    let feature_loader = source_function(
+        packet_path,
+        "unsafe fn load_feature_flags_tc(",
+        "unsafe fn refresh_trace_flag_tc(",
+    );
+    assert!(feature_loader.contains("FLAG_ACL_CT_ENFORCE"));
+    assert!(feature_loader.contains("fragment::snapshot_authority"));
 }
 
 #[test]
