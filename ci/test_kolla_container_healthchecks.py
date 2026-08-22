@@ -1,7 +1,10 @@
 from __future__ import print_function
 
 import os
+import shutil
+import socket
 import subprocess
+import tempfile
 import unittest
 
 
@@ -15,6 +18,78 @@ def read_repo_file(relative_path):
 
 
 class KollaContainerHealthcheckContractTest(unittest.TestCase):
+
+    def _write_executable(self, path, content):
+        with open(path, "w") as stream:
+            stream.write(content)
+        os.chmod(path, 0o755)
+
+    def _run_production_healthcheck(
+        self,
+        relative_path,
+        live_exit=0,
+        ready_exit=0,
+        python_exit=0,
+        socket_present=True,
+    ):
+        temporary_dir = tempfile.mkdtemp(prefix="aria-healthcheck-")
+        unix_socket = None
+        try:
+            fake_bin = os.path.join(temporary_dir, "bin")
+            os.mkdir(fake_bin)
+            self._write_executable(
+                os.path.join(fake_bin, "curl"),
+                """#!/bin/sh
+case "$*" in
+    *readyz*) exit "${FAKE_READY_EXIT}" ;;
+    *livez*) exit "${FAKE_LIVE_EXIT}" ;;
+esac
+exit 90
+""",
+            )
+            self._write_executable(
+                os.path.join(fake_bin, "sudo"),
+                """#!/bin/sh
+if [ "$1" = "-u" ]; then
+    shift 2
+fi
+exec "$@"
+""",
+            )
+            self._write_executable(
+                os.path.join(fake_bin, "python"),
+                """#!/bin/sh
+exit "${FAKE_PYTHON_EXIT}"
+""",
+            )
+
+            socket_path = os.path.join(temporary_dir, "aria-agent.sock")
+            if socket_present:
+                unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                unix_socket.bind(socket_path)
+
+            environment = os.environ.copy()
+            environment.update({
+                "ARIA_HEALTH_SOCKET_PATH": socket_path,
+                "ARIA_HEALTH_PYTHON_BIN": "python",
+                "FAKE_LIVE_EXIT": str(live_exit),
+                "FAKE_READY_EXIT": str(ready_exit),
+                "FAKE_PYTHON_EXIT": str(python_exit),
+                "PATH": fake_bin + os.pathsep + environment["PATH"],
+            })
+            process = subprocess.Popen(
+                ["sh", relative_path],
+                cwd=REPO_ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = process.communicate()
+            return process.returncode, stdout, stderr
+        finally:
+            if unix_socket is not None:
+                unix_socket.close()
+            shutil.rmtree(temporary_dir)
 
     def assert_shell_syntax(self, relative_path):
         subprocess.check_call(["bash", "-n", relative_path], cwd=REPO_ROOT)
@@ -70,6 +145,86 @@ class KollaContainerHealthcheckContractTest(unittest.TestCase):
                 else "unhealthy"
             )
             self.assertEqual(expected_docker, docker_health, state)
+
+    def test_production_healthchecks_execute_strict_readiness_matrix(self):
+        scripts = (
+            "deploy/kolla/aria-datapath/healthcheck-aria-datapath.sh",
+            (
+                "deploy/kolla/neutron-aria-agent/"
+                "healthcheck-neutron-aria-agent.sh"
+            ),
+        )
+        for script in scripts:
+            returncode, stdout, stderr = self._run_production_healthcheck(
+                script,
+            )
+            self.assertEqual(
+                0,
+                returncode,
+                "%s ready/enforce stdout=%r stderr=%r" % (
+                    script,
+                    stdout,
+                    stderr,
+                ),
+            )
+
+            for state in ("planned maintenance bypass", "blocked recovery"):
+                returncode, stdout, stderr = self._run_production_healthcheck(
+                    script,
+                    live_exit=0,
+                    ready_exit=22,
+                )
+                self.assertNotEqual(
+                    0,
+                    returncode,
+                    "%s %s masked /readyz failure stdout=%r stderr=%r" % (
+                        script,
+                        state,
+                        stdout,
+                        stderr,
+                    ),
+                )
+
+            returncode, stdout, stderr = self._run_production_healthcheck(
+                script,
+                socket_present=False,
+            )
+            self.assertNotEqual(
+                0,
+                returncode,
+                "%s dead socket stdout=%r stderr=%r" % (
+                    script,
+                    stdout,
+                    stderr,
+                ),
+            )
+
+    def test_production_healthchecks_reject_dead_service_loops(self):
+        cases = (
+            (
+                "deploy/kolla/aria-datapath/healthcheck-aria-datapath.sh",
+                {"live_exit": 22},
+            ),
+            (
+                "deploy/kolla/neutron-aria-agent/"
+                "healthcheck-neutron-aria-agent.sh",
+                {"python_exit": 1},
+            ),
+        )
+        for script, failure in cases:
+            returncode, stdout, stderr = self._run_production_healthcheck(
+                script,
+                **failure
+            )
+            self.assertNotEqual(
+                0,
+                returncode,
+                "%s dead loop stdout=%r stderr=%r" % (
+                    script,
+                    stdout,
+                    stderr,
+                ),
+            )
 
     def test_formal_images_declare_the_frozen_health_policy(self):
         cases = (

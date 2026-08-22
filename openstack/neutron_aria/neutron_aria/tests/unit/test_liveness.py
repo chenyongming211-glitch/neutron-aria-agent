@@ -9,6 +9,7 @@ import unittest
 
 from neutron_aria.agent.liveness import LIVENESS_RECORD_FILENAME
 from neutron_aria.agent.liveness import LivenessError
+from neutron_aria.agent.liveness import MAX_LIVENESS_RECORD_BYTES
 from neutron_aria.agent.liveness import ServiceLivenessPublisher
 from neutron_aria.agent.liveness import validate_service_liveness
 from neutron_aria.agent.service import AgentService
@@ -70,6 +71,29 @@ class ServiceLivenessRecordTestCase(unittest.TestCase):
         self.assertTrue(any(stat.S_ISREG(mode) for mode in fsync_modes))
         self.assertTrue(any(stat.S_ISDIR(mode) for mode in fsync_modes))
         self.assertLess(os.path.getsize(self.path), 4096)
+
+    def test_publish_rejects_json_that_exceeds_limit_after_newline(self):
+        fixed_record = {
+            "schema_version": 1,
+            "pid": 4242,
+            "host": "",
+            "updated_at": 1000.25,
+        }
+        fixed_size = len(json.dumps(
+            fixed_record,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"))
+        host = "x" * (MAX_LIVENESS_RECORD_BYTES - fixed_size)
+        publisher = ServiceLivenessPublisher(
+            self.state_dir,
+            host,
+            pid=4242,
+            clock=lambda: 1000.25,
+        )
+
+        self.assertRaises(LivenessError, publisher.publish)
+        self.assertFalse(os.path.exists(self.path))
 
     def test_validate_accepts_fresh_exact_pid_at_age_limit(self):
         self._write({
