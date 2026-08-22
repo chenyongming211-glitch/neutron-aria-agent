@@ -17,6 +17,7 @@ RUNTIME_STATE_SOURCE="${RUNTIME_STATE_SOURCE:-/var/lib/neutron-aria-agent/state}
 CONTAINER_STATE_DIR="${CONTAINER_STATE_DIR:-/var/lib/neutron-aria-agent/state}"
 RUNTIME_STATE_NEEDS_SEED=false
 JOINT_MAINTENANCE_MODE="${JOINT_MAINTENANCE_MODE:-false}"
+OPERATION_ID="${OPERATION_ID:-}"
 
 log() {
     printf '[neutron-aria-agent-rc] %s\n' "$*"
@@ -198,6 +199,7 @@ write_state() {
     umask 077
     cat >"${path}" <<EOF
 IMAGE_REF=${IMAGE_REF}
+OPERATION_ID=${OPERATION_ID}
 EXPECTED_IMAGE_ID=${EXPECTED_IMAGE_ID}
 BACKUP_CONTAINER=${BACKUP_CONTAINER}
 BACKUP_IMAGE_ID=${BACKUP_IMAGE_ID}
@@ -214,12 +216,17 @@ EOF
 }
 
 read_state() {
+    local requested_operation_id="${OPERATION_ID:-}"
     [ -f "${STATE_FILE}" ] || die "release state not found: ${STATE_FILE}"
     [ "$(stat -c '%u' "${STATE_FILE}")" = "0" ] || die "release state must be root-owned"
     [ "$(stat -c '%a' "${STATE_FILE}")" = "600" ] || die "release state must have mode 0600"
     # This file contains only values validated before it is written.
     # shellcheck disable=SC1090
     . "${STATE_FILE}"
+    [ -z "${requested_operation_id}" ] || [ -n "${OPERATION_ID:-}" ] ||
+        die "release state is not bound to an operation"
+    [ -z "${requested_operation_id}" ] || [ "${OPERATION_ID}" = "${requested_operation_id}" ] ||
+        die "release state belongs to another operation"
     validate_image_ref "${IMAGE_REF}"
     validate_image_id "${EXPECTED_IMAGE_ID}" EXPECTED_IMAGE_ID
     validate_image_id "${BACKUP_IMAGE_ID}" BACKUP_IMAGE_ID

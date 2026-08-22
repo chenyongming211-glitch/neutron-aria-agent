@@ -49,7 +49,7 @@ UpgradeClassification = namedtuple("UpgradeClassification", ("path", "reasons"))
 ALLOWED = {
     "preflight": ("quiescing", "agent_upgrading", "failed_before_mutation"),
     "quiescing": ("bypass_preparing",),
-    "bypass_preparing": ("bypass_confirmed", "maintenance_bypass"),
+    "bypass_preparing": ("bypass_confirmed",),
     "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
     "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
     "datapath_live": ("agent_upgrading", "maintenance_bypass"),
@@ -367,6 +367,12 @@ class UpgradeLedger(object):
         if expected_phase == "preflight":
             return self._transition(
                 expected_phase, "failed_before_mutation", evidence, "failed", internal
+            )
+        if self._state.get("upgrade_class") == "hot_agent":
+            internal["recovery_action"] = "resume_exact_phase"
+            return self._update_same_phase(
+                evidence if evidence is not None else {},
+                "failed", expected_phase, internal,
             )
         if "maintenance_bypass" in ALLOWED.get(expected_phase, ()):
             internal["recovery_action"] = "operator_action_required"

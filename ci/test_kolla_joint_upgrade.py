@@ -46,6 +46,7 @@ class KollaJointUpgradeTest(unittest.TestCase):
         ):
             (directory / "aria-agent").write_bytes(marker + b"-agent")
             (directory / "libebpf_firewall.so").write_bytes(marker + b"-ebpf")
+            (directory / "libebpf_firewall_perf.so").write_bytes(marker + b"-perf")
         self.current_manifest.write_text(json.dumps(self.manifest(
             OLD_AGENT, OLD_DP, self.current_artifacts, "1" * 40
         )), encoding="utf-8")
@@ -60,20 +61,24 @@ class KollaJointUpgradeTest(unittest.TestCase):
     @staticmethod
     def manifest(agent, datapath, artifact_root, source_commit):
         artifacts = []
-        for name in ("aria-agent", "libebpf_firewall.so"):
+        for name in ("aria-agent", "libebpf_firewall.so", "libebpf_firewall_perf.so"):
             payload = (artifact_root / name).read_bytes()
             artifacts.append({
                 "name": name,
-                "size": len(payload),
+                "size_bytes": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
             })
         return {
+            "schema_version": 1,
+            "product": "aria-firewall-neutron",
+            "product_version": "0.9-test",
             "release_version": "v0.9-test",
             "source_commit": source_commit,
             "artifacts": artifacts,
             "contracts": {
                 "runtime_compatibility_sha256": "e" * 64,
-                "uds_contract_sha256": "f" * 64,
+                "neutron_uds_sha256": "f" * 64,
+                "support_matrix_sha256": "9" * 64,
             },
             "images": [
                 {
@@ -119,8 +124,9 @@ case "$args" in
   *" image inspect -f {{.Id}} registry/datapath:current"*) printf '%s\n' "$OLD_DP" ;;
   *" image inspect -f {{.Id}} registry/datapath"*) printf '%s\n' "$NEW_DP" ;;
   *" image inspect -f {{.Id}} registry/agent"*) printf '%s\n' "$NEW_AGENT" ;;
-  *" inspect -f {{.Image}} aria_datapath "*) printf '%s\n' "$OLD_DP" ;;
-  *" inspect -f {{.Image}} neutron_aria_agent "*) printf '%s\n' "$OLD_AGENT" ;;
+  *" inspect -f {{.Image}} aria_datapath "*) if [ -f "$DP_IMAGE_STATE" ]; then cat "$DP_IMAGE_STATE"; else printf '%s\n' "$OLD_DP"; fi ;;
+  *" inspect -f {{.Image}} neutron_aria_agent "*) if [ -f "$AGENT_IMAGE_STATE" ]; then cat "$AGENT_IMAGE_STATE"; else printf '%s\n' "$OLD_AGENT"; fi ;;
+  *" exec neutron_openvswitch_agent ovs-vsctl --no-wait get bridge br-int _uuid"*) printf 'br-int-test\n' ;;
   *" inspect -f {{.Id}} neutron_openvswitch_agent "*) printf 'ovs-agent-id\n' ;;
   *" inspect -f {{.State.StartedAt}} neutron_openvswitch_agent "*) printf '2026-08-22T00:00:00Z\n' ;;
   *" inspect -f {{.State.Health.Status}} "*) printf 'healthy\n' ;;
@@ -154,7 +160,8 @@ elif [[ "$args" == *"/api/v1/admin/maintenance"* ]]; then
   state=baseline
   [ ! -f "$API_STATE" ] || state=$(cat "$API_STATE")
   if [ "$state" = bypass ] || [ "$state" = resynced ]; then
-    printf '{"status":"active","accepted":true,"state":{"schema_version":1,"operation_id":"%s","phase":"%s","active_domains":["%s"],"expected_applied_generation":41,"expected_desired_hash":"%s","applied_generation":41,"applied_desired_hash":"%s","entered_at":1,"updated_at":2,"last_error":null}}\n' "${ADMIN_OPERATION_ID:-$OPERATION_ID}" "${ADMIN_PHASE:-maintenance_bypass}" "${ADMIN_DOMAIN:-acl}" "$OLD_HASH" "$OLD_HASH"
+    if [ "$state" = resynced ]; then applied_generation=42; applied_hash="$NEW_HASH"; else applied_generation=41; applied_hash="$OLD_HASH"; fi
+    printf '{"status":"active","accepted":true,"state":{"schema_version":1,"operation_id":"%s","phase":"%s","active_domains":["%s"],"expected_applied_generation":41,"expected_desired_hash":"%s","applied_generation":%s,"applied_desired_hash":"%s","entered_at":1,"updated_at":2,"last_error":null}}\n' "${ADMIN_OPERATION_ID:-$OPERATION_ID}" "${ADMIN_PHASE:-maintenance_bypass}" "${ADMIN_DOMAIN:-acl}" "$OLD_HASH" "$applied_generation" "$applied_hash"
   else
     printf '{"status":"ready","accepted":true,"state":{"schema_version":1,"operation_id":null,"phase":"ready","active_domains":[],"expected_applied_generation":null,"expected_desired_hash":null,"applied_generation":42,"applied_desired_hash":"%s","entered_at":null,"updated_at":3,"last_error":null}}\n' "$NEW_HASH"
   fi
@@ -166,8 +173,10 @@ else
     printf '{"accepted_generation":41,"applied_generation":41,"pending_generation":null,"desired_hash":"%s","last_desired_hash":"%s","managed_port_ids":["tap-a","tap-b"],"last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"enforce"}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"enforce"}]}],"overall_readiness":"ready","acl_enforcement":"enforce","maintenance_phase":null,"maintenance_operation_id":null,"buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"neutral"}\n' "$OLD_HASH" "$OLD_HASH"
   elif [ "$state" = active ]; then
     printf '{"accepted_generation":42,"applied_generation":42,"pending_generation":null,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"ready","acl_enforcement":"enforce","maintenance_phase":null,"maintenance_operation_id":null,"buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"neutral","stable_read_attempts":2,"stable_desired_hash":"%s"}\n' "$NEW_HASH" "$NEW_HASH"
+  elif [ "$state" = hot-resynced ]; then
+    printf '{"accepted_generation":42,"applied_generation":42,"pending_generation":null,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"enforce","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"ready","acl_enforcement":"enforce","maintenance_phase":null,"maintenance_operation_id":null,"buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"neutral","stable_read_attempts":2,"stable_desired_hash":"%s"}\n' "$NEW_HASH" "$NEW_HASH"
   elif [ "$state" = resynced ]; then
-    printf '{"accepted_generation":%s,"applied_generation":%s,"pending_generation":%s,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"%s","effective_action":"bypass","ingress_complete":%s,"egress_complete":%s}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"degraded","acl_enforcement":"bypass","maintenance_phase":"maintenance_bypass","maintenance_operation_id":"%s","buffer_overflow":%s,"unsupported_ports":%s,"foreign_host_ports":%s,"conntrack_mode":"neutral","stable_read_attempts":%s,"stable_desired_hash":"%s","ingress_bypass":true,"egress_bypass":true}\n' "${SYNC_ACCEPTED:-42}" "${SYNC_APPLIED:-42}" "${SYNC_PENDING:-null}" "${SYNC_HASH:-$NEW_HASH}" "${SYNC_PORT_STATUS:-complete}" "${SYNC_INGRESS:-true}" "${SYNC_EGRESS:-true}" "${STATUS_OPERATION_ID:-$OPERATION_ID}" "${SYNC_BUFFER_OVERFLOW:-false}" "${SYNC_UNSUPPORTED:-[]}" "${SYNC_FOREIGN:-[]}" "${SYNC_STABLE_READS:-2}" "${SYNC_STABLE_HASH:-$NEW_HASH}"
+    printf '{"accepted_generation":%s,"applied_generation":%s,"pending_generation":%s,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"%s","effective_action":"bypass","ingress_complete":%s,"egress_complete":%s}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"degraded","acl_enforcement":"bypass","maintenance_phase":"maintenance_bypass","maintenance_operation_id":"%s","buffer_overflow":%s,"unsupported_ports":%s,"foreign_host_ports":%s,"conntrack_mode":"neutral","stable_read_attempts":%s,"stable_desired_hash":"%s","ingress_bypass":true,"egress_bypass":true}\n' "${SYNC_ACCEPTED:-42}" "${SYNC_APPLIED:-42}" "${SYNC_PENDING:-null}" "${SYNC_HASH:-$NEW_HASH}" "${SYNC_PORT_STATUS:-complete}" "${SYNC_INGRESS:-true}" "${SYNC_EGRESS:-true}" "${SYNC_OPERATION_ID:-$OPERATION_ID}" "${SYNC_BUFFER_OVERFLOW:-false}" "${SYNC_UNSUPPORTED:-[]}" "${SYNC_FOREIGN:-[]}" "${SYNC_STABLE_READS:-2}" "${SYNC_STABLE_HASH:-$NEW_HASH}"
   else
     printf '{"accepted_generation":42,"applied_generation":42,"pending_generation":%s,"last_desired_hash":"%s","last_managed_ports":2,"last_managed_ports_detail":[{"port_id":"tap-a","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]},{"port_id":"tap-b","domains":[{"domain":"acl","status":"complete","effective_action":"bypass","ingress_complete":true,"egress_complete":true}]}],"overall_readiness":"degraded","acl_enforcement":"%s","maintenance_phase":"maintenance_bypass","maintenance_operation_id":"%s","buffer_overflow":false,"unsupported_ports":[],"foreign_host_ports":[],"conntrack_mode":"%s","stable_read_attempts":2,"stable_desired_hash":"%s","ingress_bypass":%s,"egress_bypass":%s}\n' "${BYPASS_PENDING:-null}" "$NEW_HASH" "${BYPASS_ACL_ENFORCEMENT:-bypass}" "${STATUS_OPERATION_ID:-$OPERATION_ID}" "${BYPASS_CONNTRACK:-neutral}" "$NEW_HASH" "${BYPASS_INGRESS:-true}" "${BYPASS_EGRESS:-true}"
   fi
@@ -183,7 +192,7 @@ fi
             "#!/usr/bin/env bash\nprintf 'df %s\\n' \"$*\" >>\"$TRACE_FILE\"\nif [ \"${REALISTIC_DF:-false}\" = true ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/test 9999999 1000 %s 1%% /var/lib\\n' \"${DF_AVAILABLE:-1048576}\"; else printf '%s\\n' \"${DF_AVAILABLE:-1048576}\"; fi\n",
         )
         self.write_executable("flock", "#!/usr/bin/env bash\nprintf 'flock %s\\n' \"$*\" >>\"$TRACE_FILE\"\nexit 0\n")
-        self.write_executable("ovs-canary", "#!/usr/bin/env bash\nprintf 'ovs-canary %s\\n' \"$*\" >>\"$TRACE_FILE\"\n[ \"${FAIL_AT:-}\" != ovs_canary ]\n")
+        self.write_executable("ovs-canary", "#!/usr/bin/env bash\nprintf 'ovs-canary %s\\n' \"$*\" >>\"$TRACE_FILE\"\nif [ \"${FAIL_AT:-}\" = ovs_canary ] && [ -f \"$API_STATE\" ] && [ \"$(cat \"$API_STATE\")\" = bypass ]; then exit 1; fi\n")
         self.control_entrypoint = self.write_executable(
             "upgrade-control",
             '#!/usr/bin/env bash\nexec python3 "%s" "$@"\n' % UPGRADE_CONTROL,
@@ -197,8 +206,13 @@ printf '%s %s\n' "$component" "$action" >>"$TRACE_FILE"
 [ "${FAIL_AT:-}" != "${component}_${action}" ] || exit 51
 if [ "$component" = agent ] && [ "$action" = verify ]; then
   [ "${FAIL_AT:-}" != resync ] || exit 42
-  printf resynced >"$API_STATE"
+  if [ "${HOT_AGENT:-false}" = true ]; then printf hot-resynced >"$API_STATE"; else printf resynced >"$API_STATE"; fi
 fi
+if [ "$component" = datapath ] && [ "$action" = replace ]; then printf '%s\n' "$NEW_DP" >"$DP_IMAGE_STATE"; fi
+if [ "$component" = agent ] && [ "$action" = replace ]; then printf '%s\n' "$NEW_AGENT" >"$AGENT_IMAGE_STATE"; fi
+if [ "$component" = datapath ] && [ "$action" = restore ]; then printf '%s\n' "$OLD_DP" >"$DP_IMAGE_STATE"; fi
+if [ "$component" = agent ] && [ "$action" = restore ]; then printf '%s\n' "$OLD_AGENT" >"$AGENT_IMAGE_STATE"; fi
+if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$API_STATE"; fi
 '''
         self.datapath_fake = self.write_executable("datapath-installer", component)
         self.agent_fake = self.write_executable("agent-installer", component)
@@ -210,6 +224,8 @@ fi
                 "PATH": str(self.bin) + os.pathsep + env.get("PATH", ""),
                 "TRACE_FILE": str(self.trace),
                 "API_STATE": str(self.api_state),
+                "DP_IMAGE_STATE": str(self.root / "dp-image-state"),
+                "AGENT_IMAGE_STATE": str(self.root / "agent-image-state"),
                 "CURRENT_MANIFEST": str(self.current_manifest),
                 "CANDIDATE_MANIFEST": str(self.candidate_manifest),
                 "OPERATION_ID": "task7-op",
@@ -247,6 +263,7 @@ fi
             self.candidate_manifest.write_text(json.dumps(candidate), encoding="utf-8")
             env["DATAPATH_IMAGE_REF"] = "registry/datapath:current"
             env["DATAPATH_EXPECTED_IMAGE_ID"] = OLD_DP
+            env["HOT_AGENT"] = "true"
         for path in (
             env["ADMIN_SOCKET"],
             env["NEUTRON_SOCKET"],
@@ -265,6 +282,8 @@ fi
     def reset_operation(self):
         shutil.rmtree(self.root / "release-state", ignore_errors=True)
         self.api_state.unlink(missing_ok=True)
+        (self.root / "dp-image-state").unlink(missing_ok=True)
+        (self.root / "agent-image-state").unlink(missing_ok=True)
         self.trace.unlink(missing_ok=True)
 
     def run_joint(
@@ -272,6 +291,8 @@ fi
         extra=None,
     ):
         self.assertTrue(INSTALLER.is_file(), "joint installer is absent")
+        if action == "resume" and self.api_state.exists():
+            self.api_state.write_text("resynced", encoding="utf-8")
         result = subprocess.run(
             ["bash", str(INSTALLER), action],
             cwd=str(ROOT),
@@ -347,7 +368,6 @@ fi
                 self.assertEqual(phase, self.phase_value())
                 trace = self.read_trace()
                 self.assertNotIn("docker restart", trace)
-                self.assertNotIn("ovs-vsctl", trace)
                 if phase == "maintenance_bypass" and fail_at != "activation":
                     self.assertNotIn("/maintenance/exit", trace)
                 if fail_at == "activation":
@@ -377,7 +397,7 @@ fi
 
     def test_activation_requires_exact_stable_complete_same_operation_status(self):
         cases = (
-            ("operation", {"STATUS_OPERATION_ID": "sync-7"}),
+            ("operation", {"SYNC_OPERATION_ID": "sync-7"}),
             ("accepted", {"SYNC_ACCEPTED": "41"}),
             ("applied", {"SYNC_APPLIED": "41"}),
             ("pending", {"SYNC_PENDING": "43"}),
@@ -430,7 +450,8 @@ fi
         self.trace.write_text("", encoding="utf-8")
         self.run_joint("resume")
         resumed = self.read_trace()
-        self.assertIn("/full-resync", resumed)
+        self.assertGreaterEqual(resumed.count("http://localhost/status"), 2)
+        self.assertNotIn("/api/v1/admin/full-resync", resumed)
         self.assertIn("/maintenance/exit", resumed)
         self.assertNotIn(" replace", resumed)
         self.assertEqual("committed", self.phase_value())
@@ -444,10 +465,8 @@ fi
         order = (
             "/maintenance/enter",
             "datapath restore",
-            "datapath verify",
             "agent restore",
-            "agent verify",
-            "/full-resync",
+            "/status",
             "/maintenance/exit",
         )
         offset = -1
@@ -470,7 +489,8 @@ fi
         self.assertIn("agent prepare", trace)
         self.assertIn("agent replace", trace)
         self.assertIn("agent verify", trace)
-        self.assertIn("/full-resync", trace)
+        self.assertGreaterEqual(trace.count("http://localhost/status"), 3)
+        self.assertNotIn("/api/v1/admin/full-resync", trace)
         self.assertNotIn("datapath replace", trace)
         self.assertNotIn("/maintenance/enter", trace)
         self.assertNotIn("/maintenance/exit", trace)
@@ -494,10 +514,24 @@ fi
             "docker restart",
             "docker stop neutron_openvswitch_agent",
             "docker rm neutron_openvswitch_agent",
-            "ovs-vsctl",
+            "ovs-vsctl del-port",
+            "ovs-vsctl set",
+            "ovs-vsctl clear",
         )
         for invocation in forbidden:
             self.assertNotIn(invocation, trace)
+        for path in (INSTALLER, DATAPATH_INSTALLER, AGENT_INSTALLER):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotRegex(
+                source,
+                r"docker\s+(?:restart|stop|rm|rename)\s+"
+                r"(?:neutron_openvswitch_agent|\$\{?OVS_AGENT_SERVICE\}?)",
+            )
+            self.assertNotRegex(
+                source,
+                r"ovs-vsctl(?:\s+--[^ ]+)*\s+"
+                r"(?:add-port|del-port|set|clear|create|destroy)",
+            )
         self.assertNotIn("cleanup", INSTALLER.read_text(encoding="utf-8").lower())
 
     def test_joint_coordinator_uses_fd_lock_and_never_masks_ledger_failure(self):

@@ -524,7 +524,7 @@ class UpgradeLedgerTest(unittest.TestCase):
             {
                 "preflight": ("quiescing", "agent_upgrading", "failed_before_mutation"),
                 "quiescing": ("bypass_preparing",),
-                "bypass_preparing": ("bypass_confirmed", "maintenance_bypass"),
+                "bypass_preparing": ("bypass_confirmed",),
                 "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
                 "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
                 "datapath_live": ("agent_upgrading", "maintenance_bypass"),
@@ -545,7 +545,7 @@ class UpgradeLedgerTest(unittest.TestCase):
         authoritative = {
             "preflight": ("quiescing", "agent_upgrading", "failed_before_mutation"),
             "quiescing": ("bypass_preparing",),
-            "bypass_preparing": ("bypass_confirmed", "maintenance_bypass"),
+            "bypass_preparing": ("bypass_confirmed",),
             "bypass_confirmed": ("datapath_upgrading", "maintenance_bypass"),
             "datapath_upgrading": ("datapath_live", "maintenance_bypass"),
             "datapath_live": ("agent_upgrading", "maintenance_bypass"),
@@ -1975,12 +1975,27 @@ class UpgradeLedgerTest(unittest.TestCase):
             ledger.transition("preflight", "quiescing", {})
             ledger.transition("quiescing", "bypass_preparing", {})
             failed = ledger.fail("bypass_preparing", "preparation paused")
-            self.assertEqual("maintenance_bypass", failed["phase"])
-            self.assertEqual("operator_action_required", failed["recovery_action"])
+            self.assertEqual("bypass_preparing", failed["phase"])
+            self.assertEqual("resume_exact_phase", failed["recovery_action"])
             self.assertEqual("preparation paused", failed["last_error"])
-            progressed = ledger.transition("maintenance_bypass", "full_resync", {})
+            progressed = ledger.transition("bypass_preparing", "bypass_confirmed", {})
             self.assertIsNone(progressed["recovery_action"])
             self.assertIsNone(progressed["last_error"])
+            ledger.close()
+
+    def test_hot_agent_failure_never_claims_unentered_maintenance_bypass(self):
+        control = self.control()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir).resolve()
+            ledger = self.new_ledger(control, temp)
+            ledger.begin(
+                self.operation(), host="compute-1",
+                upgrade_class="hot_agent", evidence=self.evidence(),
+            )
+            ledger.transition("preflight", "agent_upgrading", {})
+            failed = ledger.fail("agent_upgrading", "agent replacement failed")
+            self.assertEqual("agent_upgrading", failed["phase"])
+            self.assertEqual("resume_exact_phase", failed["recovery_action"])
             ledger.close()
 
     def test_recovered_preflight_metadata_clears_on_progress(self):
