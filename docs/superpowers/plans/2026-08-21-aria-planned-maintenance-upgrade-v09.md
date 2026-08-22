@@ -524,7 +524,7 @@ field evidence remain `deferred/pending`; `maintenance_gate_capable` remains
 - Python service-loop evidence: `/var/lib/neutron-aria-agent/state/service-liveness.json`.
 - Docker health authority remains `/readyz`.
 
-- [ ] **Step 1: Write failing liveness/readiness matrix tests**
+- [x] **Step 1: Write failing liveness/readiness matrix tests**
 
 Assert:
 
@@ -535,34 +535,34 @@ blocked recovery            live=200 ready=503 docker=unhealthy
 dead loop/socket             live=failed ready=failed docker=unhealthy
 ```
 
-- [ ] **Step 2: Run health contract tests and observe failure**
+- [x] **Step 2: Run health contract tests and observe failure**
 
 Run: `python3 -m unittest ci.test_kolla_container_healthchecks`
 
 Expected: FAIL because `/livez` is absent.
 
-- [ ] **Step 3: Add bounded liveness responses**
+- [x] **Step 3: Add bounded liveness responses**
 
 Liveness checks process loop and API responsiveness only. It must not inspect ACL generation, ports, or OVS.
 
-- [ ] **Step 4: Publish Python service-loop evidence atomically**
+- [x] **Step 4: Publish Python service-loop evidence atomically**
 
 At initialization and after every `run_once()`, write schema version, PID, host,
 and `updated_at` using temp-file, `fsync`, rename, and directory `fsync`. The
 Python health script rejects a missing record, PID mismatch, malformed JSON, or
 age greater than 120 seconds.
 
-- [ ] **Step 5: Keep both Docker scripts strict**
+- [x] **Step 5: Keep both Docker scripts strict**
 
 The scripts may probe `/livez` for diagnostics, but their exit code still requires `/readyz`. Add comments and tests preventing a future switch to liveness-only Docker health.
 
-- [ ] **Step 6: Run health tests**
+- [x] **Step 6: Run health tests**
 
 Run: `python3 -m unittest ci.test_kolla_container_healthchecks && (cd openstack/neutron_aria && python -m unittest neutron_aria.tests.unit.test_liveness) && bash -n deploy/kolla/aria-datapath/healthcheck-aria-datapath.sh && bash -n deploy/kolla/neutron-aria-agent/healthcheck-neutron-aria-agent.sh`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the health split**
+- [x] **Step 7: Commit the health split**
 
 ```bash
 git add agent/src/api_routes.rs agent/src/api_handlers/health.rs \
@@ -575,6 +575,18 @@ git add agent/src/api_routes.rs agent/src/api_handlers/health.rs \
   ci/test_kolla_container_healthchecks.py
 git commit -m "feat(health): expose Aria liveness diagnostics"
 ```
+
+Task 6 closed through RED `2f924056` / Actions `32572580107`, GREEN
+`8b08c65b` / `32573008399`, smoke-wiring RED `3cb000b3` /
+`32573347573`, smoke-wiring GREEN `61916225` / `32573675154`, and the
+independent-review boundary RED `b8206ef5` / `32574308664` followed by final
+GREEN `7e5eff92` / `32574703013`. Exact final-head workflow-dispatch run
+`32574747875` passed fast contracts, Rust behavior, static builds, and the
+linked-artifact gate with `tc_ingress=480`, `tc_egress=480`, and maximum path
+480 bytes. The independent re-review is clean with no Critical or Important
+findings. Real Kolla/EL 4.18, dual-stack traffic, restart/rollback, and root
+socket field evidence remain `deferred/pending`; `maintenance_gate_capable`
+remains `false`, so this closure is not production-readiness approval.
 
 ### Task 7: Build The Joint Kolla Coordinator
 
