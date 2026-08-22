@@ -815,6 +815,27 @@ pub(crate) fn decode_maintenance_record(raw: &[u8]) -> Result<MaintenanceWalReco
             version
         ));
     }
+    if version == MAINTENANCE_WAL_SCHEMA_VERSION {
+        let missing_abort_phase = match &record {
+            MaintenanceWalRecord::AbortIntent { expected_phase, .. } => {
+                expected_phase.is_none()
+            }
+            MaintenanceWalRecord::Checkpoint {
+                pending_transition,
+                terminal_action,
+                terminal_expected_phase,
+                ..
+            } => {
+                (*pending_transition == Some(MaintenancePendingTransition::Abort)
+                    || *terminal_action == Some(MaintenanceTerminalAction::Abort))
+                    && terminal_expected_phase.is_none()
+            }
+            _ => false,
+        };
+        if missing_abort_phase {
+            return Err("maintenance WAL v2 Abort identity is missing expected phase".to_string());
+        }
+    }
     validate_state(state)?;
     Ok(record)
 }
