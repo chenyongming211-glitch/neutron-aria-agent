@@ -1636,6 +1636,7 @@ mod tests {
     struct FaultStore {
         records: Arc<StdMutex<Vec<MaintenanceWalRecord>>>,
         append_results: Arc<StdMutex<VecDeque<Result<(), String>>>>,
+        replay_override: Arc<StdMutex<Option<MaintenanceStoreReplay>>>,
     }
 
     impl FaultStore {
@@ -1643,7 +1644,14 @@ mod tests {
             Self {
                 records: Arc::new(StdMutex::new(records)),
                 append_results: Arc::new(StdMutex::new(VecDeque::new())),
+                replay_override: Arc::new(StdMutex::new(None)),
             }
+        }
+
+        fn with_replay(replay: MaintenanceStoreReplay) -> Self {
+            let store = Self::new(Vec::new());
+            *store.replay_override.lock().unwrap() = Some(replay);
+            store
         }
 
         fn push_append_result(&self, result: Result<(), &str>) {
@@ -1660,6 +1668,9 @@ mod tests {
 
     impl MaintenanceStore for FaultStore {
         fn load(&self) -> MaintenanceStoreReplay {
+            if let Some(replay) = self.replay_override.lock().unwrap().clone() {
+                return replay;
+            }
             match replay_maintenance_records(&self.records()) {
                 Ok(replay) => MaintenanceStoreReplay {
                     state: replay.state,
@@ -2274,5 +2285,177 @@ mod tests {
             assert!(encoded.get("secret").is_none());
             assert!(encoded["reason"].as_str().unwrap_or("").len() <= MAX_REASON_BYTES);
         }
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_corrupt_replay_and_pending_terminal_are_not_enter_repairable() {
+        let corrupt = MaintenanceStoreReplay {
+            state: active_state("op-corrupt", 41, "sha256:host-41"),
+            failures: 1,
+            pending_transition: None,
+            terminal_action: None,
+        };
+        let corrupt_store = FaultStore::with_replay(corrupt);
+        let corrupt_gate = FaultGate::default();
+        let corrupt_coordinator = coordinator_with_faults(
+            corrupt_store.clone(),
+            corrupt_gate.clone(),
+            CapturingAudit::default(),
+        );
+        let error = corrupt_coordinator
+            .enter(enter_request("op-corrupt"), convergence())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "maintenance_operator_recovery_required");
+        assert!(corrupt_store.records().is_empty());
+        assert!(corrupt_gate.calls().is_empty());
+        assert!(corrupt_coordinator.is_blocked());
+
+        for pending in [
+            MaintenancePendingTransition::Exit,
+            MaintenancePendingTransition::Abort,
+        ] {
+            let replay = MaintenanceStoreReplay {
+                state: active_state("op-pending-terminal", 41, "sha256:host-41"),
+                failures: 0,
+                pending_transition: Some(pending),
+                terminal_action: None,
+            };
+            let store = FaultStore::with_replay(replay);
+            let gate = FaultGate::default();
+            let coordinator = coordinator_with_faults(
+                store.clone(),
+                gate.clone(),
+                CapturingAudit::default(),
+            );
+            let error = coordinator
+                .enter(enter_request("op-pending-terminal"), convergence())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "maintenance_pending_transition_conflict");
+            assert!(store.records().is_empty());
+            assert!(gate.calls().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_committed_active_repair_never_appends_orphan_enter_commit() {
+        let store = FaultStore::new(active_records("op-active-repair"));
+        let gate = FaultGate::default();
+        gate.push_result(Err("startup_authority_unavailable"));
+        gate.push_result(Ok(()));
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate,
+            CapturingAudit::default(),
+        );
+        assert!(coordinator.recover_before_reconciliation().await.is_err());
+        coordinator
+            .enter(enter_request("op-active-repair"), convergence())
+            .await
+            .unwrap();
+
+        let replay = replay_maintenance_records(&store.records())
+            .expect("active repair must remain a replayable canonical transaction");
+        assert!(replay.requires_bypass);
+        assert!(replay.pending_transition.is_none());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_pending_exit_or_abort_fences_matching_snapshot_progress() {
+        for pending in [
+            MaintenancePendingTransition::Exit,
+            MaintenancePendingTransition::Abort,
+        ] {
+            let coordinator = coordinator_with_faults(
+                FaultStore::with_replay(MaintenanceStoreReplay {
+                    state: active_state("op-terminal", 41, "sha256:host-41"),
+                    failures: 0,
+                    pending_transition: Some(pending),
+                    terminal_action: None,
+                }),
+                FaultGate::default(),
+                CapturingAudit::default(),
+            );
+            let error = coordinator
+                .acquire_writer(MaintenanceWriter::FullHostSnapshot, Some("op-terminal"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "maintenance_terminal_transition_pending");
+        }
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_double_gate_failure_is_unknown_not_bypass() {
+        let store = FaultStore::new(active_records("op-gate-unknown"));
+        let gate = FaultGate::default();
+        gate.push_result(Err("clear_response_unknown"));
+        gate.push_result(Err("restore_response_unknown"));
+        let coordinator = coordinator_with_faults(store, gate, CapturingAudit::default());
+        let request = MaintenanceExitRequest {
+            operation_id: "op-gate-unknown".to_string(),
+            expected_applied_generation: 41,
+            expected_applied_desired_hash: Some("sha256:host-41".to_string()),
+        };
+
+        assert!(coordinator.exit(request, convergence()).await.is_err());
+        let snapshot = coordinator.snapshot().await;
+        assert!(snapshot.blocked);
+        assert_eq!(snapshot.gate_state, MaintenanceGateState::Unknown);
+        assert_eq!(snapshot.block_cause.as_deref(), Some("maintenance_gate_unknown"));
+        assert_ne!(snapshot.state.phase, MaintenancePhase::MaintenanceBypass);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_conservative_abort_retry_is_exactly_idempotent() {
+        let store = FaultStore::new(active_records("op-abort-bypass"));
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            FaultGate::default(),
+            CapturingAudit::default(),
+        );
+        let request = MaintenanceAbortRequest {
+            operation_id: "op-abort-bypass".to_string(),
+            expected_phase: MaintenancePhase::MaintenanceBypass,
+            error: Some("candidate_failed".to_string()),
+        };
+        let mut incomplete = convergence();
+        incomplete.pending_generation = Some(42);
+        let first = coordinator
+            .abort(request.clone(), incomplete.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.0, MaintenanceDisposition::Mutate);
+        assert!(first.1.is_active());
+        let record_count = store.records().len();
+
+        let retry = coordinator.abort(request, incomplete).await.unwrap();
+        assert_eq!(retry.0, MaintenanceDisposition::Idempotent);
+        assert_eq!(store.records().len(), record_count);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_idempotent_results_emit_success_audit() {
+        let store = FaultStore::new(Vec::new());
+        let audit = CapturingAudit::default();
+        let coordinator = coordinator_with_faults(
+            store,
+            FaultGate::default(),
+            audit.clone(),
+        );
+        let request = enter_request("op-audit-idempotent");
+        coordinator
+            .enter(request.clone(), convergence())
+            .await
+            .unwrap();
+        audit.events.lock().unwrap().clear();
+        assert_eq!(
+            coordinator.enter(request, convergence()).await.unwrap().0,
+            MaintenanceDisposition::Idempotent
+        );
+        let events = audit.events.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].outcome, MaintenanceAuditOutcome::Attempt);
+        assert_eq!(events[1].outcome, MaintenanceAuditOutcome::Success);
     }
 }

@@ -110,7 +110,9 @@ jobs:
           bash ci/test_neutron_aria_acl_active_matrix_soak.sh
 
       - name: Check public Neutron contracts
-        run: python3 ci/check_neutron_stage1.py --fast-contracts
+        run: |
+          python3 -m unittest ci.test_neutron_maintenance_contract
+          python3 ci/check_neutron_stage1.py --fast-contracts
 
   neutron-agent-clean-install:
     runs-on: ubuntu-22.04

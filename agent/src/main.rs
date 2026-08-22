@@ -2146,4 +2146,59 @@ ipv6_timeout_seconds = 43
         assert_eq!(production.parent_forbidden_mode, 0o022);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn neutron_maintenance_startup_barrier_runs_before_and_blocks_mutating_initialization() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recover_calls = calls.clone();
+        let mutate_calls = calls.clone();
+        let result = run_maintenance_first_startup(
+            move || async move {
+                recover_calls.lock().unwrap().push("maintenance_replay");
+                Err("maintenance_gate_unknown".to_string())
+            },
+            move || async move {
+                mutate_calls.lock().unwrap().push("runtime_schema_prepare");
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*calls.lock().unwrap(), vec!["maintenance_replay"]);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_admin_peercred_rejects_queued_non_root_connection() {
+        use tokio::io::AsyncReadExt;
+
+        let auth = AdminPeerAuth::production();
+        assert!(auth
+            .authorize(Some(UnixPeerCred {
+                pid: 1,
+                uid: 0,
+                gid: 0,
+            }))
+            .allowed);
+        assert!(!auth
+            .authorize(Some(UnixPeerCred {
+                pid: 2,
+                uid: 1000,
+                gid: 1000,
+            }))
+            .allowed);
+
+        let (mut server, mut queued_client) = tokio::net::UnixStream::pair().unwrap();
+        let decision = auth.audit_and_enforce_with_credential(
+            &mut server,
+            Ok(UnixPeerCred {
+                pid: 2,
+                uid: 1000,
+                gid: 1000,
+            }),
+        );
+        assert!(!decision.allowed);
+        let mut byte = [0u8; 1];
+        assert_eq!(queued_client.read(&mut byte).await.unwrap(), 0);
+    }
 }

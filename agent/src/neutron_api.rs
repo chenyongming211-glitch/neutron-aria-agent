@@ -18294,6 +18294,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn neutron_maintenance_gate_unknown_status_is_atomic_blocked_and_honest() {
+        let root = temp_root("maintenance-gate-unknown-status");
+        seed_active_maintenance(&root, "op-gate-unknown-status");
+        let wal = NeutronWal::new(root.join("state"));
+        let replay = wal.replay();
+        let mut unknown = replay.maintenance.state;
+        unknown.phase = aria_api::MaintenancePhase::GateUnknown;
+        unknown.last_error = Some("maintenance_gate_unknown".to_string());
+        wal.append_maintenance_record(MaintenanceWalRecord::recovery_commit_state(
+            unknown,
+            crate::neutron_maintenance::MaintenanceGateState::Unknown,
+            "maintenance_gate_unknown",
+        ))
+        .unwrap();
+        let state = test_neutron_state(&root);
+        *state.runtime.write().await = healthy_maintenance_runtime();
+
+        let snapshot = state.maintenance.snapshot().await;
+        assert!(snapshot.fenced);
+        assert!(snapshot.blocked);
+        assert_eq!(
+            snapshot.gate_state,
+            crate::neutron_maintenance::MaintenanceGateState::Unknown
+        );
+        let body = serde_json::to_value(build_neutron_status_response(&state, false).await).unwrap();
+        assert_eq!(body["transaction_state"], "blocked");
+        assert_eq!(body["overall_readiness"], "blocked");
+        assert_eq!(body["acl_enforcement"], "unknown");
+        assert_eq!(body["maintenance_reason"], "maintenance_gate_unknown");
+        assert_eq!(body["maintenance_operation_id"], "op-gate-unknown-status");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     async fn request_status(router: Router, method: Method, path: &str) -> StatusCode {
         router
             .oneshot(

@@ -2984,4 +2984,82 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn neutron_maintenance_wal_snapshot_and_progress_commit_are_one_replay_boundary() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let preparing = maintenance_state("op-composite");
+        let mut active = preparing.clone();
+        active.phase = MaintenancePhase::MaintenanceBypass;
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(preparing))
+            .unwrap();
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_commit_state(active.clone()))
+            .unwrap();
+
+        let runtime = neutron_wal_baseline_state(42);
+        active.applied_generation = 42;
+        active.applied_desired_hash = Some("hash-42".to_string());
+        wal.append_snapshot_commit_with_maintenance_progress(runtime.clone(), active.clone())
+            .unwrap();
+
+        let replay = wal.replay();
+        assert_eq!(replay.failures, 0);
+        assert_eq!(replay.state.applied_generation, 42);
+        assert_eq!(replay.state.applied_desired_hash.as_deref(), Some("hash-42"));
+        assert_eq!(replay.maintenance.state.applied_generation, 42);
+        assert_eq!(
+            replay.maintenance.state.applied_desired_hash.as_deref(),
+            Some("hash-42")
+        );
+        assert!(replay.maintenance.pending_transition.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_compacts_by_record_count_before_replay_limit() {
+        let root = temp_state_path();
+        fs::create_dir_all(&root).unwrap();
+        let mut encoded = encoded_snapshot_commit(41);
+        encoded.push(b'\n');
+        let mut history = Vec::with_capacity(encoded.len() * (MAX_WAL_REPLAY_RECORDS - 1));
+        for _ in 0..(MAX_WAL_REPLAY_RECORDS - 1) {
+            history.extend_from_slice(&encoded);
+        }
+        fs::write(root.join(WAL_FILE), history).unwrap();
+
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_commit(neutron_wal_baseline_state(42))
+            .unwrap();
+        let raw = fs::read(root.join(WAL_FILE)).unwrap();
+        let line_count = raw.iter().filter(|byte| **byte == b'\n').count();
+        assert!(line_count < MAX_WAL_REPLAY_RECORDS);
+        let replay = wal.replay();
+        assert_eq!(replay.failures, 0);
+        assert_eq!(replay.state.applied_generation, 42);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_rejects_oversized_tail_without_newline() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(
+            maintenance_state("op-bounded-reader"),
+        ))
+        .unwrap();
+        let mut bytes = wal_bytes(&root);
+        bytes.extend(std::iter::repeat(b'x').take(MAX_WAL_RECORD_BYTES + 1));
+        fs::write(root.join(WAL_FILE), bytes).unwrap();
+
+        let replay = wal.replay();
+        assert_eq!(replay.failures, 1);
+        assert_eq!(replay.maintenance_failures, 1);
+        assert!(replay.maintenance.requires_bypass);
+        assert_eq!(
+            replay.maintenance.state.operation_id.as_deref(),
+            Some("op-bounded-reader")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
