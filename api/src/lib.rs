@@ -2937,6 +2937,7 @@ mod tests {
         assert_eq!(decoded.schema_version, None);
         assert_eq!(decoded.desired_hash, None);
         assert_eq!(decoded.host, None);
+        assert_eq!(decoded.maintenance_operation_id, None);
         assert_eq!(decoded.ports.len(), 1);
 
         let port = &decoded.ports[0];
@@ -2954,5 +2955,19 @@ mod tests {
         assert_eq!(port.acl, None);
         assert_eq!(port.qos, None);
         assert_eq!(port.mirror, None);
+    }
+
+    #[test]
+    fn neutron_maintenance_snapshot_identity_roundtrips_without_policy_payload() {
+        let decoded: NeutronSnapshotRequest = serde_json::from_str(
+            r#"{"generation":42,"desired_hash":"sha256:host-42","maintenance_operation_id":"op-42","ports":[]}"#,
+        )
+        .expect("maintenance snapshot identity should deserialize");
+
+        assert_eq!(decoded.maintenance_operation_id.as_deref(), Some("op-42"));
+        let encoded = serde_json::to_value(decoded).expect("snapshot should serialize");
+        assert_eq!(encoded["maintenance_operation_id"], "op-42");
+        assert!(encoded.get("maintenance_token").is_none());
+        assert!(encoded.get("policy").is_none());
     }
 }

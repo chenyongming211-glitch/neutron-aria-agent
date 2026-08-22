@@ -30,6 +30,8 @@ mod kernel_drop_support;
 mod netlink;
 mod neutron_acl_ip;
 mod neutron_api;
+#[cfg(test)]
+mod neutron_maintenance;
 mod neutron_wal;
 mod openapi;
 mod service_chain;
