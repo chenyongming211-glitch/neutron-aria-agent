@@ -1061,6 +1061,9 @@ def _decode_status_v4(body):
         allow_retry_snapshot=True,
     )
     maintenance_action = body.get("maintenance_action")
+    maintenance_phase = None
+    maintenance_operation_id = None
+    maintenance_reason = None
     maintenance_required = (
         decoded["required_action"] == "complete_or_repair_maintenance"
     )
@@ -1080,27 +1083,31 @@ def _decode_status_v4(body):
             "unknown acl_enforcement %r" % acl_enforcement
         )
     if maintenance_action == "complete_or_repair_maintenance":
-        phase = _strict_string(
+        maintenance_phase = _strict_string(
             _required(body, "maintenance_phase"),
             "maintenance_phase",
             nonempty=True,
         )
-        if phase not in (
+        if maintenance_phase not in (
             "bypass_preparing", "maintenance_bypass", "gate_unknown",
             "verifying",
         ):
-            raise LocalApiContractError("invalid active maintenance_phase %r" % phase)
-        _strict_string(
+            raise LocalApiContractError(
+                "invalid active maintenance_phase %r" % maintenance_phase
+            )
+        maintenance_operation_id = _strict_string(
             _required(body, "maintenance_operation_id"),
             "maintenance_operation_id",
             nonempty=True,
         )
-        _strict_string(
+        maintenance_reason = _strict_string(
             _required(body, "maintenance_reason"),
             "maintenance_reason",
             nonempty=True,
         )
-        expected_enforcement = "unknown" if phase == "gate_unknown" else "bypass"
+        expected_enforcement = (
+            "unknown" if maintenance_phase == "gate_unknown" else "bypass"
+        )
         if acl_enforcement != expected_enforcement:
             raise LocalApiContractError(
                 "maintenance phase/enforcement truth mismatch"
@@ -1122,6 +1129,16 @@ def _decode_status_v4(body):
         )
         if acl_enforcement != "enforce" and not operator_unknown:
             raise LocalApiContractError("inactive status must report ACL enforce")
+    decoded.update({
+        "maintenance_active": (
+            maintenance_action == "complete_or_repair_maintenance"
+        ),
+        "maintenance_phase": maintenance_phase,
+        "maintenance_operation_id": maintenance_operation_id,
+        "maintenance_reason": maintenance_reason,
+        "maintenance_action": maintenance_action,
+        "acl_enforcement": acl_enforcement,
+    })
     if "counters" in body:
         decoder = None
         try:
@@ -1450,6 +1467,29 @@ class LocalClient(object):
             self._status_contract_fresh_handshake = False
         return decoded
 
+    def maintenance_status(self):
+        status = self.status()
+        active = bool(status.get("maintenance_active"))
+        operation_id = status.get("maintenance_operation_id")
+        phase = status.get("maintenance_phase")
+        if active and (
+            not isinstance(operation_id, _STRING_TYPES) or
+            not operation_id or
+            len(operation_id) > 128
+        ):
+            raise LocalApiContractError(
+                "active maintenance status has an invalid operation ID"
+            )
+        return {
+            "active": active,
+            "maintenance_phase": phase if active else None,
+            "maintenance_operation_id": operation_id if active else None,
+            "maintenance_reason": (
+                status.get("maintenance_reason") if active else None
+            ),
+            "acl_enforcement": status.get("acl_enforcement"),
+        }
+
     def counter_status(self):
         """Read the optional counters view without latching ACL writes closed."""
         try:
@@ -1473,10 +1513,23 @@ class LocalClient(object):
             contract_response=True,
         )
 
-    def put_snapshot(self, snapshot):
+    def put_snapshot(self, snapshot, maintenance_operation_id=None):
         self._require_status_contract_write_allowed()
         self._require_ipv6_snapshot_capability(snapshot)
-        return self._request("PUT", "/api/v1/neutron/snapshot", snapshot)
+        request = snapshot
+        if maintenance_operation_id is not None:
+            if (
+                not isinstance(maintenance_operation_id, _STRING_TYPES) or
+                not maintenance_operation_id or
+                maintenance_operation_id.strip() != maintenance_operation_id or
+                len(maintenance_operation_id) > 128
+            ):
+                raise LocalApiContractError(
+                    "invalid maintenance_operation_id"
+                )
+            request = dict(snapshot or {})
+            request["maintenance_operation_id"] = maintenance_operation_id
+        return self._request("PUT", "/api/v1/neutron/snapshot", request)
 
     def recover_pending_snapshot(self, expected_generation, expected_desired_hash=None):
         self._require_status_contract_write_allowed()

@@ -129,6 +129,27 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(0, pending["retry_count"])
         self.assertEqual(None, pending["last_retry_at"])
 
+    def test_pending_maintenance_request_rejects_operation_identity_tamper(self):
+        store = SnapshotStateStore(self.state_dir)
+        snapshot = self._snapshot("p1")
+        snapshot["maintenance_operation_id"] = "op-maint-state"
+        desired_hash = desired_snapshot_hash(snapshot)
+        store.record_maintenance_progress(
+            "op-maint-state",
+            1,
+            desired_hash,
+        )
+        store.prepare_snapshot(snapshot)
+        store._state["pending_request"]["body"][
+            "maintenance_operation_id"
+        ] = "op-tampered"
+        store._write()
+
+        pending = SnapshotStateStore(self.state_dir).pending_snapshot()
+
+        self.assertFalse(pending["retryable"])
+        self.assertIsNone(pending["request"])
+
     def test_pending_scoped_request_retains_exact_route_after_restart(self):
         store = SnapshotStateStore(self.state_dir)
         prepared = store.prepare_scoped_snapshot(self._snapshot("p1"))

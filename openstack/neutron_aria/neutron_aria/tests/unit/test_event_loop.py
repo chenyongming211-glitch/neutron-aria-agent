@@ -999,6 +999,17 @@ class EventLoopTestCase(unittest.TestCase):
             result["snapshot"]["desired_hash"],
             result["stable_desired_hash"],
         )
+        self.assertEqual(
+            "op-maint-1",
+            result["status"]["maintenance_operation_id"],
+        )
+        self.assertEqual(1, result["status"]["stable_read_attempts"])
+        self.assertEqual(
+            result["stable_desired_hash"],
+            result["status"]["stable_desired_hash"],
+        )
+        self.assertIsNotNone(result["status"]["last_progress_at"])
+        self.assertIn("maintenance_phase", result["status"])
         progress = state_store.to_dict()
         self.assertEqual("op-maint-1", progress["maintenance_operation_id"])
         self.assertEqual(1, progress["stable_read_attempts"])
@@ -1145,12 +1156,14 @@ class EventLoopTestCase(unittest.TestCase):
         )
         source = SequencedPortSource([[port_a], [port_b]] * 5)
         client = FakeLocalClient()
+        state_store = InMemorySnapshotStateStore()
         sync = SnapshotSynchronizer(
             "compute-1",
             source,
             FakeOvsReader(),
             client,
             managed_domains=["acl"],
+            state_store=state_store,
             maintenance_event_merger=SequencedEventMerger(),
         )
 
@@ -1160,6 +1173,13 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual([], client.snapshots)
         self.assertIsNone(result["snapshot"])
         self.assertEqual("maintenance_snapshot_not_stable", result["status"]["reason"])
+        self.assertEqual(5, result["stable_read_attempts"])
+        self.assertEqual(5, result["status"]["stable_read_attempts"])
+        self.assertEqual("op-maint-exhaust", result["maintenance_operation_id"])
+        self.assertEqual(
+            "op-maint-exhaust",
+            state_store.to_dict()["maintenance_operation_id"],
+        )
 
     def test_full_resync_builds_and_submits_snapshot(self):
         port_source = StaticPortSource([{

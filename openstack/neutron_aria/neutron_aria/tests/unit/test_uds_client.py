@@ -569,10 +569,14 @@ class UdsClientTestCase(unittest.TestCase):
             "host": "compute-1",
             "ports": [],
         }
-        FakeConnection.responses.append(FakeResponse(200, "OK", {
-            "generation": 12,
-            "results": [],
-        }))
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", self._v3_capabilities()),
+            FakeResponse(200, "OK", {
+                "generation": 12,
+                "results": [],
+            }),
+        ])
+        self.client.capabilities(required_domains=["acl"])
 
         self.client.put_snapshot(
             snapshot,
@@ -588,6 +592,13 @@ class UdsClientTestCase(unittest.TestCase):
 
     def test_put_snapshot_rejects_empty_maintenance_operation_id(self):
         snapshot = {"generation": 12, "host": "compute-1", "ports": []}
+        FakeConnection.responses.append(FakeResponse(
+            200,
+            "OK",
+            self._v3_capabilities(),
+        ))
+        self.client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
 
         with self.assertRaises(LocalApiContractError):
             self.client.put_snapshot(snapshot, maintenance_operation_id="")

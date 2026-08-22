@@ -69,10 +69,14 @@ class AgentService(object):
         self.initialized = False
         self.next_report_at = 0
         self.next_resync_at = 0
+        self.maintenance_operation_id = None
+        if hasattr(self.synchronizer, "maintenance_event_merger"):
+            self.synchronizer.maintenance_event_merger = self.event_merger
 
     def initialize(self):
         now = self.clock()
         self.initialized = True
+        self._refresh_maintenance_status()
         LOG.info(
             "service_initialize host=%s full_resync_enabled=%s report_interval=%s "
             "resync_interval=%s event_merge_enabled=%s incremental_rpc_enabled=%s "
@@ -86,7 +90,7 @@ class AgentService(object):
             self.revisionless_incremental_mode,
         )
         if self.full_resync_enabled:
-            result = self.synchronizer.safe_full_resync()
+            result = self._run_full_resync()
             self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
             self._log_result("initialize_full_resync", result)
@@ -112,6 +116,7 @@ class AgentService(object):
             return self.initialize()
 
         now = self.clock()
+        self._refresh_maintenance_status()
         if self._events_ready():
             result = self._process_event_batch()
             if result is None:
@@ -123,7 +128,7 @@ class AgentService(object):
             return result
 
         if self.full_resync_enabled and now >= self.next_resync_at:
-            result = self.synchronizer.safe_full_resync()
+            result = self._run_full_resync()
             self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
             self._log_result("periodic_full_resync", result)
@@ -264,6 +269,12 @@ class AgentService(object):
                 "events": batch_dict,
             }
 
+        if self.maintenance_operation_id is not None:
+            result = self._run_full_resync()
+            result["events"] = batch_dict
+            result["resync_attempted"] = True
+            return result
+
         delete_errors = self._delete_known_ports(
             batch.deleted_ports,
             decisions=batch_dict["decisions"],
@@ -318,7 +329,7 @@ class AgentService(object):
         self._record_event_observability(batch_dict["decisions"])
 
         if batch.full_resync or network_updates_requiring_resync or port_updates_requiring_resync:
-            result = self.synchronizer.safe_full_resync()
+            result = self._run_full_resync()
             result["events"] = batch_dict
             result["resync_attempted"] = True
             return result
@@ -443,10 +454,30 @@ class AgentService(object):
             DELETE_PORT_DEGRADED_REASON,
             "; ".join(delete_errors),
         )
-        result = self.synchronizer.safe_full_resync()
+        result = self._run_full_resync()
         result["events"] = batch_dict
         result["resync_attempted"] = True
         return result
+
+    def _refresh_maintenance_status(self):
+        if not hasattr(self.synchronizer, "maintenance_status"):
+            self.maintenance_operation_id = None
+            return {
+                "active": False,
+                "maintenance_operation_id": None,
+            }
+        status = self.synchronizer.maintenance_status() or {}
+        operation_id = status.get("maintenance_operation_id")
+        self.maintenance_operation_id = operation_id if status.get("active") else None
+        return status
+
+    def _run_full_resync(self):
+        if self.maintenance_operation_id is not None:
+            return self.synchronizer.safe_stable_full_resync(
+                self.maintenance_operation_id,
+                max_attempts=5,
+            )
+        return self.synchronizer.safe_full_resync()
 
     def _delete_known_ports(self, port_ids, decisions=None):
         errors = []

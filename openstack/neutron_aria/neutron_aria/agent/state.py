@@ -36,6 +36,7 @@ def desired_snapshot_hash(snapshot):
     payload.pop("generation", None)
     payload.pop("desired_hash", None)
     payload.pop("schema_version", None)
+    payload.pop("maintenance_operation_id", None)
     ports = payload.get("ports")
     if isinstance(ports, list):
         payload["ports"] = sorted(
@@ -91,6 +92,10 @@ def _state_defaults():
         "last_cleared_pending_desired_hash": None,
         "last_cleared_pending_reason": None,
         "last_cleared_pending_at": None,
+        "maintenance_operation_id": None,
+        "stable_read_attempts": 0,
+        "stable_desired_hash": None,
+        "last_progress_at": None,
         "updated_at": None,
     }
 
@@ -376,6 +381,17 @@ class SnapshotStateStore(object):
                 return None
         generation = _int_value(self._state.get("pending_generation"))
         desired_hash = self._state.get("pending_desired_hash")
+        maintenance_operation_id = body.get("maintenance_operation_id")
+        if maintenance_operation_id is not None and (
+            not isinstance(maintenance_operation_id, _STRING_TYPES) or
+            not maintenance_operation_id or
+            maintenance_operation_id.strip() != maintenance_operation_id or
+            len(maintenance_operation_id) > 128 or
+            maintenance_operation_id != self._state.get(
+                "maintenance_operation_id"
+            )
+        ):
+            return None
         if (
             _int_value(body.get("generation")) != generation or
             body.get("desired_hash") != desired_hash or
@@ -721,6 +737,57 @@ class SnapshotStateStore(object):
         self._state["updated_at"] = _now()
         self._write()
         return self.pending_snapshot()
+
+    def record_maintenance_progress(
+        self,
+        operation_id,
+        attempts,
+        desired_hash,
+        progress_at=None,
+    ):
+        if (
+            not isinstance(operation_id, _STRING_TYPES) or
+            not operation_id or
+            operation_id.strip() != operation_id or
+            len(operation_id) > 128
+        ):
+            raise ValueError("maintenance operation ID is invalid")
+        attempts = _int_value(attempts)
+        if attempts < 1 or attempts > 5:
+            raise ValueError("stable read attempts are invalid")
+        if (
+            not isinstance(desired_hash, _STRING_TYPES) or
+            not desired_hash or
+            len(desired_hash) > 128
+        ):
+            raise ValueError("stable desired hash is invalid")
+        pending_request = self._validated_pending_request()
+        pending_operation_id = (
+            (pending_request or {}).get("body", {}).get(
+                "maintenance_operation_id"
+            )
+        )
+        if (
+            pending_operation_id is not None and
+            pending_operation_id != operation_id
+        ):
+            raise RuntimeError(
+                "pending maintenance snapshot belongs to another operation"
+            )
+        if progress_at is None:
+            progress_at = _now()
+        self._state["maintenance_operation_id"] = operation_id
+        self._state["stable_read_attempts"] = attempts
+        self._state["stable_desired_hash"] = desired_hash
+        self._state["last_progress_at"] = progress_at
+        self._state["updated_at"] = _now()
+        self._write()
+        return {
+            "maintenance_operation_id": operation_id,
+            "stable_read_attempts": attempts,
+            "stable_desired_hash": desired_hash,
+            "last_progress_at": progress_at,
+        }
 
     def pending_delete(self):
         port_id = self._state.get("pending_delete_port_id")

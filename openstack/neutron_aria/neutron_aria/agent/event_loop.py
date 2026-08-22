@@ -9,6 +9,7 @@ from neutron_aria.agent.effective_acl import REVISION_NEWER
 from neutron_aria.agent.effective_acl import REVISION_UNKNOWN
 from neutron_aria.agent.inventory import PortCandidateBuilder
 from neutron_aria.agent.inventory import PortScopedSnapshotBuilder
+from neutron_aria.agent.inventory import port_get
 from neutron_aria.agent.projection import ACTION_FULL_RESYNC
 from neutron_aria.agent.projection import ProjectedStateIndex
 from neutron_aria.agent.projection import REASON_LOCAL_PORT_UPDATE
@@ -178,6 +179,7 @@ class SnapshotSynchronizer(object):
         timeout_convergence_interval=1.0,
         sleeper=None,
         counters_report_enabled=False,
+        maintenance_event_merger=None,
     ):
         self.host = host
         self.port_source = port_source
@@ -206,11 +208,30 @@ class SnapshotSynchronizer(object):
         self.timeout_convergence_interval = max(0.0, float(timeout_convergence_interval))
         self.sleeper = sleeper or time.sleep
         self.counters_report_enabled = bool(counters_report_enabled)
+        self.maintenance_event_merger = maintenance_event_merger
+        self.maintenance_phase = None
+        if (
+            hasattr(self.runtime_status, "update_maintenance_progress") and
+            hasattr(self.state_store, "to_dict")
+        ):
+            progress = self.state_store.to_dict()
+            if progress.get("maintenance_operation_id"):
+                self.runtime_status.update_maintenance_progress(
+                    None,
+                    progress.get("maintenance_operation_id"),
+                    progress.get("stable_read_attempts"),
+                    progress.get("stable_desired_hash"),
+                    progress.get("last_progress_at"),
+                )
 
     def check_capabilities(self):
         return self.local_client.capabilities(required_domains=self.managed_domains)
 
-    def full_resync(self):
+    def full_resync(
+        self,
+        _stable_candidate=None,
+        maintenance_operation_id=None,
+    ):
         profile_started = time.time()
         phase_started = time.time()
         self.check_capabilities()
@@ -221,27 +242,19 @@ class SnapshotSynchronizer(object):
         pending_recovery_ms = _elapsed_ms(phase_started)
         previously_projected_port_ids = set(self.projected_port_ids)
 
-        phase_started = time.time()
-        ports = self._list_ports()
-        neutron_read_ms = _elapsed_ms(phase_started)
-
-        phase_started = time.time()
-        acl_index = self._load_acl_index()
-        acl_source_ms = _elapsed_ms(phase_started)
-        acl_source_profile = _acl_index_profile(acl_index)
-
-        phase_started = time.time()
-        builder = PortCandidateBuilder(
-            self.host,
-            managed_domains=self.managed_domains,
-            acl_index=acl_index,
-        )
-        snapshot = builder.build_snapshot(
-            ports,
-            generation=0,
-        )
-        snapshot_build_ms = _elapsed_ms(phase_started)
-        snapshot_acl_profile = _snapshot_acl_profile(snapshot)
+        if _stable_candidate is None:
+            candidate = self._build_host_snapshot_candidate()
+        else:
+            candidate = copy.deepcopy(_stable_candidate)
+        ports = candidate["source_ports"]
+        snapshot = candidate["snapshot"]
+        neutron_read_ms = candidate["neutron_read_ms"]
+        acl_source_ms = candidate["acl_source_ms"]
+        snapshot_build_ms = candidate["snapshot_build_ms"]
+        acl_source_profile = candidate["acl_source_profile"]
+        snapshot_acl_profile = candidate["snapshot_acl_profile"]
+        if maintenance_operation_id is not None:
+            snapshot["maintenance_operation_id"] = maintenance_operation_id
 
         phase_started = time.time()
         remote_status = self._pre_submit_remote_status("full-host snapshot")
@@ -553,6 +566,163 @@ class SnapshotSynchronizer(object):
             ):
                 return True
         return False
+
+    def _build_host_snapshot_candidate(self):
+        phase_started = time.time()
+        ports = self._list_ports()
+        neutron_read_ms = _elapsed_ms(phase_started)
+
+        phase_started = time.time()
+        acl_index = self._load_acl_index()
+        acl_source_ms = _elapsed_ms(phase_started)
+        acl_source_profile = _acl_index_profile(acl_index)
+
+        phase_started = time.time()
+        builder = PortCandidateBuilder(
+            self.host,
+            managed_domains=self.managed_domains,
+            acl_index=acl_index,
+        )
+        snapshot = builder.build_snapshot(ports, generation=0)
+        snapshot_build_ms = _elapsed_ms(phase_started)
+        desired_hash = desired_snapshot_hash(snapshot)
+        projected_port_ids = sorted(self._projected_port_ids(snapshot))
+        foreign_host_ambiguity = any(
+            port_get(port, "binding:host_id") not in (None, "", self.host)
+            for port in ports or []
+        )
+        return {
+            "snapshot": snapshot,
+            "desired_hash": desired_hash,
+            "projected_port_ids": projected_port_ids,
+            "foreign_host_ambiguity": foreign_host_ambiguity,
+            "source_ports": list(ports or []),
+            "neutron_read_ms": neutron_read_ms,
+            "acl_source_ms": acl_source_ms,
+            "snapshot_build_ms": snapshot_build_ms,
+            "acl_source_profile": acl_source_profile,
+            "snapshot_acl_profile": _snapshot_acl_profile(snapshot),
+        }
+
+    def _maintenance_event_batch_is_clear(self, batch):
+        return bool(
+            batch is not None and
+            not getattr(batch, "overflowed", False) and
+            not batch.has_changes()
+        )
+
+    def _maintenance_candidate_stable(
+        self,
+        first,
+        second,
+        between_reads,
+        decision_point,
+    ):
+        return bool(
+            not first.get("foreign_host_ambiguity") and
+            not second.get("foreign_host_ambiguity") and
+            first.get("desired_hash") == second.get("desired_hash") and
+            first.get("projected_port_ids") == second.get("projected_port_ids") and
+            self._maintenance_event_batch_is_clear(between_reads) and
+            self._maintenance_event_batch_is_clear(decision_point)
+        )
+
+    def maintenance_status(self):
+        status = self.local_client.maintenance_status()
+        self.maintenance_phase = status.get("maintenance_phase")
+        return status
+
+    def safe_stable_full_resync(self, operation_id, max_attempts=5):
+        try:
+            if (
+                not isinstance(operation_id, _STRING_TYPES) or
+                not operation_id or
+                operation_id.strip() != operation_id or
+                len(operation_id) > 128
+            ):
+                raise LocalApiContractError(
+                    "maintenance operation ID is invalid"
+                )
+            max_attempts = int(max_attempts)
+            if max_attempts < 1 or max_attempts > 5:
+                raise LocalApiContractError(
+                    "maintenance stable read attempts are invalid"
+                )
+            if self.maintenance_event_merger is None:
+                raise LocalApiContractError(
+                    "maintenance stable resync requires RPC event buffering"
+                )
+
+            for attempt in range(1, max_attempts + 1):
+                first = self._build_host_snapshot_candidate()
+                between_reads = self.maintenance_event_merger.drain()
+                second = self._build_host_snapshot_candidate()
+                decision_point = self.maintenance_event_merger.drain()
+                progress = self.state_store.record_maintenance_progress(
+                    operation_id,
+                    attempt,
+                    second["desired_hash"],
+                )
+                if hasattr(self.runtime_status, "update_maintenance_progress"):
+                    self.runtime_status.update_maintenance_progress(
+                        self.maintenance_phase,
+                        progress["maintenance_operation_id"],
+                        progress["stable_read_attempts"],
+                        progress["stable_desired_hash"],
+                        progress["last_progress_at"],
+                    )
+                if not self._maintenance_candidate_stable(
+                    first,
+                    second,
+                    between_reads,
+                    decision_point,
+                ):
+                    continue
+
+                result = self.full_resync(
+                    _stable_candidate=second,
+                    maintenance_operation_id=operation_id,
+                )
+                result.update(progress)
+                return result
+
+            raise LocalApiTimeoutError("maintenance_snapshot_not_stable")
+        except LocalApiContractError as exc:
+            return self._stable_resync_failure("local_api_contract_error", exc)
+        except LocalApiTimeoutError as exc:
+            reason = (
+                "maintenance_snapshot_not_stable"
+                if str(exc) == "maintenance_snapshot_not_stable"
+                else "local_api_degraded"
+            )
+            return self._stable_resync_failure(reason, exc)
+        except LocalApiError as exc:
+            return self._stable_resync_failure("local_api_degraded", exc)
+        except Exception as exc:
+            return self._stable_resync_failure("resync_degraded", exc)
+
+    def _stable_resync_failure(self, reason, error):
+        self.runtime_status.mark_degraded(reason, error)
+        heartbeat = self.report_status()
+        progress = self.state_store.to_dict()
+        LOG.warning(
+            "maintenance_stable_resync_degraded host=%s reason=%s error=%s",
+            self.host,
+            reason,
+            error,
+        )
+        return {
+            "snapshot": None,
+            "response": None,
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+            "maintenance_operation_id": progress.get(
+                "maintenance_operation_id"
+            ),
+            "stable_read_attempts": progress.get("stable_read_attempts", 0),
+            "stable_desired_hash": progress.get("stable_desired_hash"),
+            "last_progress_at": progress.get("last_progress_at"),
+        }
 
     def _load_acl_index(self):
         if self.acl_source is not None:

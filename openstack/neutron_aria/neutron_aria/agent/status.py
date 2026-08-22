@@ -44,6 +44,11 @@ class AgentRuntimeStatus(object):
         self.last_event_decision_counts = []
         self.last_event_decisions = []
         self.last_event_decision_updated_at = None
+        self.maintenance_phase = None
+        self.maintenance_operation_id = None
+        self.stable_read_attempts = 0
+        self.stable_desired_hash = None
+        self.last_progress_at = None
         self.updated_at = None
 
     def mark_ready(
@@ -242,6 +247,21 @@ class AgentRuntimeStatus(object):
         self.last_event_decision_updated_at = time.time() if decisions else None
         self.updated_at = time.time()
 
+    def update_maintenance_progress(
+        self,
+        phase,
+        operation_id,
+        attempts,
+        desired_hash,
+        progress_at,
+    ):
+        self.maintenance_phase = phase
+        self.maintenance_operation_id = operation_id
+        self.stable_read_attempts = self._int_or_default(attempts, 0)
+        self.stable_desired_hash = desired_hash
+        self.last_progress_at = progress_at
+        self.updated_at = time.time()
+
     def to_dict(self):
         return {
             "agent_type": self.agent_type,
@@ -270,6 +290,11 @@ class AgentRuntimeStatus(object):
             "last_event_decision_counts": list(self.last_event_decision_counts),
             "last_event_decisions": list(self.last_event_decisions),
             "last_event_decision_updated_at": self.last_event_decision_updated_at,
+            "maintenance_phase": self.maintenance_phase,
+            "maintenance_operation_id": self.maintenance_operation_id,
+            "stable_read_attempts": self.stable_read_attempts,
+            "stable_desired_hash": self.stable_desired_hash,
+            "last_progress_at": self.last_progress_at,
             "updated_at": self.updated_at,
         }
 
