@@ -249,8 +249,9 @@ pub unsafe fn ct_lookup_v4(
     pkt_len: u32,
     validate_acl_bank: u8,
     expected_acl_bank: u8,
+    packet_flags: u16,
 ) -> CtLookupResult {
-    if !crate::runtime::conntrack_enabled(key.tap_id) {
+    if !crate::common::packet_conntrack_phase_enabled(packet_flags) {
         return CtLookupResult::Miss(CtMissReason::Disabled);
     }
     // Forward lookup
@@ -318,8 +319,9 @@ pub unsafe fn ct_lookup_v6(
     pkt_len: u32,
     validate_acl_bank: u8,
     expected_acl_bank: u8,
+    packet_flags: u16,
 ) -> CtLookupResult {
-    if !crate::runtime::conntrack_enabled(key.tap_id) {
+    if !crate::common::packet_conntrack_phase_enabled(packet_flags) {
         return CtLookupResult::Miss(CtMissReason::Disabled);
     }
     // Forward lookup
@@ -387,8 +389,9 @@ pub unsafe fn ct_create_v4(
     pkt_len: u32,
     matched: &MatchedPolicy,
     acl_evaluated: bool,
+    packet_flags: u16,
 ) -> bool {
-    if !crate::runtime::conntrack_enabled(key.tap_id) {
+    if !crate::common::packet_ct_create_allowed(packet_flags, acl_evaluated) {
         return false;
     }
     let val = CtValue {
@@ -425,8 +428,9 @@ pub unsafe fn ct_create_v6(
     pkt_len: u32,
     matched: &MatchedPolicy,
     acl_evaluated: bool,
+    packet_flags: u16,
 ) -> bool {
-    if !crate::runtime::conntrack_enabled(key.tap_id) {
+    if !crate::common::packet_ct_create_allowed(packet_flags, acl_evaluated) {
         return false;
     }
     let val = CtValue {

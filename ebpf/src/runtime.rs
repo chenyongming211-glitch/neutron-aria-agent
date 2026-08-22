@@ -1,6 +1,6 @@
 use crate::common::{
-    acl_ct_runtime_source, normalize_acl_bank, AclCtRuntimeSource, FirewallConfig, PipelineCtx,
-    ACL_BANK_PRIMARY, FLAG_ACL_CT_ENFORCE, TAP_ID_UNASSIGNED,
+    acl_ct_packet_sample_flags, normalize_acl_bank, packet_acl_ct_phase_enabled, FirewallConfig,
+    PipelineCtx, ACL_BANK_PRIMARY, FLAG_ACL_ON, FLAG_CT_ON, TAP_ID_UNASSIGNED,
 };
 use crate::maps::{FIREWALL_CONFIG, TAP_CONFIG_MAP};
 
@@ -11,28 +11,29 @@ fn read_global_config() -> Option<FirewallConfig> {
 }
 
 #[inline(always)]
-pub fn apply_acl_ct_packet_access_plan(p: &mut PipelineCtx) {
+pub fn sample_acl_ct_packet_state(p: &mut PipelineCtx) {
     let global = read_global_config();
-    if crate::common::packet_acl_ct_enforced(global.as_ref()) {
-        p.flags |= FLAG_ACL_CT_ENFORCE;
-    }
+    p.flags |= acl_ct_packet_sample_flags(global.as_ref());
+    p.acl_bank_snapshot = global
+        .map(|config| normalize_acl_bank(config.acl_active_bank))
+        .unwrap_or(ACL_BANK_PRIMARY);
 }
 
 #[inline(always)]
-pub fn conntrack_enabled(tap_id: u32) -> bool {
-    let global = read_global_config();
-    match acl_ct_runtime_source(global.as_ref(), tap_id) {
-        AclCtRuntimeSource::BypassAclAndConntrack => return false,
-        AclCtRuntimeSource::PerTapThenGlobal => {
-            if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
-                return cfg.conntrack_enabled != 0;
-            }
-        }
-        AclCtRuntimeSource::GlobalOnly => {}
+pub fn apply_per_tap_acl_ct_state(p: &mut PipelineCtx) {
+    if !packet_acl_ct_phase_enabled(p.flags) || p.tap_id == TAP_ID_UNASSIGNED {
+        return;
     }
-    global
-        .map(|cfg| cfg.conntrack_enabled != 0)
-        .unwrap_or(true)
+    if let Some(config) = unsafe { TAP_CONFIG_MAP.get(&p.tap_id) } {
+        p.flags &= !(FLAG_ACL_ON | FLAG_CT_ON);
+        if config.acl_enabled != 0 {
+            p.flags |= FLAG_ACL_ON;
+        }
+        if config.conntrack_enabled != 0 {
+            p.flags |= FLAG_CT_ON;
+        }
+        p.acl_bank_snapshot = normalize_acl_bank(config.acl_active_bank);
+    }
 }
 
 #[inline(always)]
@@ -45,35 +46,6 @@ pub fn monitoring_enabled(tap_id: u32) -> bool {
     read_global_config()
         .map(|cfg| cfg.monitoring_enabled != 0)
         .unwrap_or(true)
-}
-
-#[inline(always)]
-pub fn acl_enabled(tap_id: u32) -> bool {
-    let global = read_global_config();
-    match acl_ct_runtime_source(global.as_ref(), tap_id) {
-        AclCtRuntimeSource::BypassAclAndConntrack => return false,
-        AclCtRuntimeSource::PerTapThenGlobal => {
-            if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
-                return cfg.acl_enabled != 0;
-            }
-        }
-        AclCtRuntimeSource::GlobalOnly => {}
-    }
-    global
-        .map(|cfg| cfg.acl_enabled != 0)
-        .unwrap_or(true)
-}
-
-#[inline(always)]
-pub fn acl_active_bank(tap_id: u32) -> u8 {
-    if tap_id != TAP_ID_UNASSIGNED {
-        if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
-            return normalize_acl_bank(cfg.acl_active_bank);
-        }
-    }
-    read_global_config()
-        .map(|cfg| normalize_acl_bank(cfg.acl_active_bank))
-        .unwrap_or(ACL_BANK_PRIMARY)
 }
 
 #[inline(always)]

@@ -9,6 +9,7 @@ use aria_core::ebpf_ops::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -143,10 +144,11 @@ enum LegacyTcAttachmentObservation {
     Conflict,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct LegacyTcProgramIdentity {
-    id: u32,
-    tag: u64,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ManagedTcProgramIdentity {
+    pub id: u32,
+    pub tag: u64,
+    pub map_ids: Vec<u32>,
 }
 
 fn tc_attachment_ready(
@@ -501,15 +503,35 @@ enum RuntimeInventoryStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[expect(dead_code, reason = "Task 4 will consume the managed runtime identity")]
 pub(crate) struct ManagedMaintenanceRuntimeIdentity {
     pub trace_map_mode: TraceMapMode,
-    pub owner_program_ids: Vec<u32>,
+    pub ingress_program: ManagedTcProgramIdentity,
+    pub egress_program: ManagedTcProgramIdentity,
+    pub live_owner_count: usize,
     pub complete_mode_inventory: bool,
 }
 
 fn default_persisted_live_iface_active() -> bool {
     true
+}
+
+fn harden_root_owned_private_path(path: &Path, mode: u32) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect managed runtime path {}: {}", path.display(), error))?;
+    if metadata.file_type().is_symlink() || metadata.uid() != 0 {
+        return Err(format!(
+            "managed runtime path must be a root-owned non-symlink: {}",
+            path.display()
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
+        format!(
+            "set managed runtime permissions {:o} on {}: {}",
+            mode,
+            path.display(),
+            error
+        )
+    })
 }
 
 fn runtime_metadata_is_from_prior_boot(
@@ -525,7 +547,6 @@ fn runtime_metadata_is_from_prior_boot(
 }
 
 impl FirewallInstance {
-    #[expect(dead_code, reason = "Task 4 will mint the maintenance authority")]
     pub(crate) fn managed_maintenance_runtime_identity(
         &self,
         ebpf_path: &str,
@@ -546,19 +567,55 @@ impl FirewallInstance {
         } else {
             TraceMapMode::Legacy
         };
-        let health = self.tc_acl_link_health();
-        if !health.ingress || !health.egress {
-            return Err("live Aria TC owner identity is incomplete".to_string());
+        let ingress_program = self.pinned_tc_program_identity("tc_ingress")?;
+        let egress_program = self.pinned_tc_program_identity("tc_egress")?;
+        let existing_ifaces = self.existing_ifaces_by_ifindex()?;
+        let state_root = self
+            .state_path
+            .parent()
+            .unwrap_or(self.state_path.as_path());
+        let mut live_owner_count = 0usize;
+        for entry in self
+            .load_persisted_live_ifaces()?
+            .ifaces
+            .into_iter()
+            .filter(|entry| entry.active)
+        {
+            if existing_ifaces.get(&entry.ifindex) != Some(&entry.iface) {
+                return Err(format!(
+                    "persisted live runtime interface identity changed for {}",
+                    entry.iface
+                ));
+            }
+            let runtime = FirewallInstance::new(
+                &entry.iface,
+                self.pin_path.clone(),
+                state_root.join(&entry.iface),
+                true,
+                self.trace_map_mode,
+            );
+            let health = runtime.tc_acl_link_health();
+            if !health.ingress || !health.egress {
+                return Err(format!(
+                    "live Aria TC owner identity is incomplete for {}",
+                    entry.iface
+                ));
+            }
+            if runtime.pinned_tc_program_identity("tc_ingress")? != ingress_program
+                || runtime.pinned_tc_program_identity("tc_egress")? != egress_program
+            {
+                return Err("live Aria TC owner program identity changed".to_string());
+            }
+            live_owner_count += 1;
         }
-        let mut owner_program_ids = vec![
-            self.pinned_tc_program_identity("tc_ingress")?.id,
-            self.pinned_tc_program_identity("tc_egress")?.id,
-        ];
-        owner_program_ids.sort_unstable();
-        owner_program_ids.dedup();
+        if live_owner_count == 0 {
+            return Err("persisted live runtime is absent".to_string());
+        }
         Ok(ManagedMaintenanceRuntimeIdentity {
             trace_map_mode: persisted_mode,
-            owner_program_ids,
+            ingress_program,
+            egress_program,
+            live_owner_count,
             complete_mode_inventory,
         })
     }
@@ -672,6 +729,15 @@ impl FirewallInstance {
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
     ) -> bool {
+        let Ok(link_metadata) = std::fs::symlink_metadata(self.tc_link_pin_path(prog_name)) else {
+            return false;
+        };
+        if link_metadata.file_type().is_symlink()
+            || link_metadata.uid() != 0
+            || link_metadata.mode() & 0o077 != 0
+        {
+            return false;
+        }
         let Ok(program) =
             aya::programs::SchedClassifier::from_pin(self.tc_prog_pin_path(prog_name))
         else {
@@ -713,16 +779,33 @@ impl FirewallInstance {
     fn pinned_tc_program_identity(
         &self,
         prog_name: &str,
-    ) -> Result<LegacyTcProgramIdentity, String> {
+    ) -> Result<ManagedTcProgramIdentity, String> {
+        let pin_path = PathBuf::from(self.tc_prog_pin_path(prog_name));
+        let metadata = std::fs::symlink_metadata(&pin_path)
+            .map_err(|error| format!("{} pinned program metadata: {}", prog_name, error))?;
+        if metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(format!(
+                "{} pinned program must be a root-owned private non-symlink",
+                prog_name
+            ));
+        }
         let program = aya::programs::SchedClassifier::from_pin(self.tc_prog_pin_path(prog_name))
             .map_err(|error| format!("{} pinned program: {:?}", prog_name, error))?;
-        program
+        let info = program
             .info()
-            .map(|info| LegacyTcProgramIdentity {
-                id: info.id(),
-                tag: info.tag(),
-            })
-            .map_err(|error| format!("{} pinned program info: {:?}", prog_name, error))
+            .map_err(|error| format!("{} pinned program info: {:?}", prog_name, error))?;
+        let map_ids = info
+            .map_ids()
+            .map_err(|error| format!("{} pinned program map ids: {:?}", prog_name, error))?
+            .ok_or_else(|| format!("{} pinned program map ids unavailable", prog_name))?;
+        Ok(ManagedTcProgramIdentity {
+            id: info.id(),
+            tag: info.tag(),
+            map_ids,
+        })
     }
 
     fn observe_legacy_tc_attachment(
@@ -959,6 +1042,9 @@ impl FirewallInstance {
             if let Some(map) = bpf.map_mut(name) {
                 let target = format!("{}/{}", pin_path, name);
                 if std::path::Path::new(&target).exists() {
+                    if self.shared_runtime && critical_map_names.contains(name) {
+                        harden_root_owned_private_path(Path::new(&target), 0o600)?;
+                    }
                     continue;
                 }
                 if let Err(e) = map.pin(target) {
@@ -966,6 +1052,11 @@ impl FirewallInstance {
                         return Err(format!("failed to pin critical map {}: {}", name, e));
                     }
                     warn!(instance = %self.iface, map = %name, error = %e, "failed to pin runtime map");
+                } else if self.shared_runtime && critical_map_names.contains(name) {
+                    harden_root_owned_private_path(
+                        &Path::new(pin_path).join(name),
+                        0o600,
+                    )?;
                 }
             } else if critical_map_names.contains(name) {
                 return Err(format!("critical map {} not found", name));
@@ -1605,6 +1696,9 @@ impl FirewallInstance {
 
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("Failed to create pin directory {:?}: {}", self.pin_path, e))?;
+        if self.shared_runtime {
+            harden_root_owned_private_path(&self.pin_path, 0o700)?;
+        }
         std::fs::create_dir_all(&self.state_path).map_err(|e| {
             format!(
                 "Failed to create state directory {:?}: {}",
@@ -1687,6 +1781,9 @@ impl FirewallInstance {
             if let Err(e) = program.pin(&target) {
                 warn!(instance = %self.iface, program = %prog_name, target = %target, error = ?e, "optional TC program repair pin failed");
                 continue;
+            }
+            if self.shared_runtime {
+                harden_root_owned_private_path(Path::new(&target), 0o600)?;
             }
             repaired.push(prog_name);
         }
@@ -2086,12 +2183,15 @@ impl FirewallInstance {
             .program_mut(required_program)
             .ok_or_else(|| format!("required runtime program {} not found", required_program))?;
         if !Path::new(&required_target).exists() {
-            required_program_ref.pin(required_target).map_err(|e| {
+            required_program_ref.pin(&required_target).map_err(|e| {
                 format!(
                     "failed to pin required runtime program {}: {:?}",
                     required_program, e
                 )
             })?;
+        }
+        if self.shared_runtime {
+            harden_root_owned_private_path(Path::new(&required_target), 0o600)?;
         }
         present_program_pins.push(required_program.to_string());
 
@@ -2101,12 +2201,18 @@ impl FirewallInstance {
             };
             let target = format!("{}/{}", pin_path, name);
             if Path::new(&target).exists() {
+                if self.shared_runtime {
+                    harden_root_owned_private_path(Path::new(&target), 0o600)?;
+                }
                 present_program_pins.push(name.clone());
                 continue;
             }
-            if let Err(e) = program.pin(target) {
+            if let Err(e) = program.pin(&target) {
                 warn!(instance = %self.iface, program = %name, error = ?e, "failed to pin optional runtime program");
             } else {
+                if self.shared_runtime {
+                    harden_root_owned_private_path(Path::new(&target), 0o600)?;
+                }
                 present_program_pins.push(name.clone());
             }
         }
@@ -2128,6 +2234,9 @@ impl FirewallInstance {
             .try_into()
             .map_err(|e: aya::programs::links::LinkError| format!("FdLink convert: {:?}", e))?;
         fd_link.pin(pin_path).map_err(|e| format!("pin: {:?}", e))?;
+        if self.shared_runtime {
+            harden_root_owned_private_path(Path::new(pin_path), 0o600)?;
+        }
         Ok(())
     }
 
@@ -2335,6 +2444,9 @@ impl FirewallInstance {
                 .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
             let link_pin = self.tc_link_pin_path(prog_name);
             fd_link.pin(&link_pin).map_err(|e| format!("pin: {:?}", e))?;
+            if self.shared_runtime {
+                harden_root_owned_private_path(Path::new(&link_pin), 0o600)?;
+            }
             info!(instance = %self.iface, direction = %dir_str, "TCX program reattached from pinned runtime");
             Ok(TcAttachOutcome::Pinned)
         } else {

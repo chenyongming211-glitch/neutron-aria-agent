@@ -149,9 +149,17 @@ class LegacyKernelCanaryContractTest(unittest.TestCase):
         self.assertIn("read_firewall_config", read_bank)
         self.assertIn("cfg.acl_active_bank", read_bank)
 
-        ebpf_bank = self.ebpf_runtime_source.split("pub fn acl_active_bank", 1)[1]
-        ebpf_bank = ebpf_bank.split("pub fn qos_enabled", 1)[0]
-        self.assertIn("cfg.acl_active_bank", ebpf_bank)
+        ebpf_sample = self.ebpf_runtime_source.split(
+            "pub fn sample_acl_ct_packet_state", 1
+        )[1]
+        ebpf_sample = ebpf_sample.split("pub fn apply_per_tap_acl_ct_state", 1)[0]
+        self.assertIn("config.acl_active_bank", ebpf_sample)
+        ebpf_per_tap = self.ebpf_runtime_source.split(
+            "pub fn apply_per_tap_acl_ct_state", 1
+        )[1]
+        ebpf_per_tap = ebpf_per_tap.split("pub fn monitoring_enabled", 1)[0]
+        self.assertIn("config.acl_active_bank", ebpf_per_tap)
+        self.assertNotIn("read_global_config", ebpf_per_tap)
 
         scrub_bank = self.core_scrub_source.split("pub fn scrub_acl_bank", 1)[1]
         scrub_bank = scrub_bank.split("fn scrub_runtime_state", 1)[0]

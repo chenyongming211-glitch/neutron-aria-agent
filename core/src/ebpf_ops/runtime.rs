@@ -550,6 +550,25 @@ fn path_is_bpffs(path: &Path) -> Result<bool, String> {
     Ok(stats.f_type as u64 == BPF_FS_MAGIC)
 }
 
+fn validate_managed_runtime_private_modes(
+    namespace_mode: u32,
+    critical_pin_modes: &[u32],
+) -> Result<(), String> {
+    if namespace_mode & 0o077 != 0 {
+        return Err(
+            "managed FIREWALL_CONFIG authority rejected: managed runtime namespace must be root-private"
+                .to_string(),
+        );
+    }
+    if critical_pin_modes.iter().any(|mode| mode & 0o077 != 0) {
+        return Err(
+            "managed FIREWALL_CONFIG authority rejected: critical managed pins must be root-private"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Validate filesystem and mode-aware BPF-map facts for the canonical path
 /// supplied by the agent-owned authority. This function deliberately does not
 /// mint a capability or accept a caller-selected authority base.
@@ -576,6 +595,7 @@ pub fn validate_managed_pin_path_security(
     let mut has_symlink_component = false;
     let mut root_owned = true;
     let mut trusted_permissions = true;
+    let mut namespace_mode = None;
     for path in absolute_component_paths(runtime_path) {
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
             format!(
@@ -586,17 +606,22 @@ pub fn validate_managed_pin_path_security(
         })?;
         has_symlink_component |= metadata.file_type().is_symlink();
         root_owned &= metadata.uid() == 0;
-        trusted_permissions &= metadata.mode() & 0o022 == 0;
+        if path == runtime_path {
+            namespace_mode = Some(metadata.mode());
+        } else {
+            trusted_permissions &= metadata.mode() & 0o022 == 0;
+        }
     }
 
     let mut complete_inventory = true;
+    let mut critical_pin_modes = Vec::new();
     for map_name in critical_network_map_names(trace_mode) {
         let map_path = runtime_path.join(map_name);
         match fs::symlink_metadata(&map_path) {
             Ok(metadata) => {
                 has_symlink_component |= metadata.file_type().is_symlink();
                 root_owned &= metadata.uid() == 0;
-                trusted_permissions &= metadata.mode() & 0o022 == 0;
+                critical_pin_modes.push(metadata.mode());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 complete_inventory = false;
@@ -626,6 +651,13 @@ pub fn validate_managed_pin_path_security(
                 .to_string(),
         );
     }
+    validate_managed_runtime_private_modes(
+        namespace_mode.ok_or_else(|| {
+            "managed FIREWALL_CONFIG authority rejected: managed namespace metadata is missing"
+                .to_string()
+        })?,
+        &critical_pin_modes,
+    )?;
     if !path_is_bpffs(runtime_path)? {
         return Err("managed FIREWALL_CONFIG authority rejected: runtime is not on bpffs".to_string());
     }
@@ -719,7 +751,8 @@ mod tests {
         firewall_config_with_runtime_updates, initialize_firewall_config_serialized,
         required_firewall_config, required_tap_config, serialized_firewall_config_rmw,
         tap_config_with_acl_bank, tap_config_with_acl_runtime_gate,
-        tap_config_with_runtime_updates, FirewallConfigPatch, FirewallConfigStore,
+        tap_config_with_runtime_updates, validate_managed_runtime_private_modes,
+        FirewallConfigPatch, FirewallConfigStore,
     };
     use crate::common::{
         FirewallConfig, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,

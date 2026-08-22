@@ -31,27 +31,22 @@ fn source_function<'a>(source: &'a str, signature: &str, next_signature: &str) -
 #[test]
 fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
     let runtime = include_str!("../../ebpf/src/runtime.rs");
-    let conntrack = source_function(
+    let entry_sample = source_function(
         runtime,
-        "pub fn conntrack_enabled(tap_id: u32) -> bool {",
+        "pub fn sample_acl_ct_packet_state(p: &mut PipelineCtx) {",
+        "pub fn apply_per_tap_acl_ct_state(p: &mut PipelineCtx) {",
+    );
+    let per_tap = source_function(
+        runtime,
+        "pub fn apply_per_tap_acl_ct_state(p: &mut PipelineCtx) {",
         "pub fn monitoring_enabled(tap_id: u32) -> bool {",
     );
-    let acl = source_function(
-        runtime,
-        "pub fn acl_enabled(tap_id: u32) -> bool {",
-        "pub fn acl_active_bank(tap_id: u32) -> u8 {",
-    );
-
-    for body in [conntrack, acl] {
-        let gate = body
-            .find("acl_ct_runtime_source(global.as_ref(), tap_id)")
-            .expect("ACL and conntrack must classify the shared maintenance gate");
-        let per_tap = body
-            .find("TAP_CONFIG_MAP")
-            .expect("normal per-tap behavior must remain available");
-        assert!(gate < per_tap, "maintenance gate must precede per-tap lookup");
-        assert!(body.contains("AclCtRuntimeSource::BypassAclAndConntrack => return false"));
-    }
+    assert!(entry_sample.contains("read_global_config"));
+    assert!(entry_sample.contains("acl_ct_packet_sample_flags"));
+    assert!(!entry_sample.contains("TAP_CONFIG_MAP"));
+    assert!(per_tap.contains("packet_acl_ct_phase_enabled(p.flags)"));
+    assert!(per_tap.contains("TAP_CONFIG_MAP"));
+    assert!(!per_tap.contains("read_global_config"));
 
     let abi = include_str!("../../abi/src/lib.rs");
     let gate = source_function(
@@ -75,7 +70,7 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
     );
     for body in [egress, ingress] {
         let gate = body
-            .find("runtime::apply_acl_ct_packet_access_plan(p)")
+            .find("runtime::sample_acl_ct_packet_state(p)")
             .expect("packet path must classify maintenance before ACL/fragment state");
         let feature_flags = body.find("load_feature_flags_tc").unwrap();
         assert!(gate < feature_flags);
@@ -85,8 +80,14 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
         "unsafe fn load_feature_flags_tc(",
         "unsafe fn refresh_trace_flag_tc(",
     );
-    assert!(feature_loader.contains("FLAG_ACL_CT_ENFORCE"));
+    assert!(feature_loader.contains("runtime::apply_per_tap_acl_ct_state"));
+    assert!(feature_loader.contains("packet_fragment_phase_enabled(p.flags)"));
     assert!(feature_loader.contains("fragment::snapshot_authority"));
+
+    let conntrack = include_str!("../../ebpf/src/conntrack.rs");
+    let fragment = include_str!("../../ebpf/src/fragment.rs");
+    assert!(!conntrack.contains("runtime::conntrack_enabled"));
+    assert!(!fragment.contains("runtime::conntrack_enabled"));
 }
 
 #[test]
@@ -96,7 +97,7 @@ fn acl_projection_maintenance_gate_leaves_unrelated_feature_domains_independent(
         source_function(
             runtime,
             "pub fn monitoring_enabled(tap_id: u32) -> bool {",
-            "pub fn acl_enabled(tap_id: u32) -> bool {",
+            "pub fn qos_enabled(tap_id: u32) -> bool {",
         ),
         source_function(
             runtime,
@@ -132,6 +133,8 @@ fn acl_projection_maintenance_authority_is_agent_owned_and_revalidates_current_p
     assert!(agent.contains("pub(crate) async fn set_acl_maintenance_bypass("));
     assert!(agent.contains("revalidate_current_pin"));
     assert!(agent.contains("current_firewall_config_map_id"));
+    assert!(agent.contains("map_ids"));
+    assert!(agent.contains("both live TC programs"));
     assert!(!agent.contains("assume_managed"));
 
     let setter = source_function(

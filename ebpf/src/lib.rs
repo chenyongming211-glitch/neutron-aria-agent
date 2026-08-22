@@ -27,13 +27,14 @@ mod tcprt;
 mod trace;
 
 use common::{
-    acl_banked_tap_id, fragment_ct_create_point, set_fragment_resolve_drop_ids, CtKey4, CtKey6,
-    FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    acl_banked_tap_id, fragment_ct_create_point, packet_fragment_phase_enabled,
+    set_fragment_resolve_drop_ids, CtKey4, CtKey6, FragmentCtCreatePoint,
+    FragmentInstallDecision, FragmentKind, PipelineCtx,
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
     DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON,
-    FLAG_ACL_CT_ENFORCE, FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON,
+    FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON,
     FLAG_POLICY_HIT, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, IP_FAMILY_V4,
     IP_FAMILY_V6,
     TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
@@ -147,7 +148,7 @@ unsafe fn try_tc_egress(
     let info = &mut *info;
     let p = &mut *pipe;
 
-    runtime::apply_acl_ct_packet_access_plan(p);
+    runtime::sample_acl_ct_packet_state(p);
     p.ip_family = if info.is_ipv6 {
         IP_FAMILY_V6
     } else {
@@ -348,7 +349,7 @@ unsafe fn try_tc_ingress(
     let info = &mut *info;
     let p = &mut *pipe;
 
-    runtime::apply_acl_ct_packet_access_plan(p);
+    runtime::sample_acl_ct_packet_state(p);
     p.ip_family = if info.is_ipv6 {
         IP_FAMILY_V6
     } else {
@@ -512,7 +513,8 @@ unsafe fn try_tc_ingress_v6(
 
 #[inline(always)]
 unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) {
-    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 {
+    runtime::apply_per_tap_acl_ct_state(p);
+    if packet_fragment_phase_enabled(p.flags) {
         fragment::snapshot_authority(p);
         fragment::record_first_observation(info, p);
     }
@@ -521,9 +523,6 @@ unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) 
     }
     if tcprt::tcprt_enabled(p.tap_id) {
         p.flags |= FLAG_TCPRT_ON;
-    }
-    if (p.flags & FLAG_ACL_CT_ENFORCE) != 0 && policy::acl_enabled(p.tap_id) {
-        p.flags |= FLAG_ACL_ON;
     }
     if mirror::mirror_enabled(p.tap_id) {
         p.flags |= FLAG_MIRROR_ON;
@@ -779,6 +778,7 @@ unsafe fn phase_ct_v4(
         p.pkt_len,
         validate_acl_bank,
         expected_acl_bank,
+        p.flags,
     ) {
         CtLookupResult::Hit(matched, is_forward, state) => {
             p.ct_state = state;
@@ -816,6 +816,7 @@ unsafe fn phase_ct_v6(
         p.pkt_len,
         validate_acl_bank,
         expected_acl_bank,
+        p.flags,
     ) {
         CtLookupResult::Hit(matched, is_forward, state) => {
             p.ct_state = state;
@@ -1104,6 +1105,7 @@ unsafe fn phase_ct_create_v4(p: &PipelineCtx, ct_key: &CtKey4) {
         p.pkt_len,
         &matched,
         (p.flags & FLAG_ACL_ON) != 0,
+        p.flags,
     );
 }
 
@@ -1116,6 +1118,7 @@ unsafe fn phase_ct_create_v6(p: &PipelineCtx, ct_key: &CtKey6) {
         p.pkt_len,
         &matched,
         (p.flags & FLAG_ACL_ON) != 0,
+        p.flags,
     );
 }
 

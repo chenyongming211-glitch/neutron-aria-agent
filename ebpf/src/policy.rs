@@ -6,13 +6,6 @@ use crate::drops;
 use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
 use crate::stats;
 
-/// Check if ACL (policy evaluation) is enabled.
-/// When disabled, all traffic is passed without policy evaluation.
-#[inline(always)]
-pub fn acl_enabled(tap_id: u32) -> bool {
-    crate::runtime::acl_enabled(tap_id)
-}
-
 /// 8-level fallback policy matching over the map-backed packet pipeline state.
 ///
 /// Tries 8 candidate keys from most-specific to least-specific (wildcarding

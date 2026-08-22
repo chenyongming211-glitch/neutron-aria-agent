@@ -612,6 +612,7 @@ pub const FLAG_IS_FORWARD: u16 = 1 << 6;
 pub const FLAG_ACL_CT_ENFORCE: u16 = 1 << 7;
 pub const FLAG_POLICY_HIT: u16 = 1 << 8;
 pub const FLAG_CT_STALE_BANK: u16 = 1 << 9;
+pub const FLAG_CT_ON: u16 = 1 << 10;
 
 /// Per-CPU scratch buffer for passing state between pipeline phases.
 /// Lives in PIPE_SCRATCH PerCpuArray — zero stack overhead.
@@ -645,7 +646,7 @@ pub struct PipelineCtx {
     pub matched_bank: u8,
     pub ip_family: u8,
 
-    // One-packet authority snapshot, sampled after tap resolution.
+    // One-packet authority snapshots, sampled during packet setup.
     pub fragment_epoch_snapshot: u64,
     pub acl_bank_snapshot: u8,
     pub fragment_epoch_present: u8,
@@ -732,22 +733,6 @@ pub enum PacketAclCtGate {
     Enforce,
 }
 
-/// Production-shared access model for the monolithic TC packet path. The eBPF
-/// entry points consume this plan directly; userspace tests can therefore
-/// assert the no-read bypass contract without source-only instrumentation.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct AclCtPacketAccessPlan {
-    pub direction: u8,
-    pub gate_checked_first: bool,
-    pub reads_tap_config: bool,
-    pub reads_acl_active_bank: bool,
-    pub reads_fragment_epoch: bool,
-    pub reads_fragment_authority: bool,
-    pub reads_acl_state: bool,
-    pub reads_conntrack_state: bool,
-    pub runs_unrelated_pipeline: bool,
-}
-
 #[inline(always)]
 pub fn packet_acl_ct_gate(global: Option<&FirewallConfig>) -> PacketAclCtGate {
     if global
@@ -766,22 +751,42 @@ pub fn packet_acl_ct_enforced(global: Option<&FirewallConfig>) -> bool {
 }
 
 #[inline(always)]
-pub const fn acl_ct_packet_access_plan(
-    gate: PacketAclCtGate,
-    direction: u8,
-) -> AclCtPacketAccessPlan {
-    let enforce = matches!(gate, PacketAclCtGate::Enforce);
-    AclCtPacketAccessPlan {
-        direction,
-        gate_checked_first: true,
-        reads_tap_config: enforce,
-        reads_acl_active_bank: enforce,
-        reads_fragment_epoch: enforce,
-        reads_fragment_authority: enforce,
-        reads_acl_state: enforce,
-        reads_conntrack_state: enforce,
-        runs_unrelated_pipeline: true,
+pub fn acl_ct_packet_sample_flags(global: Option<&FirewallConfig>) -> u16 {
+    if !packet_acl_ct_enforced(global) {
+        return 0;
     }
+    let mut flags = FLAG_ACL_CT_ENFORCE;
+    if global.map(|config| config.acl_enabled != 0).unwrap_or(true) {
+        flags |= FLAG_ACL_ON;
+    }
+    if global
+        .map(|config| config.conntrack_enabled != 0)
+        .unwrap_or(true)
+    {
+        flags |= FLAG_CT_ON;
+    }
+    flags
+}
+
+#[inline(always)]
+pub const fn packet_acl_ct_phase_enabled(flags: u16) -> bool {
+    flags & FLAG_ACL_CT_ENFORCE != 0
+}
+
+#[inline(always)]
+pub const fn packet_conntrack_phase_enabled(flags: u16) -> bool {
+    packet_acl_ct_phase_enabled(flags) && flags & FLAG_CT_ON != 0
+}
+
+#[inline(always)]
+pub const fn packet_fragment_phase_enabled(flags: u16) -> bool {
+    packet_acl_ct_phase_enabled(flags)
+}
+
+#[inline(always)]
+pub const fn packet_ct_create_allowed(flags: u16, acl_evaluated: bool) -> bool {
+    packet_conntrack_phase_enabled(flags)
+        && (flags & FLAG_ACL_ON == 0 || acl_evaluated)
 }
 
 #[inline(always)]
@@ -988,7 +993,7 @@ mod userspace_pod {
 /// are intentionally not re-exported through this module.
 pub mod userspace {
     pub use super::{
-        acl_banked_tap_id, acl_ct_packet_access_plan, acl_ct_runtime_source, acl_next_bank,
+        acl_banked_tap_id, acl_ct_runtime_source, acl_next_bank,
         ct_acl_family_is_current,
         drop_family_is_valid, fragment_metric_index, normalize_acl_bank,
         normalize_acl_ingress_hook,
@@ -1000,7 +1005,7 @@ pub mod userspace {
         MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey, QosStatsValue,
         RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpValue, SslScratch, SslWriteScratch,
         TapConfig, TcpRtValue, TokenBucket, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter,
-        TraceStreamEvent, AclCtPacketAccessPlan, AclCtRuntimeSource, PacketAclCtGate,
+        TraceStreamEvent, AclCtRuntimeSource, PacketAclCtGate,
         ACL_BANK_PRIMARY, ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC,
         ACL_INGRESS_HOOK_XDP, CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6,
         CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED,
@@ -1112,36 +1117,6 @@ mod tests {
             acl_ct_runtime_source(None, TAP_ID_UNASSIGNED),
             AclCtRuntimeSource::GlobalOnly,
         );
-    }
-
-    #[test]
-    fn acl_maintenance_packet_plan_skips_all_acl_ct_fragment_reads_in_both_directions() {
-        for direction in [DIR_INGRESS, DIR_EGRESS] {
-            let plan = acl_ct_packet_access_plan(PacketAclCtGate::Bypass, direction);
-            assert!(plan.gate_checked_first);
-            assert!(!plan.reads_tap_config);
-            assert!(!plan.reads_acl_active_bank);
-            assert!(!plan.reads_fragment_epoch);
-            assert!(!plan.reads_fragment_authority);
-            assert!(!plan.reads_acl_state);
-            assert!(!plan.reads_conntrack_state);
-            assert!(plan.runs_unrelated_pipeline);
-        }
-    }
-
-    #[test]
-    fn acl_maintenance_packet_plan_enforces_only_after_gate_in_both_directions() {
-        for direction in [DIR_INGRESS, DIR_EGRESS] {
-            let plan = acl_ct_packet_access_plan(PacketAclCtGate::Enforce, direction);
-            assert!(plan.gate_checked_first);
-            assert!(plan.reads_tap_config);
-            assert!(plan.reads_acl_active_bank);
-            assert!(plan.reads_fragment_epoch);
-            assert!(plan.reads_fragment_authority);
-            assert!(plan.reads_acl_state);
-            assert!(plan.reads_conntrack_state);
-            assert!(plan.runs_unrelated_pipeline);
-        }
     }
 
     #[test]

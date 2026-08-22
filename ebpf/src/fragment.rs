@@ -30,7 +30,7 @@ fn packet_fragment_authority_required(
         info.fragment_proto,
         is_ipv6,
         (p.flags & crate::common::FLAG_ACL_ON) != 0,
-        crate::runtime::conntrack_enabled(p.tap_id),
+        crate::common::packet_conntrack_phase_enabled(p.flags),
     )
 }
 
@@ -43,7 +43,6 @@ pub enum ResolveOutcome {
 
 #[inline(always)]
 pub unsafe fn snapshot_authority(p: &mut PipelineCtx) {
-    p.acl_bank_snapshot = crate::runtime::acl_active_bank(p.tap_id);
     p.fragment_epoch_snapshot = 0;
     p.fragment_epoch_present = 0;
     if let Some(epoch) = FRAGMENT_EPOCH.get(&p.tap_id) {

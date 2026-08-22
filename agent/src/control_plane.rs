@@ -10,7 +10,8 @@ use tracing::{error, info, warn};
 
 use crate::instance::{
     preexisting_tc_acl_runtime_is_healthy, FirewallInstance,
-    ManagedMaintenanceRuntimeIdentity, RuntimePinState, TcAclLinkHealth,
+    ManagedMaintenanceRuntimeIdentity, ManagedTcProgramIdentity, RuntimePinState,
+    TcAclLinkHealth,
 };
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
@@ -1117,49 +1118,75 @@ impl PreparedManagedInstance {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "Task 4 will consume the agent-owned maintenance authority")
 )]
 struct ManagedMaintenanceAuthorityFacts {
     configured_pin_path: PathBuf,
-    candidate_pin_path: PathBuf,
     configured_mode: TraceMapMode,
-    persisted_mode: TraceMapMode,
-    expected_firewall_config_map_id: u32,
-    current_firewall_config_map_id: u32,
-    expected_owner_program_ids: Vec<u32>,
-    current_owner_program_ids: Vec<u32>,
+    firewall_config_map_id: u32,
+    ingress_program: ManagedTcProgramIdentity,
+    egress_program: ManagedTcProgramIdentity,
     live_owner_count: usize,
     complete_mode_inventory: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 4 will consume the agent-owned maintenance authority")
-)]
-fn validate_managed_maintenance_authority_facts(
-    facts: &ManagedMaintenanceAuthorityFacts,
-) -> Result<(), String> {
-    if facts.candidate_pin_path != facts.configured_pin_path {
-        return Err("candidate does not match configured managed authority".to_string());
-    }
-    if facts.configured_mode != facts.persisted_mode {
+trait ManagedMaintenanceAuthoritySource {
+    fn configured_pin_path(&self) -> PathBuf;
+    fn configured_mode(&self) -> TraceMapMode;
+    fn current_firewall_config_map_id(&self) -> Result<u32, String>;
+    fn live_runtime_identity(&self) -> Result<ManagedMaintenanceRuntimeIdentity, String>;
+}
+
+fn acquire_managed_maintenance_authority_facts<Source>(
+    source: &Source,
+) -> Result<ManagedMaintenanceAuthorityFacts, String>
+where
+    Source: ManagedMaintenanceAuthoritySource,
+{
+    let configured_pin_path = source.configured_pin_path();
+    let configured_mode = source.configured_mode();
+    let runtime = source.live_runtime_identity()?;
+    if configured_mode != runtime.trace_map_mode {
         return Err("persisted runtime mode does not match configured runtime mode".to_string());
     }
-    if !facts.complete_mode_inventory {
+    if !runtime.complete_mode_inventory {
         return Err("mode-aware inventory is incomplete".to_string());
     }
-    if facts.expected_firewall_config_map_id != facts.current_firewall_config_map_id {
-        return Err("FIREWALL_CONFIG map identity changed".to_string());
+    if runtime.live_owner_count == 0 {
+        return Err("live Aria runtime identity is absent".to_string());
     }
-    if facts.live_owner_count == 0
-        || facts.expected_owner_program_ids != facts.current_owner_program_ids
-    {
-        return Err("live Aria runtime identity changed".to_string());
+    let firewall_config_map_id = source.current_firewall_config_map_id()?;
+    let ingress_uses_map = runtime
+        .ingress_program
+        .map_ids
+        .contains(&firewall_config_map_id);
+    let egress_uses_map = runtime
+        .egress_program
+        .map_ids
+        .contains(&firewall_config_map_id);
+    if !ingress_uses_map && !egress_uses_map {
+        return Err(
+            "FIREWALL_CONFIG map identity is absent from both live TC programs".to_string(),
+        );
     }
-    Ok(())
+    if !ingress_uses_map {
+        return Err("FIREWALL_CONFIG map identity is absent from live tc_ingress".to_string());
+    }
+    if !egress_uses_map {
+        return Err("FIREWALL_CONFIG map identity is absent from live tc_egress".to_string());
+    }
+    Ok(ManagedMaintenanceAuthorityFacts {
+        configured_pin_path,
+        configured_mode,
+        firewall_config_map_id,
+        ingress_program: runtime.ingress_program,
+        egress_program: runtime.egress_program,
+        live_owner_count: runtime.live_owner_count,
+        complete_mode_inventory: runtime.complete_mode_inventory,
+    })
 }
 
 #[expect(dead_code, reason = "Task 4 will consume this crate-private capability")]
@@ -1267,6 +1294,46 @@ pub struct ControlPlane {
     chains: RwLock<Vec<ServiceChain>>,
     #[expect(dead_code, reason = "Task 4 will mint the maintenance authority")]
     maintenance_authority_seal: Arc<()>,
+}
+
+struct ControlPlaneManagedMaintenanceAuthoritySource<'a> {
+    control_plane: &'a ControlPlane,
+}
+
+impl ControlPlaneManagedMaintenanceAuthoritySource<'_> {
+    fn recovery_runtime(&self) -> FirewallInstance {
+        FirewallInstance::new(
+            "__managed_maintenance_recovery__",
+            PathBuf::from(self.control_plane.managed_pin_path()),
+            PathBuf::from(&self.control_plane.base_state_path)
+                .join("__managed_maintenance_recovery__"),
+            true,
+            self.control_plane.trace_map_mode(),
+        )
+    }
+}
+
+impl ManagedMaintenanceAuthoritySource for ControlPlaneManagedMaintenanceAuthoritySource<'_> {
+    fn configured_pin_path(&self) -> PathBuf {
+        PathBuf::from(self.control_plane.managed_pin_path())
+    }
+
+    fn configured_mode(&self) -> TraceMapMode {
+        self.control_plane.trace_map_mode()
+    }
+
+    fn current_firewall_config_map_id(&self) -> Result<u32, String> {
+        let runtime = self.recovery_runtime();
+        aria_core::ebpf_ops::validate_managed_pin_path_security(
+            &runtime.pin_path,
+            self.configured_mode(),
+        )
+    }
+
+    fn live_runtime_identity(&self) -> Result<ManagedMaintenanceRuntimeIdentity, String> {
+        self.recovery_runtime()
+            .managed_maintenance_runtime_identity(&self.control_plane.ebpf_path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -4423,69 +4490,11 @@ impl ControlPlane {
     async fn current_managed_maintenance_authority_facts(
         &self,
     ) -> Result<ManagedMaintenanceAuthorityFacts, String> {
-        let configured_pin_path = PathBuf::from(self.managed_pin_path());
-        let configured_mode = self.trace_map_mode();
-        let current_firewall_config_map_id =
-            aria_core::ebpf_ops::validate_managed_pin_path_security(
-                &configured_pin_path,
-                configured_mode,
-            )?;
-        let instances = self
-            .instances
-            .read()
-            .await
-            .iter()
-            .map(|(name, state)| (name.clone(), Arc::clone(state)))
-            .collect::<Vec<_>>();
-        let mut owner_program_ids = Vec::new();
-        let mut live_owner_count = 0usize;
-        let mut persisted_mode = configured_mode;
-        let mut complete_mode_inventory = true;
-        for (name, instance) in instances {
-            let state = instance.read().await;
-            if Path::new(&state.pin_path) != configured_pin_path
-                || state.tap_id == aria_core::common::TAP_ID_UNASSIGNED
-            {
-                continue;
-            }
-            let iface = Self::runtime_iface_name(&name, &state)
-                .map_err(|error| error.to_string())?;
-            if let Some(expected_ifindex) = state.ifindex {
-                if Self::resolve_ifindex(&iface)? != expected_ifindex {
-                    return Err(format!("live Aria runtime ifindex changed for {}", iface));
-                }
-            }
-            let runtime = FirewallInstance::new(
-                &iface,
-                configured_pin_path.clone(),
-                state.state_path.clone().into(),
-                true,
-                configured_mode,
-            );
-            let identity: ManagedMaintenanceRuntimeIdentity =
-                runtime.managed_maintenance_runtime_identity(&self.ebpf_path)?;
-            persisted_mode = identity.trace_map_mode;
-            complete_mode_inventory &= identity.complete_mode_inventory;
-            owner_program_ids.extend(identity.owner_program_ids);
-            live_owner_count += 1;
-        }
-        owner_program_ids.sort_unstable();
-        owner_program_ids.dedup();
-        if live_owner_count == 0 {
-            return Err("live Aria runtime identity is absent for managed authority".to_string());
-        }
-        Ok(ManagedMaintenanceAuthorityFacts {
-            configured_pin_path: configured_pin_path.clone(),
-            candidate_pin_path: configured_pin_path,
-            configured_mode,
-            persisted_mode,
-            expected_firewall_config_map_id: current_firewall_config_map_id,
-            current_firewall_config_map_id,
-            expected_owner_program_ids: owner_program_ids.clone(),
-            current_owner_program_ids: owner_program_ids,
-            live_owner_count,
-            complete_mode_inventory,
-        })
+        acquire_managed_maintenance_authority_facts(
+            &ControlPlaneManagedMaintenanceAuthoritySource {
+                control_plane: self,
+            },
+        )
     }
 
     #[expect(dead_code, reason = "Task 4 will consume this crate-private minting boundary")]
@@ -4493,7 +4502,6 @@ impl ControlPlane {
         &self,
     ) -> Result<ManagedFirewallConfigAuthority, String> {
         let facts = self.current_managed_maintenance_authority_facts().await?;
-        validate_managed_maintenance_authority_facts(&facts)?;
         Ok(ManagedFirewallConfigAuthority {
             facts,
             authority_seal: Arc::downgrade(&self.maintenance_authority_seal),
@@ -4514,17 +4522,15 @@ impl ControlPlane {
         if !Arc::ptr_eq(&authority_seal, &self.maintenance_authority_seal) {
             return Err("managed maintenance authority belongs to another control plane".to_string());
         }
-        let mut current = self.current_managed_maintenance_authority_facts().await?;
-        current.expected_firewall_config_map_id =
-            authority.facts.expected_firewall_config_map_id;
-        current.expected_owner_program_ids = authority.facts.expected_owner_program_ids.clone();
-        current.candidate_pin_path = authority.facts.candidate_pin_path.clone();
-        validate_managed_maintenance_authority_facts(&current)?;
+        let current = self.current_managed_maintenance_authority_facts().await?;
+        if current != authority.facts {
+            return Err("live Aria runtime identity changed after authority mint".to_string());
+        }
 
         let mut store = ManagedFirewallConfigStore::new(
             current.configured_pin_path,
             current.configured_mode,
-            current.expected_firewall_config_map_id,
+            current.firewall_config_map_id,
         );
         aria_core::ebpf_ops::serialized_shared_firewall_config_rmw(
             &mut store,
@@ -8920,21 +8926,6 @@ impl ControlPlane {
 mod tests {
     use super::*;
 
-    fn maintenance_authority_facts() -> ManagedMaintenanceAuthorityFacts {
-        ManagedMaintenanceAuthorityFacts {
-            configured_pin_path: PathBuf::from("/sys/fs/bpf/aria/global-v2"),
-            candidate_pin_path: PathBuf::from("/sys/fs/bpf/aria/global-v2"),
-            configured_mode: TraceMapMode::Stream,
-            persisted_mode: TraceMapMode::Stream,
-            expected_firewall_config_map_id: 410,
-            current_firewall_config_map_id: 410,
-            expected_owner_program_ids: vec![701, 702],
-            current_owner_program_ids: vec![701, 702],
-            live_owner_count: 2,
-            complete_mode_inventory: true,
-        }
-    }
-
     #[derive(Clone)]
     struct FakeManagedMaintenanceAuthoritySource {
         configured_pin_path: PathBuf,
@@ -8955,10 +8946,6 @@ mod tests {
 
         fn current_firewall_config_map_id(&self) -> Result<u32, String> {
             Ok(self.firewall_config_map_id)
-        }
-
-        fn registered_instance_count(&self) -> usize {
-            self.registered_instance_count
         }
 
         fn live_runtime_identity(&self) -> Result<ManagedMaintenanceRuntimeIdentity, String> {
@@ -9029,7 +9016,7 @@ mod tests {
         let source = maintenance_authority_source(410, &[410, 411], &[410, 412]);
         let facts = acquire_managed_maintenance_authority_facts(&source)
             .expect("persisted live runtime authority must not require a registered instance");
-        assert_eq!(source.registered_instance_count(), 0);
+        assert_eq!(source.registered_instance_count, 0);
         assert_eq!(facts.firewall_config_map_id, 410);
         assert_eq!(facts.ingress_program.id, 701);
         assert_eq!(facts.egress_program.id, 702);
@@ -9054,40 +9041,37 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_authority_rejects_root_owned_alternate_bpffs_namespace() {
-        let mut facts = maintenance_authority_facts();
-        facts.candidate_pin_path = PathBuf::from("/sys/fs/bpf/alternate/global-v2");
-        let error = validate_managed_maintenance_authority_facts(&facts)
-            .expect_err("caller-chosen alternate bpffs must not self-attest");
-        assert!(error.contains("configured managed authority"));
-    }
-
-    #[test]
     fn maintenance_authority_rejects_current_pin_or_live_owner_replacement() {
-        let mut replaced_map = maintenance_authority_facts();
-        replaced_map.current_firewall_config_map_id = 999;
-        assert!(validate_managed_maintenance_authority_facts(&replaced_map)
-            .unwrap_err()
-            .contains("FIREWALL_CONFIG map identity"));
-
-        let mut replaced_owner = maintenance_authority_facts();
-        replaced_owner.current_owner_program_ids = vec![701, 999];
-        assert!(validate_managed_maintenance_authority_facts(&replaced_owner)
-            .unwrap_err()
-            .contains("live Aria runtime identity"));
+        let original = acquire_managed_maintenance_authority_facts(
+            &maintenance_authority_source(410, &[410], &[410]),
+        )
+        .unwrap();
+        let mut replaced_owner = maintenance_authority_source(410, &[410], &[410]);
+        replaced_owner.runtime_identity = Ok(ManagedMaintenanceRuntimeIdentity {
+            ingress_program: maintenance_tc_program(999, 0x9990, &[410]),
+            ..maintenance_live_runtime_identity(&[410], &[410])
+        });
+        let current = acquire_managed_maintenance_authority_facts(&replaced_owner).unwrap();
+        assert_ne!(current, original);
     }
 
     #[test]
     fn maintenance_authority_rejects_mode_metadata_or_inventory_drift() {
-        let mut wrong_mode = maintenance_authority_facts();
-        wrong_mode.persisted_mode = TraceMapMode::Legacy;
-        assert!(validate_managed_maintenance_authority_facts(&wrong_mode)
+        let mut wrong_mode = maintenance_authority_source(410, &[410], &[410]);
+        wrong_mode.runtime_identity = Ok(ManagedMaintenanceRuntimeIdentity {
+            trace_map_mode: TraceMapMode::Legacy,
+            ..maintenance_live_runtime_identity(&[410], &[410])
+        });
+        assert!(acquire_managed_maintenance_authority_facts(&wrong_mode)
             .unwrap_err()
             .contains("runtime mode"));
 
-        let mut incomplete = maintenance_authority_facts();
-        incomplete.complete_mode_inventory = false;
-        assert!(validate_managed_maintenance_authority_facts(&incomplete)
+        let mut incomplete = maintenance_authority_source(410, &[410], &[410]);
+        incomplete.runtime_identity = Ok(ManagedMaintenanceRuntimeIdentity {
+            complete_mode_inventory: false,
+            ..maintenance_live_runtime_identity(&[410], &[410])
+        });
+        assert!(acquire_managed_maintenance_authority_facts(&incomplete)
             .unwrap_err()
             .contains("mode-aware inventory"));
     }
