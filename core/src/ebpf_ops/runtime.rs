@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
-const BPF_FS_MAGIC: libc::c_long = 0xcafe4a11;
+const BPF_FS_MAGIC: u64 = 0xcafe4a11;
 static FIREWALL_CONFIG_RMW_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), String> {
@@ -549,7 +549,7 @@ fn path_is_bpffs(path: &Path) -> Result<bool, String> {
         ));
     }
     let stats = unsafe { stats.assume_init() };
-    Ok(stats.f_type == BPF_FS_MAGIC)
+    Ok(stats.f_type as u64 == BPF_FS_MAGIC)
 }
 
 /// Proof that a root-only shared FIREWALL_CONFIG operation targets the
