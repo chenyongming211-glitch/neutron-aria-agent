@@ -5,6 +5,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from ci.test_kolla_joint_upgrade import KollaJointUpgradeTest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy/kolla/package/install_aria_datapath_rc_image.sh"
