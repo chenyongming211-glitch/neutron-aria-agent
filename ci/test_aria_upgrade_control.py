@@ -24,13 +24,13 @@ COMPATIBILITY = {
     "uds_schema_min": 1,
     "uds_schema_max": 1,
     "snapshot_schema_version": 1,
-    "ebpf_abi_version": 1,
-    "map_schema_version": 1,
+    "ebpf_abi_version": 2,
+    "map_schema_version": 2,
     "wal_schema_version": 1,
     "runtime_state_schema_version": 1,
     "minimum_kernel_profile": "rhel8-4.18",
     "managed_domain_contract_version": "2026-06-v0.9",
-    "maintenance_gate_capable": False,
+    "maintenance_gate_capable": True,
     "ebpf_abi_hash": "a" * 64,
     "map_schema_hash": "b" * 64,
 }
@@ -165,18 +165,20 @@ class AriaUpgradeControlTest(unittest.TestCase):
 
     def test_maintenance_gate_capability_transition_requires_maintenance(self):
         control = self.control()
+        current = manifest()
+        current["runtime_compatibility"]["maintenance_gate_capable"] = False
         candidate = manifest("3")
-        candidate["runtime_compatibility"]["maintenance_gate_capable"] = True
-        result = control.classify_upgrade(manifest(), candidate)
+        result = control.classify_upgrade(current, candidate)
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("maintenance_gate_capability_changed",), result.reasons)
 
     def test_maintenance_gate_transition_precedes_datapath_compatibility_reasons(self):
         control = self.control()
+        current = manifest()
+        current["runtime_compatibility"]["maintenance_gate_capable"] = False
         candidate = manifest()
-        candidate["runtime_compatibility"]["maintenance_gate_capable"] = True
         candidate["runtime_compatibility"]["wal_schema_version"] += 1
-        result = control.classify_upgrade(manifest(), candidate)
+        result = control.classify_upgrade(current, candidate)
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("maintenance_gate_capability_changed",), result.reasons)
 

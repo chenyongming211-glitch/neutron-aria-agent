@@ -70,8 +70,8 @@ pub use replay::{
 pub use runtime::{
     clear_iface_ctx, delete_tap_config, lookup_iface_ctx, lookup_runtime_config,
     read_acl_active_bank, read_firewall_config, read_iface_ctx, read_runtime_config,
-    set_acl_active_bank, sync_iface_ctx, update_acl_runtime_gate, update_firewall_config,
-    update_runtime_config, write_tap_config,
+    set_acl_active_bank, set_acl_maintenance_bypass, sync_iface_ctx, update_acl_runtime_gate,
+    update_firewall_config, update_runtime_config, write_tap_config,
 };
 pub use scrub::{scrub_acl_bank, scrub_managed_runtime_state, scrub_standalone_runtime_state};
 pub(crate) use scrub::collect_iterated_items;

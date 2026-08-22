@@ -675,6 +675,8 @@ fn replay_state_from_snapshot_with_mode(
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
             ssl_enabled: if state.ssl_enabled { 1 } else { 0 },
             acl_active_bank: ACL_BANK_PRIMARY,
+            acl_maintenance_bypass: 0,
+            _pad: 0,
         };
         match bpf
             .map_mut("FIREWALL_CONFIG")

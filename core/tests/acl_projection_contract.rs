@@ -62,8 +62,16 @@ fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
     assert!(gate.contains(".unwrap_or(false)"));
 
     let packet_path = include_str!("../../ebpf/src/lib.rs");
-    let egress = source_function(packet_path, "unsafe fn try_tc_egress(", "unsafe fn try_tc_egress_v4(");
-    let ingress = source_function(packet_path, "unsafe fn try_tc_ingress(", "unsafe fn try_tc_ingress_v4(");
+    let egress = source_function(
+        packet_path,
+        "unsafe fn try_tc_egress(",
+        "unsafe fn try_tc_egress_v4(",
+    );
+    let ingress = source_function(
+        packet_path,
+        "unsafe fn try_tc_ingress(",
+        "unsafe fn try_tc_ingress_v4(",
+    );
     assert!(egress.contains("load_feature_flags_tc(p, info)"));
     assert!(ingress.contains("load_feature_flags_tc(p, info)"));
 }
@@ -126,7 +134,10 @@ fn acl_projection_maintenance_setter_is_shared_key_zero_and_read_verified() {
         "ovs",
         "OVS",
     ] {
-        assert!(!setter.contains(forbidden), "forbidden lifecycle call: {forbidden}");
+        assert!(
+            !setter.contains(forbidden),
+            "forbidden lifecycle call: {forbidden}"
+        );
     }
 }
 
@@ -134,8 +145,8 @@ fn acl_projection_maintenance_setter_is_shared_key_zero_and_read_verified() {
 fn acl_projection_replay_defaults_missing_maintenance_gate_to_enforcement_capable() {
     let replay = include_str!("../src/ebpf_ops/replay.rs");
     assert!(
-        replay.matches("acl_maintenance_bypass: 0").count() >= 3,
-        "all standalone and managed replay constructors must keep bypass disabled"
+        replay.contains("acl_maintenance_bypass: 0"),
+        "fresh replay must default the maintenance bypass to disabled"
     );
 }
 

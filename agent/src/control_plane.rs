@@ -8678,7 +8678,10 @@ mod tests {
             "ovs",
             "OVS",
         ] {
-            assert!(!setter.contains(forbidden), "forbidden lifecycle call: {forbidden}");
+            assert!(
+                !setter.contains(forbidden),
+                "forbidden lifecycle call: {forbidden}"
+            );
         }
     }
 

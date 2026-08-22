@@ -10,7 +10,17 @@ fn read_global_config() -> Option<FirewallConfig> {
 }
 
 #[inline(always)]
+fn acl_maintenance_bypass() -> bool {
+    read_global_config()
+        .map(|cfg| cfg.acl_maintenance_bypass != 0)
+        .unwrap_or(false)
+}
+
+#[inline(always)]
 pub fn conntrack_enabled(tap_id: u32) -> bool {
+    if acl_maintenance_bypass() {
+        return false;
+    }
     if tap_id != TAP_ID_UNASSIGNED {
         if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
             return cfg.conntrack_enabled != 0;
@@ -35,6 +45,9 @@ pub fn monitoring_enabled(tap_id: u32) -> bool {
 
 #[inline(always)]
 pub fn acl_enabled(tap_id: u32) -> bool {
+    if acl_maintenance_bypass() {
+        return false;
+    }
     if tap_id != TAP_ID_UNASSIGNED {
         if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
             return cfg.acl_enabled != 0;

@@ -78,6 +78,31 @@ fn firewall_config_with_acl_bank(current: FirewallConfig, bank: u8) -> FirewallC
     }
 }
 
+fn firewall_config_with_acl_maintenance_bypass(
+    current: FirewallConfig,
+    enabled: bool,
+) -> FirewallConfig {
+    FirewallConfig {
+        acl_maintenance_bypass: if enabled { 1 } else { 0 },
+        ..current
+    }
+}
+
+fn verify_acl_maintenance_bypass_readback(
+    observed: FirewallConfig,
+    enabled: bool,
+) -> Result<(), String> {
+    let expected = if enabled { 1 } else { 0 };
+    if observed.acl_maintenance_bypass == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "FIREWALL_CONFIG ACL maintenance bypass readback mismatch: expected {}, observed {}",
+            expected, observed.acl_maintenance_bypass
+        ))
+    }
+}
+
 fn tap_config_with_runtime_updates(
     current: TapConfig,
     conntrack_enabled: Option<bool>,
@@ -291,6 +316,32 @@ fn required_firewall_config(
     }
 }
 
+/// Toggle the shared host ACL/conntrack maintenance gate and prove the write.
+pub fn set_acl_maintenance_bypass(
+    runtime: TapMapRuntime<'_>,
+    enabled: bool,
+) -> Result<(), String> {
+    let map_path = format!("{}/FIREWALL_CONFIG", runtime.pin_path);
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
+    let mut map =
+        aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
+    let current = required_firewall_config(
+        map.get(&0u32, 0),
+        false,
+        "ACL maintenance bypass update",
+    )?
+    .expect("partial FIREWALL_CONFIG update requires an existing value");
+    let updated = firewall_config_with_acl_maintenance_bypass(current, enabled);
+    map.insert(&0u32, &updated, 0)
+        .map_err(|e| format!("FIREWALL_CONFIG ACL maintenance bypass insert: {:?}", e))?;
+    let observed_result = map.get(&0u32, 0);
+    let observed = observed_result
+        .map_err(|e| format!("FIREWALL_CONFIG ACL maintenance bypass readback: {:?}", e))?;
+    verify_acl_maintenance_bypass_readback(observed, enabled)
+}
+
 /// Update FIREWALL_CONFIG map at runtime via pinned map.
 /// Reads the current config, applies the changes, and writes back.
 pub fn update_firewall_config(
@@ -361,6 +412,10 @@ pub fn update_firewall_config(
         .as_ref()
         .map(|c| normalize_acl_bank(c.acl_active_bank))
         .unwrap_or(ACL_BANK_PRIMARY);
+    let acl_maintenance_bypass = current
+        .as_ref()
+        .map(|c| c.acl_maintenance_bypass)
+        .unwrap_or(0);
 
     let cfg = FirewallConfig {
         conntrack_enabled: ct,
@@ -372,6 +427,8 @@ pub fn update_firewall_config(
         tcprt_enabled: tcprt,
         ssl_enabled: ssl,
         acl_active_bank,
+        acl_maintenance_bypass,
+        _pad: 0,
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
@@ -543,6 +600,8 @@ mod tests {
             tcprt_enabled: 0,
             ssl_enabled: 0,
             acl_active_bank: 1,
+            acl_maintenance_bypass: 0,
+            _pad: 0,
         };
         assert_eq!(
             required_firewall_config(Ok(existing), true, "full initialization")
@@ -565,6 +624,8 @@ mod tests {
             tcprt_enabled: 0,
             ssl_enabled: 1,
             acl_active_bank: 0,
+            acl_maintenance_bypass: 1,
+            _pad: 0,
         };
 
         let next = firewall_config_with_acl_bank(current, 1);
@@ -578,6 +639,7 @@ mod tests {
         assert_eq!(next.tcprt_enabled, 0);
         assert_eq!(next.ssl_enabled, 1);
         assert_eq!(next.acl_active_bank, 1);
+        assert_eq!(next.acl_maintenance_bypass, 1);
     }
 
     #[test]
@@ -592,6 +654,8 @@ mod tests {
             tcprt_enabled: 1,
             ssl_enabled: 1,
             acl_active_bank: 1,
+            acl_maintenance_bypass: 0,
+            _pad: 0,
         };
 
         let bypassed = firewall_config_with_acl_maintenance_bypass(current, true);
@@ -698,6 +762,8 @@ pub fn lookup_runtime_config(
         tcprt_enabled: tap_cfg.tcprt_enabled,
         ssl_enabled: global.ssl_enabled,
         acl_active_bank: tap_cfg.acl_active_bank,
+        acl_maintenance_bypass: global.acl_maintenance_bypass,
+        _pad: global._pad,
     }))
 }
 
