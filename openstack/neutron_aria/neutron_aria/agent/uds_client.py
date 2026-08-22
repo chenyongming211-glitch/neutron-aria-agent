@@ -1114,7 +1114,13 @@ def _decode_status_v4(body):
             "maintenance_phase", "maintenance_operation_id", "maintenance_reason",
         )):
             raise LocalApiContractError("inactive status retains maintenance identity")
-        if acl_enforcement != "enforce":
+        operator_unknown = (
+            decoded["transaction_state"] == "blocked" and
+            decoded["overall_readiness"] == "blocked" and
+            decoded["required_action"] == "operator" and
+            acl_enforcement == "unknown"
+        )
+        if acl_enforcement != "enforce" and not operator_unknown:
             raise LocalApiContractError("inactive status must report ACL enforce")
     if "counters" in body:
         decoder = None

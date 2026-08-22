@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::neutron_maintenance::{
     decode_maintenance_record, replay_maintenance_records, MaintenanceReplay,
-    MaintenanceWalRecord,
+    MaintenanceWalRecord, MAINTENANCE_WAL_RECORD_MAX_BYTES,
 };
 
 const WAL_FILE: &str = "neutron-snapshot.wal";
@@ -371,6 +371,58 @@ fn looks_like_maintenance_entry(raw: &[u8]) -> bool {
             .any(|window| window == b"\"type\":\"maintenance\"")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WalRecordClass {
+    Ordinary,
+    Maintenance,
+    Unclassified,
+}
+
+fn classify_wal_record_prefix(raw: &[u8]) -> WalRecordClass {
+    let mut cursor = 0usize;
+    while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    if raw.get(cursor) != Some(&b'{') {
+        return WalRecordClass::Unclassified;
+    }
+    cursor += 1;
+    while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    const TYPE_PREFIX: &[u8] = b"\"type\"";
+    if raw.get(cursor..cursor.saturating_add(TYPE_PREFIX.len())) != Some(TYPE_PREFIX) {
+        return WalRecordClass::Unclassified;
+    }
+    cursor += TYPE_PREFIX.len();
+    while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    if raw.get(cursor) != Some(&b':') {
+        return WalRecordClass::Unclassified;
+    }
+    cursor += 1;
+    while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    if raw.get(cursor) != Some(&b'"') {
+        return WalRecordClass::Unclassified;
+    }
+    cursor += 1;
+    let Some(end) = raw[cursor..].iter().position(|byte| *byte == b'"') else {
+        return WalRecordClass::Unclassified;
+    };
+    match &raw[cursor..cursor + end] {
+        b"maintenance" => WalRecordClass::Maintenance,
+        b"snapshot_intent"
+        | b"snapshot_commit"
+        | b"snapshot_maintenance_commit"
+        | b"delete_intent"
+        | b"delete_commit" => WalRecordClass::Ordinary,
+        _ => WalRecordClass::Unclassified,
+    }
+}
+
 fn read_bounded_record<R: BufRead>(
     reader: &mut R,
     record: &mut Vec<u8>,
@@ -384,7 +436,19 @@ fn read_bounded_record<R: BufRead>(
         let newline = buffer.iter().position(|byte| *byte == b'\n');
         let consumed = newline.map_or(buffer.len(), |position| position + 1);
         total = total.saturating_add(consumed);
-        if record.len().saturating_add(consumed) > MAX_WAL_RECORD_BYTES {
+        let mut prefix = Vec::with_capacity(256);
+        prefix.extend_from_slice(&record[..record.len().min(256)]);
+        if prefix.len() < 256 {
+            let remaining = 256 - prefix.len();
+            prefix.extend_from_slice(&buffer[..consumed.min(remaining)]);
+        }
+        let record_limit = match classify_wal_record_prefix(&prefix) {
+            WalRecordClass::Ordinary => MAX_WAL_RECORD_BYTES,
+            WalRecordClass::Maintenance | WalRecordClass::Unclassified => {
+                MAINTENANCE_WAL_RECORD_MAX_BYTES
+            }
+        };
+        if record.len().saturating_add(consumed) > record_limit {
             reader.consume(consumed);
             if newline.is_none() {
                 loop {
@@ -1342,7 +1406,6 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use aria_api::{MaintenancePhase, MaintenanceState, MAINTENANCE_SCHEMA_VERSION};
-    use crate::neutron_maintenance::MAINTENANCE_WAL_RECORD_MAX_BYTES;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Serialize)]

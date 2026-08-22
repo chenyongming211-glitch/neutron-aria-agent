@@ -132,6 +132,29 @@ fn validate_state(state: &MaintenanceState) -> Result<(), String> {
     .map_err(|error| error.details)?;
     bounded_optional_text(state.last_error.as_deref(), "last_error", MAX_ERROR_BYTES)
         .map_err(|error| error.details)?;
+    let identity_valid = match state.phase {
+        MaintenancePhase::Ready => {
+            state.operation_id.is_none()
+                && state.active_domains.is_empty()
+                && state.bypass_started_at_ms.is_none()
+        }
+        MaintenancePhase::BypassPreparing
+        | MaintenancePhase::MaintenanceBypass
+        | MaintenancePhase::GateUnknown
+        | MaintenancePhase::Verifying => {
+            state.operation_id.is_some()
+                && state.active_domains == ["acl"]
+                && state.bypass_started_at_ms.is_some()
+        }
+        MaintenancePhase::Committed => {
+            state.operation_id.is_some()
+                && state.active_domains.is_empty()
+                && state.bypass_started_at_ms.is_some()
+        }
+    };
+    if !identity_valid {
+        return Err("maintenance state phase identity is incomplete".to_string());
+    }
     Ok(())
 }
 
@@ -1401,6 +1424,24 @@ impl MaintenanceCoordinator {
         );
     }
 
+    pub(crate) async fn audit_rejected_request(&self, action: MaintenanceAuditAction) {
+        let phase = self.state.read().await.phase.clone();
+        self.emit_audit(
+            action,
+            MaintenanceAuditOutcome::Attempt,
+            None,
+            phase.clone(),
+            Some("maintenance_request_rejected"),
+        );
+        self.emit_audit(
+            action,
+            MaintenanceAuditOutcome::Failure,
+            None,
+            phase,
+            Some("maintenance_request_rejected"),
+        );
+    }
+
     pub(crate) async fn is_active(&self) -> bool {
         self.blocked.load(Ordering::Acquire) || self.state.read().await.is_active()
     }
@@ -1505,6 +1546,12 @@ impl MaintenanceCoordinator {
             return Err(MaintenanceError::conflict(
                 "maintenance_terminal_transition_pending",
                 "exit or abort transition fences all writers",
+            ));
+        }
+        if self.terminal_action.read().await.is_some() {
+            return Err(MaintenanceError::conflict(
+                "maintenance_terminal_result_persisted",
+                "a persisted terminal result fences all ordinary writers",
             ));
         }
         let state = self.state.read().await;
@@ -1708,6 +1755,9 @@ impl MaintenanceCoordinator {
         generation: u64,
         desired_hash: Option<String>,
     ) -> Result<Option<MaintenanceState>, String> {
+        if self.terminal_action.read().await.is_some() {
+            return Err("maintenance terminal result fences snapshot progress".to_string());
+        }
         let mut state = self.state.read().await.clone();
         if !state.is_active() {
             return Ok(None);

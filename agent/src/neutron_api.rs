@@ -17,6 +17,7 @@ use aria_core::port_counters::read_port_counters;
 use aria_core::common::{drop_family_is_valid, policy_family_is_valid};
 use axum::{
     extract::DefaultBodyLimit,
+    extract::rejection::JsonRejection,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -1591,7 +1592,7 @@ fn acl_runtime_schema_blocked_status(reason: String) -> NeutronStatusV1Response 
         maintenance_operation_id: None,
         maintenance_reason: None,
         maintenance_action: None,
-        acl_enforcement: None,
+        acl_enforcement: Some("unknown".to_string()),
         managed_ports: Vec::new(),
         port_statuses: Vec::new(),
         active_instances: Vec::new(),
@@ -1712,8 +1713,18 @@ fn maintenance_error_response(error: MaintenanceError) -> axum::response::Respon
 
 async fn post_maintenance_enter(
     State(state): State<NeutronApiState>,
-    Json(request): Json<MaintenanceEnterRequest>,
+    request: Result<Json<MaintenanceEnterRequest>, JsonRejection>,
 ) -> axum::response::Response {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(rejection) => {
+            state
+                .maintenance
+                .audit_rejected_request(MaintenanceAuditAction::Enter)
+                .await;
+            return rejection.into_response();
+        }
+    };
     let audit_operation_id = request.operation_id.clone();
     let audit_reason = request.reason.clone();
     let transaction = state.maintenance.begin_transaction().await;
@@ -1779,8 +1790,18 @@ async fn get_maintenance_status(
 
 async fn post_maintenance_exit(
     State(state): State<NeutronApiState>,
-    Json(request): Json<MaintenanceExitRequest>,
+    request: Result<Json<MaintenanceExitRequest>, JsonRejection>,
 ) -> axum::response::Response {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(rejection) => {
+            state
+                .maintenance
+                .audit_rejected_request(MaintenanceAuditAction::Exit)
+                .await;
+            return rejection.into_response();
+        }
+    };
     let audit_operation_id = request.operation_id.clone();
     let transaction = state.maintenance.begin_transaction().await;
     let runtime = state.runtime.read().await;
@@ -1813,8 +1834,18 @@ async fn post_maintenance_exit(
 
 async fn post_maintenance_abort(
     State(state): State<NeutronApiState>,
-    Json(request): Json<MaintenanceAbortRequest>,
+    request: Result<Json<MaintenanceAbortRequest>, JsonRejection>,
 ) -> axum::response::Response {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(rejection) => {
+            state
+                .maintenance
+                .audit_rejected_request(MaintenanceAuditAction::Abort)
+                .await;
+            return rejection.into_response();
+        }
+    };
     let audit_operation_id = request.operation_id.clone();
     let audit_reason = request.error.clone();
     let transaction = state.maintenance.begin_transaction().await;
@@ -3108,10 +3139,13 @@ async fn build_neutron_status_response(
     let maintenance_snapshot = state.maintenance.snapshot().await;
     let maintenance_fenced = maintenance_snapshot.fenced;
     let maintenance = maintenance_snapshot.state;
+    let unaddressable_maintenance_recovery =
+        maintenance_snapshot.blocked && maintenance.operation_id.is_none();
     let maintenance_unknown = maintenance_snapshot.gate_state
         == crate::neutron_maintenance::MaintenanceGateState::Unknown;
-    let maintenance_phase = maintenance_fenced.then_some(maintenance.phase.clone());
-    let maintenance_operation_id = maintenance_fenced
+    let addressable_maintenance = maintenance_fenced && !unaddressable_maintenance_recovery;
+    let maintenance_phase = addressable_maintenance.then_some(maintenance.phase.clone());
+    let maintenance_operation_id = addressable_maintenance
         .then(|| maintenance.operation_id.clone())
         .flatten();
     let active_instances = state.registry.list().await;
@@ -3123,14 +3157,16 @@ async fn build_neutron_status_response(
         } else {
             projection.transaction_state
         },
-        overall_readiness: if maintenance_unknown {
+        overall_readiness: if maintenance_unknown || unaddressable_maintenance_recovery {
             NeutronStatusOverallReadiness::Blocked
         } else if maintenance_fenced {
             NeutronStatusOverallReadiness::Degraded
         } else {
             projection.overall_readiness
         },
-        required_action: if maintenance_fenced {
+        required_action: if unaddressable_maintenance_recovery {
+            NeutronStatusRequiredAction::Operator
+        } else if maintenance_fenced {
             NeutronStatusRequiredAction::CompleteOrRepairMaintenance
         } else {
             projection.required_action
@@ -3148,7 +3184,7 @@ async fn build_neutron_status_response(
         authority_state,
         maintenance_phase,
         maintenance_operation_id,
-        maintenance_reason: maintenance_fenced
+        maintenance_reason: addressable_maintenance
             .then(|| {
                 maintenance_snapshot.block_cause.clone().unwrap_or_else(|| {
                     if maintenance_unknown {
@@ -3158,13 +3194,14 @@ async fn build_neutron_status_response(
                     }
                 })
             }),
-        maintenance_action: maintenance_fenced
+        maintenance_action: addressable_maintenance
             .then_some("complete_or_repair_maintenance".to_string()),
         acl_enforcement: Some(
-            match maintenance_snapshot.gate_state {
-                crate::neutron_maintenance::MaintenanceGateState::Enforce => "enforce",
-                crate::neutron_maintenance::MaintenanceGateState::Bypass => "bypass",
-                crate::neutron_maintenance::MaintenanceGateState::Unknown => "unknown",
+            match (unaddressable_maintenance_recovery, maintenance_snapshot.gate_state) {
+                (true, _) => "unknown",
+                (false, crate::neutron_maintenance::MaintenanceGateState::Enforce) => "enforce",
+                (false, crate::neutron_maintenance::MaintenanceGateState::Bypass) => "bypass",
+                (false, crate::neutron_maintenance::MaintenanceGateState::Unknown) => "unknown",
             }
             .to_string(),
         ),
