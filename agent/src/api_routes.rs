@@ -1,5 +1,9 @@
 #[allow(unused_imports)]
 use axum::{
+    extract::{Request, State},
+    http::Method,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -9,8 +13,48 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::api_handlers;
 use crate::control_plane::ControlPlane;
+use crate::neutron_maintenance::{MaintenanceCoordinator, MaintenanceWriter};
 
-pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
+pub(crate) fn is_maintenance_mutation_method(method: &Method) -> bool {
+    method == Method::POST
+        || method == Method::PUT
+        || method == Method::PATCH
+        || method == Method::DELETE
+}
+
+async fn maintenance_writer_fence(
+    State(maintenance): State<Arc<MaintenanceCoordinator>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !is_maintenance_mutation_method(request.method()) {
+        return next.run(request).await;
+    }
+    let lease = match maintenance
+        .acquire_writer(MaintenanceWriter::Direct, None)
+        .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({
+                    "error": error.code,
+                    "details": error.details,
+                })),
+            )
+                .into_response();
+        }
+    };
+    let response = next.run(request).await;
+    drop(lease);
+    response
+}
+
+pub fn build_router(
+    control_plane: Arc<ControlPlane>,
+    maintenance: Arc<MaintenanceCoordinator>,
+) -> Router {
     Router::new()
         .merge(SwaggerUi::new("/docs").url("/openapi.json", crate::openapi::ApiDoc::openapi()))
         // Health & instances
@@ -165,6 +209,10 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
             delete(api_handlers::flush_trace),
         )
         .with_state(control_plane)
+        .layer(middleware::from_fn_with_state(
+            maintenance,
+            maintenance_writer_fence,
+        ))
 }
 
 #[cfg(test)]

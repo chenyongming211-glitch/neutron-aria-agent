@@ -707,7 +707,7 @@ impl NeutronWal {
                 scan.failures
             ));
         }
-        replay_maintenance_records(&scan.maintenance_records).map_err(|error| {
+        let maintenance = replay_maintenance_records(&scan.maintenance_records).map_err(|error| {
             format!(
                 "cannot compact Neutron WAL with maintenance replay failure: {}",
                 error
@@ -721,11 +721,18 @@ impl NeutronWal {
         if let Some(intent) = scan.pending_intent.as_ref() {
             entries.push(Self::entry_for_pending_intent(intent)?);
         }
-        entries.extend(
-            scan.maintenance_records
-                .into_iter()
-                .map(|record| NeutronWalEntry::Maintenance { record }),
-        );
+        if maintenance.state != aria_api::MaintenanceState::inactive()
+            || maintenance.pending_transition.is_some()
+            || maintenance.terminal_action.is_some()
+        {
+            entries.push(NeutronWalEntry::Maintenance {
+                record: MaintenanceWalRecord::checkpoint(
+                    maintenance.state,
+                    maintenance.pending_transition,
+                    maintenance.terminal_action,
+                ),
+            });
+        }
 
         let mut bytes = Vec::new();
         for entry in entries {

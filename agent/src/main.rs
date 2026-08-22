@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -588,6 +588,175 @@ async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixLi
     Ok(listener)
 }
 
+#[derive(Clone, Copy)]
+struct AdminSocketBindPolicy {
+    required_uid: u32,
+    required_gid: u32,
+    socket_mode: u32,
+    parent_forbidden_mode: u32,
+}
+
+impl AdminSocketBindPolicy {
+    fn production() -> Self {
+        Self::for_owner(0, 0)
+    }
+
+    fn for_owner(required_uid: u32, required_gid: u32) -> Self {
+        Self {
+            required_uid,
+            required_gid,
+            socket_mode: 0o600,
+            parent_forbidden_mode: 0o022,
+        }
+    }
+}
+
+struct AdminSocketDirectory {
+    directory: File,
+    policy: AdminSocketBindPolicy,
+}
+
+impl AdminSocketDirectory {
+    fn open(path: &Path, policy: AdminSocketBindPolicy) -> Result<Self, String> {
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| format!("admin socket directory contains NUL: {}", path.display()))?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "open maintenance admin directory {} without following links: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ));
+        }
+        let directory = unsafe { File::from_raw_fd(fd) };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(directory.as_raw_fd(), &mut stat) } != 0 {
+            return Err(format!(
+                "fstat maintenance admin directory {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ));
+        }
+        let mode = stat.st_mode as u32;
+        if mode & libc::S_IFMT != libc::S_IFDIR
+            || stat.st_uid != policy.required_uid
+            || stat.st_gid != policy.required_gid
+            || mode & policy.parent_forbidden_mode != 0
+        {
+            return Err(format!(
+                "maintenance admin directory must be owner {}:{}, non-symlink, and group/world non-writable: {}",
+                policy.required_uid,
+                policy.required_gid,
+                path.display()
+            ));
+        }
+        Ok(Self { directory, policy })
+    }
+
+    async fn bind(&self, name: &str) -> Result<tokio::net::UnixListener, String> {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err("maintenance admin socket name must be a single path component".to_string());
+        }
+        let c_name = CString::new(name)
+            .map_err(|_| "maintenance admin socket name contains NUL".to_string())?;
+        let mut stale: libc::stat = unsafe { std::mem::zeroed() };
+        let stat_result = unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                c_name.as_ptr(),
+                &mut stale,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if stat_result == 0 {
+            let stale_mode = stale.st_mode as u32;
+            if stale_mode & libc::S_IFMT != libc::S_IFSOCK
+                || stale.st_uid != self.policy.required_uid
+                || stale.st_gid != self.policy.required_gid
+            {
+                return Err("refusing unsafe existing maintenance admin socket entry".to_string());
+            }
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), c_name.as_ptr(), 0) } != 0 {
+                return Err(format!(
+                    "unlink stale maintenance admin socket: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+        } else if io::Error::last_os_error().kind() != io::ErrorKind::NotFound {
+            return Err(format!(
+                "inspect maintenance admin socket entry: {}",
+                io::Error::last_os_error()
+            ));
+        }
+
+        let anchored_path = format!("/proc/self/fd/{}/{}", self.directory.as_raw_fd(), name);
+        let listener = std::os::unix::net::UnixListener::bind(&anchored_path)
+            .map_err(|error| format!("bind anchored maintenance admin socket: {}", error))?;
+        if unsafe {
+            libc::fchownat(
+                self.directory.as_raw_fd(),
+                c_name.as_ptr(),
+                self.policy.required_uid,
+                self.policy.required_gid,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(format!(
+                "chown anchored maintenance admin socket: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        if unsafe {
+            libc::fchmodat(
+                self.directory.as_raw_fd(),
+                c_name.as_ptr(),
+                self.policy.socket_mode as libc::mode_t,
+                0,
+            )
+        } != 0
+        {
+            return Err(format!(
+                "chmod anchored maintenance admin socket: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let mut verified: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                c_name.as_ptr(),
+                &mut verified,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(format!(
+                "verify anchored maintenance admin socket: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let verified_mode = verified.st_mode as u32;
+        if verified_mode & libc::S_IFMT != libc::S_IFSOCK
+            || verified.st_uid != self.policy.required_uid
+            || verified.st_gid != self.policy.required_gid
+            || verified_mode & 0o777 != self.policy.socket_mode
+        {
+            return Err("anchored maintenance admin socket identity verification failed".to_string());
+        }
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("set maintenance admin socket nonblocking: {}", error))?;
+        tokio::net::UnixListener::from_std(listener)
+            .map_err(|error| format!("adopt maintenance admin socket listener: {}", error))
+    }
+}
+
 async fn bind_admin_socket() -> Result<tokio::net::UnixListener, String> {
     if unsafe { libc::geteuid() } != 0 {
         return Err("root privileges are required to bind the maintenance admin socket".to_string());
@@ -604,103 +773,18 @@ async fn bind_admin_socket() -> Result<tokio::net::UnixListener, String> {
                 error
             )
         })?;
-    }
-    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
-        format!(
-            "inspect maintenance admin socket directory {}: {}",
-            parent.display(),
-            error
-        )
-    })?;
-    if parent_metadata.file_type().is_symlink()
-        || !parent_metadata.file_type().is_dir()
-        || parent_metadata.uid() != 0
-    {
-        return Err(format!(
-            "maintenance admin socket directory must be root-owned and non-symlink: {}",
-            parent.display()
-        ));
-    }
-
-    match std::fs::symlink_metadata(socket_path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink()
-                || !metadata.file_type().is_socket()
-                || metadata.uid() != 0
-                || metadata.gid() != 0
-            {
-                return Err(format!(
-                    "refusing unsafe existing maintenance admin socket path {}",
-                    socket_path.display()
-                ));
-            }
-            std::fs::remove_file(socket_path).map_err(|error| {
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| {
                 format!(
-                    "remove stale maintenance admin socket {}: {}",
-                    socket_path.display(),
+                    "set maintenance admin socket directory permissions {}: {}",
+                    parent.display(),
                     error
                 )
-            })?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "inspect maintenance admin socket {}: {}",
-                socket_path.display(),
-                error
-            ));
-        }
+            },
+        )?;
     }
-
-    let listener = tokio::net::UnixListener::bind(socket_path).map_err(|error| {
-        format!(
-            "bind maintenance admin socket {}: {}",
-            socket_path.display(),
-            error
-        )
-    })?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).map_err(
-        |error| {
-            format!(
-                "chmod maintenance admin socket {}: {}",
-                socket_path.display(),
-                error
-            )
-        },
-    )?;
-    let c_path = CString::new(socket_path.as_os_str().as_bytes()).map_err(|_| {
-        format!(
-            "maintenance admin socket path contains NUL: {}",
-            socket_path.display()
-        )
-    })?;
-    if unsafe { libc::chown(c_path.as_ptr(), 0, 0) } != 0 {
-        return Err(format!(
-            "chown maintenance admin socket {}: {}",
-            socket_path.display(),
-            io::Error::last_os_error()
-        ));
-    }
-    let metadata = std::fs::symlink_metadata(socket_path).map_err(|error| {
-        format!(
-            "verify maintenance admin socket {}: {}",
-            socket_path.display(),
-            error
-        )
-    })?;
-    neutron_maintenance::validate_admin_socket_facts(
-        &neutron_maintenance::AdminSocketFacts {
-            parent_is_directory: parent_metadata.file_type().is_dir(),
-            parent_is_symlink: parent_metadata.file_type().is_symlink(),
-            parent_uid: parent_metadata.uid(),
-            socket_is_socket: metadata.file_type().is_socket(),
-            socket_is_symlink: metadata.file_type().is_symlink(),
-            socket_uid: metadata.uid(),
-            socket_gid: metadata.gid(),
-            socket_mode: metadata.permissions().mode() & 0o777,
-        },
-    )?;
-    Ok(listener)
+    let directory = AdminSocketDirectory::open(parent, AdminSocketBindPolicy::production())?;
+    directory.bind("aria-admin.sock").await
 }
 
 async fn serve_acl_runtime_schema_blocked(
@@ -1232,24 +1316,31 @@ async fn main() {
         }
     }
 
-    if let Err(e) = ssl_manager.ensure_loaded().await {
-        warn!(error = %e, "failed to initialize global SSL manager");
-    }
-    if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
-        warn!(error = %e, "failed to clean legacy SSL pins");
-    }
-    if let Err(e) = kernel_drop_manager.ensure_loaded().await {
-        warn!(error = %e, "failed to initialize kernel drop manager");
+    if let Ok(_maintenance_lease) = maintenance
+        .acquire_writer(neutron_maintenance::MaintenanceWriter::Background, None)
+        .await
+    {
+        if let Err(e) = ssl_manager.ensure_loaded().await {
+            warn!(error = %e, "failed to initialize global SSL manager");
+        }
+        if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
+            warn!(error = %e, "failed to clean legacy SSL pins");
+        }
+        if let Err(e) = kernel_drop_manager.ensure_loaded().await {
+            warn!(error = %e, "failed to initialize kernel drop manager");
+        } else {
+            let status = kernel_drop_manager.status_snapshot().await;
+            info!(
+                loaded = status.loaded,
+                mode = ?status.mode,
+                managed_ifaces = status.managed_ifaces,
+                pin_path = %kernel_drop_manager.pin_path(),
+                last_error = ?status.last_error,
+                "kernel drop manager ready"
+            );
+        }
     } else {
-        let status = kernel_drop_manager.status_snapshot().await;
-        info!(
-            loaded = status.loaded,
-            mode = ?status.mode,
-            managed_ifaces = status.managed_ifaces,
-            pin_path = %kernel_drop_manager.pin_path(),
-            last_error = ?status.last_error,
-            "kernel drop manager ready"
-        );
+        warn!("maintenance recovery fenced ordinary startup runtime restoration");
     }
 
     // Note: instances are registered by TapRegistry::attach when XDP is actually attached.
@@ -1264,7 +1355,7 @@ async fn main() {
         control_plane.clone(),
     ));
 
-    let router = api_routes::build_router(control_plane.clone());
+    let router = api_routes::build_router(control_plane.clone(), maintenance.clone());
     let listen_addr = management_listen_addr;
     let listener = match tokio::net::TcpListener::bind(listen_addr).await {
         Ok(listener) => listener,
@@ -1328,9 +1419,17 @@ async fn main() {
 
     // Start background compact task (WAL → snapshot when threshold reached or periodically)
     let compact_cp = control_plane.clone();
+    let compact_maintenance = maintenance.clone();
     let compact_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let _maintenance_lease = match compact_maintenance
+                .acquire_writer(neutron_maintenance::MaintenanceWriter::Periodic, None)
+                .await
+            {
+                Ok(lease) => lease,
+                Err(_) => continue,
+            };
             compact_cp.compact_if_needed().await;
         }
     });
@@ -1345,9 +1444,13 @@ async fn main() {
         interval.tick().await;
         loop {
             interval.tick().await;
-            if tc_health_maintenance.is_active().await {
-                continue;
-            }
+            let _maintenance_lease = match tc_health_maintenance
+                .acquire_writer(neutron_maintenance::MaintenanceWriter::Periodic, None)
+                .await
+            {
+                Ok(lease) => lease,
+                Err(_) => continue,
+            };
             let _ = tc_health_cp.reconcile_tc_acl_health().await;
         }
     });
@@ -1361,9 +1464,13 @@ async fn main() {
         interval.tick().await;
         loop {
             interval.tick().await;
-            if ssl_reconcile_maintenance.is_active().await {
-                continue;
-            }
+            let _maintenance_lease = match ssl_reconcile_maintenance
+                .acquire_writer(neutron_maintenance::MaintenanceWriter::Periodic, None)
+                .await
+            {
+                Ok(lease) => lease,
+                Err(_) => continue,
+            };
             ssl_reconcile_cp.reconcile_ssl_runtime_state().await;
         }
     });

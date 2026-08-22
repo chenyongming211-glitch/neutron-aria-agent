@@ -450,6 +450,7 @@ pub enum NeutronStatusRequiredAction {
     RecoverPending,
     FullResync,
     Operator,
+    CompleteOrRepairMaintenance,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -825,6 +826,12 @@ pub struct NeutronStatusV1Response {
     /// Active host maintenance identity; never contains policy or credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_operation_id: Option<String>,
+    /// Bounded server-derived maintenance reason; never echoes policy payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_reason: Option<String>,
+    /// Server-derived action needed while maintenance blocks ordinary readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_action: Option<String>,
     pub managed_ports: Vec<ManagedNeutronPort>,
     #[serde(default)]
     pub port_statuses: Vec<NeutronStatusPortEvidence>,
@@ -2817,6 +2824,8 @@ mod tests {
             authority_state: "partial".to_string(),
             maintenance_phase: None,
             maintenance_operation_id: None,
+            maintenance_reason: None,
+            maintenance_action: None,
             managed_ports: Vec::new(),
             port_statuses: Vec::new(),
             active_instances: Vec::new(),

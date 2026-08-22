@@ -109,10 +109,16 @@
       "mode": "0600",
       "owner": "root:root",
       "separate_from_neutron_socket": true,
-      "no_follow": true
+      "no_follow": true,
+      "parent_owner": "root:root",
+      "parent_group_world_writable": false,
+      "directory_fd_anchored": true
     },
     "active_writer_rule": "only a full-host snapshot with the exact maintenance_operation_id may stage",
-    "readiness_rule": "maintenance bypass returns HTTP 503 and includes phase plus operation identity",
+    "readiness_rule": "maintenance bypass returns HTTP 503 with blocked/degraded transaction truth, operation identity, reason, and complete_or_repair_maintenance action",
+    "writer_serialization": "normal mutations hold a shared maintenance lease through the mutation; enter, exit, abort, and recovery hold the exclusive lease through WAL and verified gate changes",
+    "wal_checkpoint": "one canonical maintenance checkpoint plus at most its exact pending transition; audit history is separate",
+    "audit": "bounded structured enter/get/exit/abort attempt and result events with root-only UDS authorization outcome and no policy, token, or secret",
     "error_codes": [
       "maintenance_operation_mismatch",
       "maintenance_requires_full_host",

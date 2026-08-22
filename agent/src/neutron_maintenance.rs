@@ -4,10 +4,12 @@ use aria_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::control_plane::ControlPlane;
 use crate::neutron_wal::NeutronWal;
@@ -19,6 +21,7 @@ const MAX_REASON_BYTES: usize = 256;
 const MAX_HASH_BYTES: usize = 256;
 const MAX_ERROR_BYTES: usize = 512;
 const MAX_DOMAINS: usize = 4;
+const MAX_MAINTENANCE_REPLAY_RECORDS: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MaintenanceError {
@@ -121,19 +124,157 @@ fn validate_state(state: &MaintenanceState) -> Result<(), String> {
     Ok(())
 }
 
+fn same_transaction_identity(left: &MaintenanceState, right: &MaintenanceState) -> bool {
+    left.schema_version == right.schema_version
+        && left.operation_id == right.operation_id
+        && left.expected_generation == right.expected_generation
+        && left.expected_desired_hash == right.expected_desired_hash
+        && left.applied_generation == right.applied_generation
+        && left.applied_desired_hash == right.applied_desired_hash
+        && left.bypass_started_at_ms == right.bypass_started_at_ms
+        && left.active_domains == right.active_domains
+}
+
+fn same_operation_identity(left: &MaintenanceState, right: &MaintenanceState) -> bool {
+    left.schema_version == right.schema_version
+        && left.operation_id == right.operation_id
+        && left.active_domains == right.active_domains
+        && left.expected_generation == right.expected_generation
+        && left.expected_desired_hash == right.expected_desired_hash
+        && left.bypass_started_at_ms == right.bypass_started_at_ms
+}
+
+fn same_terminal_transaction_identity(
+    left: &MaintenanceState,
+    right: &MaintenanceState,
+) -> bool {
+    let mut terminal = right.clone();
+    terminal.active_domains = left.active_domains.clone();
+    same_transaction_identity(left, &terminal) && right.active_domains.is_empty()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MaintenanceConvergence {
+    pub(crate) accepted_generation: u64,
+    pub(crate) accepted_desired_hash: Option<String>,
     pub(crate) applied_generation: u64,
     pub(crate) applied_desired_hash: Option<String>,
     pub(crate) pending_generation: Option<u64>,
-    pub(crate) managed_port_count: usize,
-    pub(crate) ready_enforce_port_count: usize,
+    pub(crate) managed_ports: BTreeSet<String>,
+    pub(crate) ready_enforce_ports: BTreeSet<String>,
+    pub(crate) wal_healthy: bool,
+    pub(crate) recovery_healthy: bool,
 }
 
 impl MaintenanceConvergence {
     pub(crate) fn is_complete(&self) -> bool {
-        self.pending_generation.is_none()
-            && self.managed_port_count == self.ready_enforce_port_count
+        self.accepted_generation == self.applied_generation
+            && self.accepted_desired_hash == self.applied_desired_hash
+            && self.pending_generation.is_none()
+            && self.managed_ports == self.ready_enforce_ports
+            && self.wal_healthy
+            && self.recovery_healthy
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MaintenancePendingTransition {
+    Enter,
+    Exit,
+    Abort,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MaintenanceTerminalAction {
+    Exit,
+    Abort,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MaintenanceAuditAction {
+    Enter,
+    Get,
+    Exit,
+    Abort,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MaintenanceAuditOutcome {
+    Attempt,
+    Success,
+    Failure,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct MaintenanceAuditEvent {
+    pub(crate) action: MaintenanceAuditAction,
+    pub(crate) outcome: MaintenanceAuditOutcome,
+    pub(crate) operation_id: Option<String>,
+    pub(crate) phase: MaintenancePhase,
+    pub(crate) reason: Option<String>,
+    pub(crate) authorization: &'static str,
+}
+
+pub(crate) trait MaintenanceAuditSink: Send + Sync {
+    fn emit(&self, event: MaintenanceAuditEvent);
+}
+
+#[derive(Default)]
+struct TracingMaintenanceAudit;
+
+impl MaintenanceAuditSink for TracingMaintenanceAudit {
+    fn emit(&self, event: MaintenanceAuditEvent) {
+        tracing::info!(
+            action = ?event.action,
+            outcome = ?event.outcome,
+            operation_id = ?event.operation_id,
+            phase = ?event.phase,
+            reason = ?event.reason,
+            authorization = event.authorization,
+            "maintenance admin audit"
+        );
+    }
+}
+
+pub(crate) type MaintenanceIoFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+pub(crate) trait MaintenanceGateRuntime: Send + Sync {
+    fn verify_authority(&self) -> MaintenanceIoFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn set_bypass_verified(&self, enabled: bool) -> MaintenanceIoFuture<'_>;
+}
+
+struct ControlPlaneMaintenanceGate {
+    control_plane: Arc<ControlPlane>,
+}
+
+impl MaintenanceGateRuntime for ControlPlaneMaintenanceGate {
+    fn verify_authority(&self) -> MaintenanceIoFuture<'_> {
+        Box::pin(async move {
+            self.control_plane
+                .mint_managed_maintenance_authority()
+                .await
+                .map(drop)
+        })
+    }
+
+    fn set_bypass_verified(&self, enabled: bool) -> MaintenanceIoFuture<'_> {
+        Box::pin(async move {
+            let authority = self
+                .control_plane
+                .mint_managed_maintenance_authority()
+                .await?;
+            self.control_plane
+                .set_acl_maintenance_bypass(&authority, enabled)
+                .await
+        })
     }
 }
 
@@ -434,6 +575,12 @@ pub(crate) fn admit_maintenance_writer(
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum MaintenanceWalRecord {
+    Checkpoint {
+        schema_version: u32,
+        state: MaintenanceState,
+        pending_transition: Option<MaintenancePendingTransition>,
+        terminal_action: Option<MaintenanceTerminalAction>,
+    },
     EnterIntent {
         schema_version: u32,
         state: MaintenanceState,
@@ -467,7 +614,12 @@ pub(crate) enum MaintenanceWalRecord {
 impl MaintenanceWalRecord {
     fn version_and_state(&self) -> (u32, &MaintenanceState) {
         match self {
-            Self::EnterIntent {
+            Self::Checkpoint {
+                schema_version,
+                state,
+                ..
+            }
+            | Self::EnterIntent {
                 schema_version,
                 state,
             }
@@ -547,6 +699,19 @@ impl MaintenanceWalRecord {
         }
     }
 
+    pub(crate) fn checkpoint(
+        state: MaintenanceState,
+        pending_transition: Option<MaintenancePendingTransition>,
+        terminal_action: Option<MaintenanceTerminalAction>,
+    ) -> Self {
+        Self::Checkpoint {
+            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            state,
+            pending_transition,
+            terminal_action,
+        }
+    }
+
     #[cfg(test)]
     fn enter_intent(
         request: MaintenanceEnterRequest,
@@ -596,6 +761,8 @@ pub(crate) fn decode_maintenance_record(raw: &[u8]) -> Result<MaintenanceWalReco
 pub(crate) struct MaintenanceReplay {
     pub(crate) state: MaintenanceState,
     pub(crate) requires_bypass: bool,
+    pub(crate) pending_transition: Option<MaintenancePendingTransition>,
+    pub(crate) terminal_action: Option<MaintenanceTerminalAction>,
 }
 
 impl Default for MaintenanceReplay {
@@ -603,6 +770,8 @@ impl Default for MaintenanceReplay {
         Self {
             state: MaintenanceState::inactive(),
             requires_bypass: false,
+            pending_transition: None,
+            terminal_action: None,
         }
     }
 }
@@ -610,13 +779,28 @@ impl Default for MaintenanceReplay {
 pub(crate) fn replay_maintenance_records(
     records: &[MaintenanceWalRecord],
 ) -> Result<MaintenanceReplay, String> {
+    if records.len() > MAX_MAINTENANCE_REPLAY_RECORDS {
+        return Err(format!(
+            "maintenance WAL replay exceeds {} records",
+            MAX_MAINTENANCE_REPLAY_RECORDS
+        ));
+    }
     let mut seen = BTreeSet::new();
     let mut state = MaintenanceState::inactive();
-    let mut pending: Option<&'static str> = None;
+    let mut pending: Option<MaintenancePendingTransition> = None;
+    let mut terminal_action = None;
     for record in records {
         let encoded = serde_json::to_string(record)
             .map_err(|error| format!("serialize maintenance replay key: {}", error))?;
         if !seen.insert(encoded) {
+            let exact_retry = matches!(
+                (record, pending),
+                (MaintenanceWalRecord::ExitIntent { .. }, Some(MaintenancePendingTransition::Exit))
+                    | (MaintenanceWalRecord::AbortIntent { .. }, Some(MaintenancePendingTransition::Abort))
+            );
+            if exact_retry {
+                continue;
+            }
             return Err("duplicate maintenance WAL record".to_string());
         }
         let (version, next) = record.version_and_state();
@@ -625,6 +809,26 @@ pub(crate) fn replay_maintenance_records(
         }
         validate_state(next)?;
         match record {
+            MaintenanceWalRecord::Checkpoint {
+                pending_transition,
+                terminal_action: checkpoint_terminal,
+                ..
+            } => {
+                if state != MaintenanceState::inactive() || pending.is_some() {
+                    return Err("maintenance checkpoint must be the first record".to_string());
+                }
+                state = next.clone();
+                pending = *pending_transition;
+                terminal_action = *checkpoint_terminal;
+                if pending.is_some() && !state.is_active() {
+                    return Err("maintenance checkpoint pending transition is inactive".to_string());
+                }
+                if terminal_action.is_some()
+                    && (pending.is_some() || state.phase != MaintenancePhase::Committed)
+                {
+                    return Err("maintenance checkpoint terminal identity is inconsistent".to_string());
+                }
+            }
             MaintenanceWalRecord::EnterIntent { .. } => {
                 if pending.is_some() || state.is_active() {
                     return Err("conflicting maintenance enter intent".to_string());
@@ -639,13 +843,13 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 state.phase = MaintenancePhase::MaintenanceBypass;
                 state.last_error = Some("recovered_dangling_enter_intent".to_string());
-                pending = Some("enter");
+                pending = Some(MaintenancePendingTransition::Enter);
             }
             MaintenanceWalRecord::EnterCommit { .. } => {
-                if pending != Some("enter") {
+                if pending != Some(MaintenancePendingTransition::Enter) {
                     return Err("maintenance enter commit without intent".to_string());
                 }
-                if state.operation_id != next.operation_id
+                if !same_transaction_identity(&state, next)
                     || next.phase != MaintenancePhase::MaintenanceBypass
                     || next.active_domains.len() != 1
                     || next.active_domains[0] != "acl"
@@ -660,7 +864,7 @@ pub(crate) fn replay_maintenance_records(
                 if !state.is_active() || pending.is_some() {
                     return Err("maintenance exit intent without active operation".to_string());
                 }
-                if state.operation_id != next.operation_id
+                if !same_transaction_identity(&state, next)
                     || next.phase != MaintenancePhase::Verifying
                 {
                     return Err("maintenance exit intent identity changed".to_string());
@@ -668,13 +872,13 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 state.phase = MaintenancePhase::MaintenanceBypass;
                 state.last_error = Some("recovered_dangling_exit_intent".to_string());
-                pending = Some("exit");
+                pending = Some(MaintenancePendingTransition::Exit);
             }
             MaintenanceWalRecord::ExitCommit { .. } => {
-                if pending != Some("exit") {
+                if pending != Some(MaintenancePendingTransition::Exit) {
                     return Err("maintenance exit commit without intent".to_string());
                 }
-                if state.operation_id != next.operation_id
+                if !same_terminal_transaction_identity(&state, next)
                     || next.phase != MaintenancePhase::Committed
                     || !next.active_domains.is_empty()
                 {
@@ -682,12 +886,13 @@ pub(crate) fn replay_maintenance_records(
                 }
                 state = next.clone();
                 pending = None;
+                terminal_action = Some(MaintenanceTerminalAction::Exit);
             }
             MaintenanceWalRecord::AbortIntent { .. } => {
                 if !state.is_active() || pending.is_some() {
                     return Err("maintenance abort intent without active operation".to_string());
                 }
-                if state.operation_id != next.operation_id
+                if !same_transaction_identity(&state, next)
                     || !matches!(
                         next.phase,
                         MaintenancePhase::Verifying | MaintenancePhase::MaintenanceBypass
@@ -697,10 +902,16 @@ pub(crate) fn replay_maintenance_records(
                 }
                 state = next.clone();
                 state.phase = MaintenancePhase::MaintenanceBypass;
-                pending = Some("abort");
+                pending = Some(MaintenancePendingTransition::Abort);
             }
             MaintenanceWalRecord::AbortCommit { .. } => {
-                if pending != Some("abort") || state.operation_id != next.operation_id {
+                if pending != Some(MaintenancePendingTransition::Abort)
+                    || !(if next.phase == MaintenancePhase::Committed {
+                        same_terminal_transaction_identity(&state, next)
+                    } else {
+                        same_transaction_identity(&state, next)
+                    })
+                {
                     return Err("maintenance abort commit without matching intent".to_string());
                 }
                 state = next.clone();
@@ -712,6 +923,9 @@ pub(crate) fn replay_maintenance_records(
                 }
                 if state.phase != MaintenancePhase::Committed {
                     state.phase = MaintenancePhase::MaintenanceBypass;
+                    terminal_action = None;
+                } else {
+                    terminal_action = Some(MaintenanceTerminalAction::Abort);
                 }
                 pending = None;
             }
@@ -719,7 +933,9 @@ pub(crate) fn replay_maintenance_records(
                 if !state.is_active() || pending.is_some() {
                     return Err("maintenance progress commit without active operation".to_string());
                 }
-                if state.operation_id != next.operation_id {
+                if !same_operation_identity(&state, next)
+                    || next.applied_generation < state.applied_generation
+                {
                     return Err("maintenance progress operation identity changed".to_string());
                 }
                 state = next.clone();
@@ -730,6 +946,8 @@ pub(crate) fn replay_maintenance_records(
     Ok(MaintenanceReplay {
         requires_bypass: state.is_active(),
         state,
+        pending_transition: pending,
+        terminal_action,
     })
 }
 
@@ -740,27 +958,142 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct MaintenanceStoreReplay {
+    pub(crate) state: MaintenanceState,
+    pub(crate) failures: usize,
+    pub(crate) pending_transition: Option<MaintenancePendingTransition>,
+    pub(crate) terminal_action: Option<MaintenanceTerminalAction>,
+}
+
+pub(crate) trait MaintenanceStore: Send + Sync {
+    fn load(&self) -> MaintenanceStoreReplay;
+    fn append(&self, record: MaintenanceWalRecord) -> Result<(), String>;
+}
+
+struct WalMaintenanceStore {
+    wal: Arc<NeutronWal>,
+}
+
+impl MaintenanceStore for WalMaintenanceStore {
+    fn load(&self) -> MaintenanceStoreReplay {
+        let replay = self.wal.replay();
+        MaintenanceStoreReplay {
+            state: replay.maintenance.state,
+            failures: replay.maintenance_failures,
+            pending_transition: replay.maintenance.pending_transition,
+            terminal_action: replay.maintenance.terminal_action,
+        }
+    }
+
+    fn append(&self, record: MaintenanceWalRecord) -> Result<(), String> {
+        self.wal.append_maintenance_record(record)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct MaintenanceWriterLease {
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+pub(crate) struct MaintenanceTransactionLease {
+    _guard: OwnedRwLockWriteGuard<()>,
+}
+
 #[derive(Clone)]
 pub(crate) struct MaintenanceCoordinator {
-    wal: Arc<NeutronWal>,
-    control_plane: Arc<ControlPlane>,
+    store: Arc<dyn MaintenanceStore>,
+    gate: Arc<dyn MaintenanceGateRuntime>,
+    audit: Arc<dyn MaintenanceAuditSink>,
     state: Arc<RwLock<MaintenanceState>>,
+    pending_transition: Arc<RwLock<Option<MaintenancePendingTransition>>>,
+    terminal_action: Arc<RwLock<Option<MaintenanceTerminalAction>>>,
     blocked: Arc<AtomicBool>,
+    transaction_lock: Arc<RwLock<()>>,
 }
 
 impl MaintenanceCoordinator {
     pub(crate) fn new(wal: Arc<NeutronWal>, control_plane: Arc<ControlPlane>) -> Self {
-        let replay = wal.replay();
+        Self::new_with_dependencies(
+            Arc::new(WalMaintenanceStore { wal }),
+            Arc::new(ControlPlaneMaintenanceGate { control_plane }),
+            Arc::new(TracingMaintenanceAudit),
+        )
+    }
+
+    pub(crate) fn new_with_dependencies(
+        store: Arc<dyn MaintenanceStore>,
+        gate: Arc<dyn MaintenanceGateRuntime>,
+        audit: Arc<dyn MaintenanceAuditSink>,
+    ) -> Self {
+        let replay = store.load();
         Self {
-            wal,
-            control_plane,
-            state: Arc::new(RwLock::new(replay.maintenance.state)),
-            blocked: Arc::new(AtomicBool::new(replay.maintenance_failures != 0)),
+            store,
+            gate,
+            audit,
+            state: Arc::new(RwLock::new(replay.state)),
+            pending_transition: Arc::new(RwLock::new(replay.pending_transition)),
+            terminal_action: Arc::new(RwLock::new(replay.terminal_action)),
+            blocked: Arc::new(AtomicBool::new(replay.failures != 0)),
+            transaction_lock: Arc::new(RwLock::new(())),
         }
+    }
+
+    fn emit_audit(
+        &self,
+        action: MaintenanceAuditAction,
+        outcome: MaintenanceAuditOutcome,
+        operation_id: Option<&str>,
+        phase: MaintenancePhase,
+        reason: Option<&str>,
+    ) {
+        self.audit.emit(MaintenanceAuditEvent {
+            action,
+            outcome,
+            operation_id: operation_id.map(|value| bounded_error(value)),
+            phase,
+            reason: reason.map(|value| {
+                let end = value.len().min(MAX_REASON_BYTES);
+                let mut boundary = end;
+                while !value.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                value[..boundary].to_string()
+            }),
+            authorization: "root_only_uds",
+        });
     }
 
     pub(crate) async fn status(&self) -> MaintenanceState {
         self.state.read().await.clone()
+    }
+
+    pub(crate) async fn audited_status(&self) -> MaintenanceState {
+        let state = self.status().await;
+        self.emit_audit(
+            MaintenanceAuditAction::Get,
+            MaintenanceAuditOutcome::Success,
+            state.operation_id.as_deref(),
+            state.phase.clone(),
+            state.last_error.as_deref(),
+        );
+        state
+    }
+
+    pub(crate) async fn audit_failure(
+        &self,
+        action: MaintenanceAuditAction,
+        operation_id: Option<&str>,
+        reason: Option<&str>,
+    ) {
+        let phase = self.state.read().await.phase.clone();
+        self.emit_audit(
+            action,
+            MaintenanceAuditOutcome::Failure,
+            operation_id,
+            phase,
+            reason,
+        );
     }
 
     pub(crate) async fn is_active(&self) -> bool {
@@ -772,52 +1105,66 @@ impl MaintenanceCoordinator {
     }
 
     pub(crate) async fn recover_before_reconciliation(&self) -> Result<(), String> {
-        let replay = self.wal.replay();
-        let mut recovered = replay.maintenance.state;
-        if replay.maintenance.requires_bypass || replay.maintenance_failures != 0 {
-            let authority = self
-                .control_plane
-                .mint_managed_maintenance_authority()
-                .await
-                .map_err(|error| format!("maintenance startup authority: {}", error))?;
-            if let Err(error) = self
-                .control_plane
-                .set_acl_maintenance_bypass(&authority, true)
-                .await
-            {
-                recovered.phase = MaintenancePhase::MaintenanceBypass;
+        let _transaction = self.transaction_lock.clone().write_owned().await;
+        let replay = self.store.load();
+        let mut recovered = replay.state;
+        if recovered.is_active() || replay.pending_transition.is_some() || replay.failures != 0 {
+            recovered.phase = MaintenancePhase::MaintenanceBypass;
+            *self.state.write().await = recovered.clone();
+            *self.pending_transition.write().await = replay.pending_transition;
+            *self.terminal_action.write().await = replay.terminal_action;
+            self.blocked.store(true, Ordering::Release);
+            if let Err(error) = self.gate.set_bypass_verified(true).await {
                 recovered.last_progress_at_ms = now_ms();
                 recovered.last_error = Some(bounded_error(format!(
                     "maintenance_startup_gate_failed:{}",
                     error
                 )));
                 *self.state.write().await = recovered;
-                self.blocked.store(true, Ordering::Release);
                 return Err(format!("force maintenance bypass before reconciliation: {}", error));
             }
         }
-        if replay.maintenance_failures != 0 {
+        if replay.failures != 0 {
             recovered.last_error = Some(bounded_error(format!(
                 "maintenance_wal_replay_failures:{}",
-                replay.maintenance_failures
+                replay.failures
             )));
             *self.state.write().await = recovered;
             self.blocked.store(true, Ordering::Release);
             return Err(format!(
                 "maintenance WAL replay reported {} failure(s)",
-                replay.maintenance_failures
+                replay.failures
             ));
+        }
+        if replay.pending_transition == Some(MaintenancePendingTransition::Enter) {
+            recovered.phase = MaintenancePhase::MaintenanceBypass;
+            recovered.last_progress_at_ms = now_ms();
+            recovered.last_error = None;
+            if let Err(error) = self
+                .store
+                .append(MaintenanceWalRecord::enter_commit_state(recovered.clone()))
+            {
+                recovered.last_error = Some(bounded_error(format!(
+                    "maintenance_startup_commit_failed:{}",
+                    error
+                )));
+                *self.state.write().await = recovered;
+                self.blocked.store(true, Ordering::Release);
+                return Err(format!("commit recovered maintenance enter: {}", error));
+            }
+            *self.pending_transition.write().await = None;
         }
         *self.state.write().await = recovered;
         self.blocked.store(false, Ordering::Release);
         Ok(())
     }
 
-    pub(crate) async fn admit_writer(
+    pub(crate) async fn acquire_writer(
         &self,
         writer: MaintenanceWriter,
         operation_id: Option<&str>,
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<MaintenanceWriterLease, MaintenanceError> {
+        let guard = self.transaction_lock.clone().read_owned().await;
         if self.blocked.load(Ordering::Acquire) {
             return Err(MaintenanceError::conflict(
                 "maintenance_recovery_blocked",
@@ -825,21 +1172,90 @@ impl MaintenanceCoordinator {
             ));
         }
         let state = self.state.read().await;
-        admit_maintenance_writer(&*state, writer, operation_id)
+        admit_maintenance_writer(&*state, writer, operation_id)?;
+        Ok(MaintenanceWriterLease { _guard: guard })
     }
 
+    pub(crate) async fn admit_writer(
+        &self,
+        writer: MaintenanceWriter,
+        operation_id: Option<&str>,
+    ) -> Result<(), MaintenanceError> {
+        self.acquire_writer(writer, operation_id).await.map(drop)
+    }
+
+    pub(crate) async fn begin_transaction(&self) -> MaintenanceTransactionLease {
+        MaintenanceTransactionLease {
+            _guard: self.transaction_lock.clone().write_owned().await,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn enter(
         &self,
         request: MaintenanceEnterRequest,
         convergence: MaintenanceConvergence,
     ) -> Result<(MaintenanceDisposition, MaintenanceState), MaintenanceError> {
-        if self.blocked.load(Ordering::Acquire) {
-            return Err(MaintenanceError::conflict(
-                "maintenance_recovery_blocked",
-                "maintenance recovery must be resolved before enter",
-            ));
-        }
+        let transaction = self.begin_transaction().await;
+        self.enter_with_transaction(transaction, request, convergence)
+            .await
+    }
+
+    pub(crate) async fn enter_with_transaction(
+        &self,
+        _transaction: MaintenanceTransactionLease,
+        request: MaintenanceEnterRequest,
+        convergence: MaintenanceConvergence,
+    ) -> Result<(MaintenanceDisposition, MaintenanceState), MaintenanceError> {
         let current = self.state.read().await.clone();
+        self.emit_audit(
+            MaintenanceAuditAction::Enter,
+            MaintenanceAuditOutcome::Attempt,
+            Some(&request.operation_id),
+            current.phase.clone(),
+            Some(&request.reason),
+        );
+        if self.blocked.load(Ordering::Acquire) {
+            let same_identity = current.operation_id.as_deref() == Some(&request.operation_id)
+                && current.active_domains == request.domains
+                && current.expected_generation == request.expected_applied_generation
+                && current.expected_desired_hash == request.expected_desired_hash;
+            if !same_identity {
+                return Err(MaintenanceError::conflict(
+                    "maintenance_recovery_blocked",
+                    "maintenance recovery must be resolved before enter",
+                ));
+            }
+            if let Err(error) = self.gate.set_bypass_verified(true).await {
+                let mut failed = current;
+                failed.last_error = Some(bounded_error(&error));
+                *self.state.write().await = failed;
+                return Err(MaintenanceError::conflict(
+                    "maintenance_authority_unavailable",
+                    error,
+                ));
+            }
+            let mut repaired = current;
+            repaired.phase = MaintenancePhase::MaintenanceBypass;
+            repaired.last_progress_at_ms = now_ms();
+            repaired.last_error = None;
+            self.store
+                .append(MaintenanceWalRecord::enter_commit_state(repaired.clone()))
+                .map_err(|error| {
+                    MaintenanceError::internal("maintenance_wal_commit_failed", error)
+                })?;
+            *self.state.write().await = repaired.clone();
+            *self.pending_transition.write().await = None;
+            self.blocked.store(false, Ordering::Release);
+            self.emit_audit(
+                MaintenanceAuditAction::Enter,
+                MaintenanceAuditOutcome::Success,
+                repaired.operation_id.as_deref(),
+                repaired.phase.clone(),
+                Some(&request.reason),
+            );
+            return Ok((MaintenanceDisposition::Mutate, repaired));
+        }
         let mut machine = MaintenanceStateMachine::with_state(current);
         let plan = machine.plan_enter(&request, &convergence, now_ms())?;
         if plan.disposition == MaintenanceDisposition::Idempotent {
@@ -849,31 +1265,31 @@ impl MaintenanceCoordinator {
             .next_state
             .expect("mutating maintenance enter plan carries state");
 
-        let authority = self
-            .control_plane
-            .mint_managed_maintenance_authority()
-            .await
-            .map_err(|error| {
-                MaintenanceError::conflict("maintenance_authority_unavailable", error)
-            })?;
-        self.wal
-            .append_maintenance_record(MaintenanceWalRecord::enter_intent_state(
-                preparing.clone(),
-            ))
+        self.gate.verify_authority().await.map_err(|error| {
+            MaintenanceError::conflict("maintenance_authority_unavailable", error)
+        })?;
+
+        self.store
+            .append(MaintenanceWalRecord::enter_intent_state(preparing.clone()))
             .map_err(|error| MaintenanceError::internal("maintenance_wal_intent_failed", error))?;
+        *self.pending_transition.write().await = Some(MaintenancePendingTransition::Enter);
         *self.state.write().await = preparing.clone();
 
-        if let Err(error) = self
-            .control_plane
-            .set_acl_maintenance_bypass(&authority, true)
-            .await
-        {
+        if let Err(error) = self.gate.set_bypass_verified(true).await {
             machine.record_enter_failure(
                 preparing,
                 format!("gate_readback_failed:{}", error),
                 now_ms(),
             );
             *self.state.write().await = machine.state().clone();
+            self.blocked.store(true, Ordering::Release);
+            self.emit_audit(
+                MaintenanceAuditAction::Enter,
+                MaintenanceAuditOutcome::Failure,
+                Some(&request.operation_id),
+                machine.state().phase.clone(),
+                Some(&error),
+            );
             return Err(MaintenanceError::internal(
                 "maintenance_gate_enable_failed",
                 error,
@@ -884,17 +1300,26 @@ impl MaintenanceCoordinator {
         let mut active = machine.state().clone();
         active.last_progress_at_ms = now_ms();
         if let Err(error) = self
-            .wal
-            .append_maintenance_record(MaintenanceWalRecord::enter_commit_state(active.clone()))
+            .store
+            .append(MaintenanceWalRecord::enter_commit_state(active.clone()))
         {
             active.last_error = Some(bounded_error(format!("wal_commit_failed:{}", error)));
             *self.state.write().await = active;
+            self.blocked.store(true, Ordering::Release);
             return Err(MaintenanceError::internal(
                 "maintenance_wal_commit_failed",
                 error,
             ));
         }
         *self.state.write().await = active.clone();
+        *self.pending_transition.write().await = None;
+        self.emit_audit(
+            MaintenanceAuditAction::Enter,
+            MaintenanceAuditOutcome::Success,
+            active.operation_id.as_deref(),
+            active.phase.clone(),
+            Some(&request.reason),
+        );
         Ok((MaintenanceDisposition::Mutate, active))
     }
 
@@ -915,15 +1340,26 @@ impl MaintenanceCoordinator {
         state.applied_desired_hash = desired_hash;
         state.last_progress_at_ms = now_ms();
         state.last_error = None;
-        self.wal.append_maintenance_record(
-            MaintenanceWalRecord::progress_commit_state(state.clone()),
-        )?;
+        self.store
+            .append(MaintenanceWalRecord::progress_commit_state(state.clone()))?;
         *self.state.write().await = state;
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn exit(
         &self,
+        request: MaintenanceExitRequest,
+        convergence: MaintenanceConvergence,
+    ) -> Result<(MaintenanceDisposition, MaintenanceState), MaintenanceError> {
+        let transaction = self.begin_transaction().await;
+        self.exit_with_transaction(transaction, request, convergence)
+            .await
+    }
+
+    pub(crate) async fn exit_with_transaction(
+        &self,
+        _transaction: MaintenanceTransactionLease,
         request: MaintenanceExitRequest,
         convergence: MaintenanceConvergence,
     ) -> Result<(MaintenanceDisposition, MaintenanceState), MaintenanceError> {
@@ -934,6 +1370,13 @@ impl MaintenanceCoordinator {
             ));
         }
         let current = self.state.read().await.clone();
+        self.emit_audit(
+            MaintenanceAuditAction::Exit,
+            MaintenanceAuditOutcome::Attempt,
+            Some(&request.operation_id),
+            current.phase.clone(),
+            None,
+        );
         let mut machine = MaintenanceStateMachine::with_state(current.clone());
         let plan = machine.plan_exit(&request, &convergence, now_ms())?;
         if plan.disposition == MaintenanceDisposition::Idempotent {
@@ -942,29 +1385,27 @@ impl MaintenanceCoordinator {
         let verifying = plan
             .next_state
             .expect("mutating maintenance exit plan carries state");
-        let authority = self
-            .control_plane
-            .mint_managed_maintenance_authority()
-            .await
-            .map_err(|error| {
-                MaintenanceError::conflict("maintenance_authority_unavailable", error)
-            })?;
-        self.wal
-            .append_maintenance_record(MaintenanceWalRecord::exit_intent_state(
-                verifying.clone(),
-            ))
-            .map_err(|error| MaintenanceError::internal("maintenance_wal_intent_failed", error))?;
+        if *self.pending_transition.read().await != Some(MaintenancePendingTransition::Exit) {
+            self.store
+                .append(MaintenanceWalRecord::exit_intent_state(verifying.clone()))
+                .map_err(|error| {
+                    MaintenanceError::internal("maintenance_wal_intent_failed", error)
+                })?;
+            *self.pending_transition.write().await = Some(MaintenancePendingTransition::Exit);
+        }
         *self.state.write().await = verifying.clone();
-        if let Err(error) = self
-            .control_plane
-            .set_acl_maintenance_bypass(&authority, false)
-            .await
-        {
+        if let Err(error) = self.gate.set_bypass_verified(false).await {
+            let restore = self.gate.set_bypass_verified(true).await;
             let mut failed = current;
             failed.phase = MaintenancePhase::MaintenanceBypass;
             failed.last_progress_at_ms = now_ms();
-            failed.last_error = Some(bounded_error(format!("exit_gate_failed:{}", error)));
+            failed.last_error = Some(bounded_error(format!(
+                "exit_gate_failed:{};bypass_restore:{:?}", error, restore
+            )));
             *self.state.write().await = failed;
+            if restore.is_err() {
+                self.blocked.store(true, Ordering::Release);
+            }
             return Err(MaintenanceError::internal(
                 "maintenance_gate_disable_failed",
                 error,
@@ -974,13 +1415,11 @@ impl MaintenanceCoordinator {
         machine.commit_exit(verifying);
         let mut committed = machine.state().clone();
         committed.last_progress_at_ms = now_ms();
-        if let Err(error) = self.wal.append_maintenance_record(
-            MaintenanceWalRecord::exit_commit_state(committed.clone()),
-        ) {
-            let restore = self
-                .control_plane
-                .set_acl_maintenance_bypass(&authority, true)
-                .await;
+        if let Err(error) = self
+            .store
+            .append(MaintenanceWalRecord::exit_commit_state(committed.clone()))
+        {
+            let restore = self.gate.set_bypass_verified(true).await;
             let mut failed = current;
             failed.phase = MaintenancePhase::MaintenanceBypass;
             failed.last_progress_at_ms = now_ms();
@@ -989,17 +1428,41 @@ impl MaintenanceCoordinator {
                 error, restore
             )));
             *self.state.write().await = failed;
+            if restore.is_err() {
+                self.blocked.store(true, Ordering::Release);
+            }
             return Err(MaintenanceError::internal(
                 "maintenance_wal_commit_failed",
                 error,
             ));
         }
         *self.state.write().await = committed.clone();
+        *self.pending_transition.write().await = None;
+        *self.terminal_action.write().await = Some(MaintenanceTerminalAction::Exit);
+        self.emit_audit(
+            MaintenanceAuditAction::Exit,
+            MaintenanceAuditOutcome::Success,
+            committed.operation_id.as_deref(),
+            committed.phase.clone(),
+            None,
+        );
         Ok((MaintenanceDisposition::Mutate, committed))
     }
 
+    #[cfg(test)]
     pub(crate) async fn abort(
         &self,
+        request: MaintenanceAbortRequest,
+        convergence: MaintenanceConvergence,
+    ) -> Result<(MaintenanceDisposition, MaintenanceState), MaintenanceError> {
+        let transaction = self.begin_transaction().await;
+        self.abort_with_transaction(transaction, request, convergence)
+            .await
+    }
+
+    pub(crate) async fn abort_with_transaction(
+        &self,
+        _transaction: MaintenanceTransactionLease,
         request: MaintenanceAbortRequest,
         convergence: MaintenanceConvergence,
     ) -> Result<(MaintenanceDisposition, MaintenanceState), MaintenanceError> {
@@ -1010,33 +1473,46 @@ impl MaintenanceCoordinator {
             ));
         }
         let current = self.state.read().await.clone();
+        self.emit_audit(
+            MaintenanceAuditAction::Abort,
+            MaintenanceAuditOutcome::Attempt,
+            Some(&request.operation_id),
+            current.phase.clone(),
+            request.error.as_deref(),
+        );
+        if current.phase == MaintenancePhase::Committed
+            && current.operation_id.as_deref() == Some(&request.operation_id)
+            && *self.terminal_action.read().await == Some(MaintenanceTerminalAction::Abort)
+        {
+            return Ok((MaintenanceDisposition::Idempotent, current));
+        }
         let mut machine = MaintenanceStateMachine::with_state(current.clone());
         let plan = machine.plan_abort(&request, &convergence, now_ms())?;
         let mut next = plan
             .next_state
             .expect("mutating maintenance abort plan carries state");
-        self.wal
-            .append_maintenance_record(MaintenanceWalRecord::abort_intent_state(next.clone()))
-            .map_err(|error| MaintenanceError::internal("maintenance_wal_intent_failed", error))?;
+        if *self.pending_transition.read().await != Some(MaintenancePendingTransition::Abort) {
+            self.store
+                .append(MaintenanceWalRecord::abort_intent_state(next.clone()))
+                .map_err(|error| {
+                    MaintenanceError::internal("maintenance_wal_intent_failed", error)
+                })?;
+            *self.pending_transition.write().await = Some(MaintenancePendingTransition::Abort);
+        }
         *self.state.write().await = next.clone();
 
         if next.phase == MaintenancePhase::Verifying {
-            let authority = self
-                .control_plane
-                .mint_managed_maintenance_authority()
-                .await
-                .map_err(|error| {
-                    MaintenanceError::conflict("maintenance_authority_unavailable", error)
-                })?;
-            if let Err(error) = self
-                .control_plane
-                .set_acl_maintenance_bypass(&authority, false)
-                .await
-            {
+            if let Err(error) = self.gate.set_bypass_verified(false).await {
+                let restore = self.gate.set_bypass_verified(true).await;
                 next = current;
                 next.phase = MaintenancePhase::MaintenanceBypass;
-                next.last_error = Some(bounded_error(format!("abort_gate_failed:{}", error)));
+                next.last_error = Some(bounded_error(format!(
+                    "abort_gate_failed:{};bypass_restore:{:?}", error, restore
+                )));
                 *self.state.write().await = next;
+                if restore.is_err() {
+                    self.blocked.store(true, Ordering::Release);
+                }
                 return Err(MaintenanceError::internal(
                     "maintenance_gate_disable_failed",
                     error,
@@ -1048,17 +1524,11 @@ impl MaintenanceCoordinator {
             next.phase = MaintenancePhase::MaintenanceBypass;
         }
         if let Err(error) = self
-            .wal
-            .append_maintenance_record(MaintenanceWalRecord::abort_commit_state(next.clone()))
+            .store
+            .append(MaintenanceWalRecord::abort_commit_state(next.clone()))
         {
             let restore = if next.phase == MaintenancePhase::Committed {
-                match self.control_plane.mint_managed_maintenance_authority().await {
-                    Ok(authority) => self
-                        .control_plane
-                        .set_acl_maintenance_bypass(&authority, true)
-                        .await,
-                    Err(authority_error) => Err(authority_error),
-                }
+                self.gate.set_bypass_verified(true).await
             } else {
                 Ok(())
             };
@@ -1070,6 +1540,9 @@ impl MaintenanceCoordinator {
                 error, restore
             )));
             *self.state.write().await = failed;
+            if restore.is_err() {
+                self.blocked.store(true, Ordering::Release);
+            }
             return Err(MaintenanceError::internal(
                 "maintenance_wal_commit_failed",
                 error,
@@ -1077,10 +1550,22 @@ impl MaintenanceCoordinator {
         }
         machine.commit_abort(next.clone());
         *self.state.write().await = machine.state().clone();
+        *self.pending_transition.write().await = None;
+        if next.phase == MaintenancePhase::Committed {
+            *self.terminal_action.write().await = Some(MaintenanceTerminalAction::Abort);
+        }
+        self.emit_audit(
+            MaintenanceAuditAction::Abort,
+            MaintenanceAuditOutcome::Success,
+            next.operation_id.as_deref(),
+            next.phase.clone(),
+            request.error.as_deref(),
+        );
         Ok((MaintenanceDisposition::Mutate, next))
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AdminSocketFacts {
     pub(crate) parent_is_directory: bool,
@@ -1093,6 +1578,7 @@ pub(crate) struct AdminSocketFacts {
     pub(crate) socket_mode: u32,
 }
 
+#[cfg(test)]
 pub(crate) fn validate_admin_socket_facts(facts: &AdminSocketFacts) -> Result<(), String> {
     if !facts.parent_is_directory
         || facts.parent_is_symlink
@@ -1292,11 +1778,18 @@ mod tests {
 
     fn convergence() -> MaintenanceConvergence {
         MaintenanceConvergence {
+            accepted_generation: 41,
+            accepted_desired_hash: Some("sha256:host-41".to_string()),
             applied_generation: 41,
             applied_desired_hash: Some("sha256:host-41".to_string()),
             pending_generation: None,
-            managed_port_count: 2,
-            ready_enforce_port_count: 2,
+            managed_ports: BTreeSet::from(["port-a".to_string(), "port-b".to_string()]),
+            ready_enforce_ports: BTreeSet::from([
+                "port-a".to_string(),
+                "port-b".to_string(),
+            ]),
+            wal_healthy: true,
+            recovery_healthy: true,
         }
     }
 
@@ -1430,7 +1923,7 @@ mod tests {
             expected_applied_desired_hash: Some("sha256:host-41".to_string()),
         };
         let mut incomplete = convergence();
-        incomplete.ready_enforce_port_count = 1;
+        incomplete.ready_enforce_ports.remove("port-b");
         assert_eq!(
             machine.plan_exit(&request, &incomplete, 2_000).unwrap_err().code,
             "maintenance_convergence_incomplete"

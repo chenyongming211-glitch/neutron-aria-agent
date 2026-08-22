@@ -45,8 +45,8 @@ use crate::fault_injection;
 use crate::neutron_acl_ip::{acl_protocol, AclCidr, IpFamily};
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::neutron_maintenance::{
-    MaintenanceConvergence, MaintenanceCoordinator, MaintenanceDisposition, MaintenanceError,
-    MaintenanceWriter,
+    MaintenanceAuditAction, MaintenanceConvergence, MaintenanceCoordinator,
+    MaintenanceDisposition, MaintenanceError, MaintenanceWriter, MaintenanceWriterLease,
 };
 use crate::tap_registry::{RuntimeReconcileResult, TapLifecycleEvent, TapRegistry};
 
@@ -628,9 +628,14 @@ impl NeutronApiState {
     }
 
     async fn restore_neutron_authorities(&self) {
-        if self.maintenance.is_active().await {
-            return;
-        }
+        let _maintenance_lease = match self
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(_) => return,
+        };
         let (ports, generation) = {
             let runtime = self.runtime.read().await;
             (
@@ -657,9 +662,14 @@ impl NeutronApiState {
     }
 
     async fn reconcile_committed_runtime(&self) {
-        if self.maintenance.is_active().await {
-            return;
-        }
+        let _maintenance_lease = match self
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(_) => return,
+        };
         let _guard = self.apply_lock.lock().await;
         let (ports, generation, desired_hash) = {
             let runtime = self.runtime.read().await;
@@ -812,9 +822,14 @@ impl NeutronApiState {
     }
 
     async fn recover_incomplete_wal_intent(&self) {
-        if self.maintenance.is_active().await {
-            return;
-        }
+        let _maintenance_lease = match self
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(_) => return,
+        };
         let Some(intent) = self.pending_recovery.clone() else {
             return;
         };
@@ -1063,9 +1078,14 @@ impl NeutronApiState {
     }
 
     async fn project_tc_acl_health(&self) {
-        if self.maintenance.is_active().await {
-            return;
-        }
+        let _maintenance_lease = match self
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Periodic, None)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(_) => return,
+        };
         let _guard = self.apply_lock.lock().await;
         let health = self.control_plane.list_instance_runtime_health().await;
         let mut next_runtime = {
@@ -1084,9 +1104,14 @@ impl NeutronApiState {
     }
 
     async fn handle_tap_lifecycle_event(&self, event: TapLifecycleEvent) {
-        if self.maintenance.is_active().await {
-            return;
-        }
+        let _maintenance_lease = match self
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(_) => return,
+        };
         match event {
             TapLifecycleEvent::Deleted { ifname, ifindex } => {
                 let _guard = self.apply_lock.lock().await;
@@ -1564,6 +1589,8 @@ fn acl_runtime_schema_blocked_status(reason: String) -> NeutronStatusV1Response 
         authority_state: reason,
         maintenance_phase: None,
         maintenance_operation_id: None,
+        maintenance_reason: None,
+        maintenance_action: None,
         managed_ports: Vec::new(),
         port_statuses: Vec::new(),
         active_instances: Vec::new(),
@@ -1631,7 +1658,7 @@ pub(crate) fn build_acl_runtime_schema_blocked_router(reason: String) -> Router 
 }
 
 fn maintenance_convergence(runtime: &NeutronRuntimeState) -> MaintenanceConvergence {
-    let ready_enforce_port_count = runtime
+    let ready_enforce_ports = runtime
         .ports
         .iter()
         .filter(|(port_id, port)| {
@@ -1652,13 +1679,20 @@ fn maintenance_convergence(runtime: &NeutronRuntimeState) -> MaintenanceConverge
                         && domain.effective_action.as_deref() == Some("enforce")
                 })
         })
-        .count();
+        .map(|(port_id, _)| port_id.clone())
+        .collect();
     MaintenanceConvergence {
+        accepted_generation: runtime.accepted_generation,
+        accepted_desired_hash: runtime.desired_hash.clone(),
         applied_generation: runtime.applied_generation,
         applied_desired_hash: runtime.applied_desired_hash.clone(),
         pending_generation: runtime.pending_generation,
-        managed_port_count: runtime.ports.len(),
-        ready_enforce_port_count,
+        managed_ports: runtime.ports.keys().cloned().collect(),
+        ready_enforce_ports,
+        wal_healthy: runtime.wal_replay_failures == 0,
+        recovery_healthy: runtime.recovery_cause.is_none()
+            && !runtime.authority_state.contains("blocked")
+            && !runtime.authority_state.contains("failed"),
     }
 }
 
@@ -1679,11 +1713,17 @@ async fn post_maintenance_enter(
     State(state): State<NeutronApiState>,
     Json(request): Json<MaintenanceEnterRequest>,
 ) -> axum::response::Response {
-    let _guard = state.apply_lock.lock().await;
+    let audit_operation_id = request.operation_id.clone();
+    let audit_reason = request.reason.clone();
+    let transaction = state.maintenance.begin_transaction().await;
     let runtime = state.runtime.read().await;
     let convergence = maintenance_convergence(&*runtime);
     drop(runtime);
-    match state.maintenance.enter(request, convergence).await {
+    match state
+        .maintenance
+        .enter_with_transaction(transaction, request, convergence)
+        .await
+    {
         Ok((disposition, maintenance)) => {
             let accepted = disposition == MaintenanceDisposition::Mutate;
             let status = if accepted {
@@ -1701,14 +1741,24 @@ async fn post_maintenance_enter(
             )
                 .into_response()
         }
-        Err(error) => maintenance_error_response(error),
+        Err(error) => {
+            state
+                .maintenance
+                .audit_failure(
+                    MaintenanceAuditAction::Enter,
+                    Some(&audit_operation_id),
+                    Some(&audit_reason),
+                )
+                .await;
+            maintenance_error_response(error)
+        }
     }
 }
 
 async fn get_maintenance_status(
     State(state): State<NeutronApiState>,
 ) -> impl IntoResponse {
-    let maintenance = state.maintenance.status().await;
+    let maintenance = state.maintenance.audited_status().await;
     Json(MaintenanceResponse {
         status: if state.maintenance.is_blocked() {
             "blocked"
@@ -1729,18 +1779,33 @@ async fn post_maintenance_exit(
     State(state): State<NeutronApiState>,
     Json(request): Json<MaintenanceExitRequest>,
 ) -> axum::response::Response {
-    let _guard = state.apply_lock.lock().await;
+    let audit_operation_id = request.operation_id.clone();
+    let transaction = state.maintenance.begin_transaction().await;
     let runtime = state.runtime.read().await;
     let convergence = maintenance_convergence(&*runtime);
     drop(runtime);
-    match state.maintenance.exit(request, convergence).await {
+    match state
+        .maintenance
+        .exit_with_transaction(transaction, request, convergence)
+        .await
+    {
         Ok((disposition, maintenance)) => Json(MaintenanceResponse {
             status: "committed".to_string(),
             accepted: disposition == MaintenanceDisposition::Mutate,
             state: maintenance,
         })
         .into_response(),
-        Err(error) => maintenance_error_response(error),
+        Err(error) => {
+            state
+                .maintenance
+                .audit_failure(
+                    MaintenanceAuditAction::Exit,
+                    Some(&audit_operation_id),
+                    Some(&error.details),
+                )
+                .await;
+            maintenance_error_response(error)
+        }
     }
 }
 
@@ -1748,11 +1813,17 @@ async fn post_maintenance_abort(
     State(state): State<NeutronApiState>,
     Json(request): Json<MaintenanceAbortRequest>,
 ) -> axum::response::Response {
-    let _guard = state.apply_lock.lock().await;
+    let audit_operation_id = request.operation_id.clone();
+    let audit_reason = request.error.clone();
+    let transaction = state.maintenance.begin_transaction().await;
     let runtime = state.runtime.read().await;
     let convergence = maintenance_convergence(&*runtime);
     drop(runtime);
-    match state.maintenance.abort(request, convergence).await {
+    match state
+        .maintenance
+        .abort_with_transaction(transaction, request, convergence)
+        .await
+    {
         Ok((disposition, maintenance)) => Json(MaintenanceResponse {
             status: if maintenance.is_active() {
                 "maintenance_bypass"
@@ -1764,7 +1835,19 @@ async fn post_maintenance_abort(
             state: maintenance,
         })
         .into_response(),
-        Err(error) => maintenance_error_response(error),
+        Err(error) => {
+            state
+                .maintenance
+                .audit_failure(
+                    MaintenanceAuditAction::Abort,
+                    Some(&audit_operation_id),
+                    audit_reason
+                        .as_deref()
+                        .or(Some(error.details.as_str())),
+                )
+                .await;
+            maintenance_error_response(error)
+        }
     }
 }
 
@@ -1896,13 +1979,14 @@ async fn post_neutron_recover_pending(
     State(state): State<NeutronApiState>,
     Json(request): Json<NeutronRecoverPendingRequest>,
 ) -> impl IntoResponse {
-    if let Err(error) = state
+    let _maintenance_lease = match state
         .maintenance
-        .admit_writer(MaintenanceWriter::Direct, None)
+        .acquire_writer(MaintenanceWriter::Direct, None)
         .await
     {
-        return maintenance_error_response(error);
-    }
+        Ok(lease) => lease,
+        Err(error) => return maintenance_error_response(error),
+    };
     match recover_pending_snapshot(state, request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => (
@@ -3021,17 +3105,29 @@ async fn build_neutron_status_response(
 
     let maintenance_fenced = state.maintenance.is_active().await;
     let maintenance = state.maintenance.status().await;
-    let maintenance_phase = maintenance_fenced.then_some(maintenance.phase);
+    let maintenance_phase = maintenance_fenced.then_some(maintenance.phase.clone());
     let maintenance_operation_id = maintenance_fenced
-        .then(|| maintenance.operation_id)
+        .then(|| maintenance.operation_id.clone())
         .flatten();
     let active_instances = state.registry.list().await;
     let mut response = NeutronStatusV1Response {
         status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
         status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
-        transaction_state: projection.transaction_state,
-        overall_readiness: projection.overall_readiness,
-        required_action: projection.required_action,
+        transaction_state: if maintenance_fenced {
+            NeutronStatusTransactionState::Blocked
+        } else {
+            projection.transaction_state
+        },
+        overall_readiness: if maintenance_fenced {
+            NeutronStatusOverallReadiness::Degraded
+        } else {
+            projection.overall_readiness
+        },
+        required_action: if maintenance_fenced {
+            NeutronStatusRequiredAction::CompleteOrRepairMaintenance
+        } else {
+            projection.required_action
+        },
         recovery_cause: projection.recovery_cause,
         last_classified_generation: projection.last_classified_generation,
         generation,
@@ -3045,6 +3141,10 @@ async fn build_neutron_status_response(
         authority_state,
         maintenance_phase,
         maintenance_operation_id,
+        maintenance_reason: maintenance_fenced
+            .then_some("planned_upgrade_bypass".to_string()),
+        maintenance_action: maintenance_fenced
+            .then_some("complete_or_repair_maintenance".to_string()),
         managed_ports,
         port_statuses: projection.port_statuses,
         active_instances,
@@ -3156,6 +3256,7 @@ async fn put_neutron_port_snapshot(
 
 #[derive(Debug)]
 struct PreparedSnapshotApply {
+    _maintenance_lease: MaintenanceWriterLease,
     _apply_guard: OwnedMutexGuard<()>,
     intent: PendingNeutronIntent,
     transaction: SnapshotApplyTransaction,
@@ -3391,16 +3492,11 @@ async fn accept_neutron_snapshot_submit(
 
     let mut lock_wait_ms = 0;
     let mut admission_attempt = 0;
-    let (apply_guard, local_inventory, runtime_before_apply) = loop {
+    let (maintenance_lease, apply_guard, local_inventory, runtime_before_apply) = loop {
         admission_attempt += 1;
         let lock_started = Instant::now();
         let observation_guard = state.apply_lock.clone().lock_owned().await;
         lock_wait_ms += elapsed_ms(lock_started);
-        state
-            .maintenance
-            .admit_writer(writer, snapshot.maintenance_operation_id.as_deref())
-            .await
-            .map_err(maintenance_snapshot_error)?;
         let observed_runtime = state.runtime.read().await.clone();
         match pending_snapshot_submit_disposition(
             &observed_runtime,
@@ -3425,6 +3521,11 @@ async fn accept_neutron_snapshot_submit(
 
         let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge).await;
 
+        let maintenance_lease = state
+            .maintenance
+            .acquire_writer(writer, snapshot.maintenance_operation_id.as_deref())
+            .await
+            .map_err(maintenance_snapshot_error)?;
         let lock_started = Instant::now();
         let apply_guard = state.apply_lock.clone().lock_owned().await;
         lock_wait_ms += elapsed_ms(lock_started);
@@ -3440,9 +3541,15 @@ async fn accept_neutron_snapshot_submit(
             ) {
                 validate_durable_partial_retry_barrier(state, &runtime_before_apply)?;
             }
-            break (apply_guard, local_inventory, runtime_before_apply);
+            break (
+                maintenance_lease,
+                apply_guard,
+                local_inventory,
+                runtime_before_apply,
+            );
         }
         drop(apply_guard);
+        drop(maintenance_lease);
         if admission_attempt >= SNAPSHOT_ADMISSION_REVALIDATION_ATTEMPTS {
             return Err(SnapshotApplyError {
                 status: StatusCode::CONFLICT,
@@ -3553,6 +3660,7 @@ async fn accept_neutron_snapshot_submit(
     Ok(SnapshotSubmitDecision {
         response,
         prepared: Some(PreparedSnapshotApply {
+            _maintenance_lease: maintenance_lease,
             _apply_guard: apply_guard,
             intent,
             transaction,
@@ -3778,6 +3886,7 @@ async fn apply_neutron_snapshot_for_scope(
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let profile_started = Instant::now();
     let PreparedSnapshotApply {
+        _maintenance_lease,
         _apply_guard,
         intent,
         transaction,
@@ -5750,13 +5859,13 @@ async fn apply_delete_neutron_port(
     state: NeutronApiState,
     port_id: String,
 ) -> (StatusCode, NeutronDeleteResponse) {
-    let _guard = state.apply_lock.lock().await;
-    if let Err(error) = state
+    let _maintenance_lease = match state
         .maintenance
-        .admit_writer(MaintenanceWriter::Delete, None)
+        .acquire_writer(MaintenanceWriter::Delete, None)
         .await
     {
-        return (
+        Ok(lease) => lease,
+        Err(error) => return (
             StatusCode::CONFLICT,
             NeutronDeleteResponse {
                 port_id,
@@ -5765,8 +5874,9 @@ async fn apply_delete_neutron_port(
                 status: "blocked".to_string(),
                 error: Some(error.code.to_string()),
             },
-        );
-    }
+        ),
+    };
+    let _guard = state.apply_lock.lock().await;
     let previous = {
         let runtime = state.runtime.read().await;
         runtime.clone()
@@ -9421,6 +9531,8 @@ mod tests {
             },
             maintenance_phase: None,
             maintenance_operation_id: None,
+            maintenance_reason: None,
+            maintenance_action: None,
             managed_ports: runtime.ports.values().cloned().collect(),
             port_statuses: projection.port_statuses,
             active_instances: Vec::new(),

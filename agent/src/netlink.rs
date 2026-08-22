@@ -116,13 +116,13 @@ async fn reconcile(
     if mode == LinkMonitorMode::AutoAttach {
         for iface in &existing {
             if !managed.contains(iface) {
-                if maintenance
-                    .admit_writer(MaintenanceWriter::Periodic, None)
+                let _maintenance_lease = match maintenance
+                    .acquire_writer(MaintenanceWriter::Periodic, None)
                     .await
-                    .is_err()
                 {
-                    return;
-                }
+                    Ok(lease) => lease,
+                    Err(_) => return,
+                };
                 info!(instance = %iface, "reconcile detected unmanaged tap");
                 if let Err(e) = registry.link_ready(iface).await {
                     warn!(instance = %iface, error = %e, "reconcile failed to attach interface");
@@ -131,13 +131,13 @@ async fn reconcile(
         }
         for iface in &managed {
             if !existing_set.contains(iface) {
-                if maintenance
-                    .admit_writer(MaintenanceWriter::Periodic, None)
+                let _maintenance_lease = match maintenance
+                    .acquire_writer(MaintenanceWriter::Periodic, None)
                     .await
-                    .is_err()
                 {
-                    return;
-                }
+                    Ok(lease) => lease,
+                    Err(_) => return,
+                };
                 info!(instance = %iface, "reconcile detected disappeared interface");
                 if let Err(e) = registry.link_deleted(iface, None).await {
                     warn!(instance = %iface, error = %e, "reconcile failed to detach interface");
@@ -150,13 +150,13 @@ async fn reconcile(
     let authoritative = registry.neutron_authority_names().await;
     for iface in &managed {
         if authoritative.contains(iface) && !existing_set.contains(iface) {
-            if maintenance
-                .admit_writer(MaintenanceWriter::Periodic, None)
+            let _maintenance_lease = match maintenance
+                .acquire_writer(MaintenanceWriter::Periodic, None)
                 .await
-                .is_err()
             {
-                return;
-            }
+                Ok(lease) => lease,
+                Err(_) => return,
+            };
             let (_, _, active_ifindex) = registry.link_observation_state(iface).await;
             info!(instance = %iface, "managed-only reconcile detected disappeared interface");
             if let Err(e) = registry.link_deleted(iface, active_ifindex).await {
@@ -172,13 +172,13 @@ async fn reconcile(
             (Some(active), Some(observed)) if active != observed
         );
         if !active || identity_changed {
-            if maintenance
-                .admit_writer(MaintenanceWriter::Periodic, None)
+            let _maintenance_lease = match maintenance
+                .acquire_writer(MaintenanceWriter::Periodic, None)
                 .await
-                .is_err()
             {
-                return;
-            }
+                Ok(lease) => lease,
+                Err(_) => return,
+            };
             info!(
                 instance = %iface,
                 active_ifindex = ?active_ifindex,
@@ -206,12 +206,11 @@ pub(crate) async fn monitor(
     let existing = scan_existing_interfaces(&registry).await;
     info!(count = existing.len(), interfaces = ?existing, "initial netlink scan complete");
 
-    if mode == LinkMonitorMode::AutoAttach
-        && maintenance
-            .admit_writer(MaintenanceWriter::Background, None)
-            .await
-            .is_ok()
-    {
+    let startup_lease = maintenance
+        .acquire_writer(MaintenanceWriter::Background, None)
+        .await
+        .ok();
+    if mode == LinkMonitorMode::AutoAttach && startup_lease.is_some() {
         if let Some(pin_path) = registry.base_pin_path.to_str() {
             cleanup_orphaned_pins(pin_path, &existing);
         } else {
@@ -225,7 +224,9 @@ pub(crate) async fn monitor(
                 warn!(instance = %iface, error = %e, "startup attach failed");
             }
         }
-    } else if mode == LinkMonitorMode::ManagedOnly {
+    }
+    drop(startup_lease);
+    if mode == LinkMonitorMode::ManagedOnly {
         reconcile(&registry, mode, &maintenance).await;
     }
 
@@ -254,13 +255,7 @@ pub(crate) async fn monitor(
             msg = messages.next() => {
                 match msg {
                     Some((message, _)) => {
-                        if maintenance
-                            .admit_writer(MaintenanceWriter::Background, None)
-                            .await
-                            .is_ok()
-                        {
-                            handle_netlink_message(&registry, mode, &maintenance, message).await;
-                        }
+                        handle_netlink_message(&registry, mode, &maintenance, message).await;
                     }
                     None => {
                         warn!("netlink stream ended; restarting monitor");
@@ -305,13 +300,13 @@ async fn handle_netlink_message(
                     info!(instance = %name, "received netlink NewLink");
                     // Small delay to let the interface fully initialize
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    if maintenance
-                        .admit_writer(MaintenanceWriter::Background, None)
+                    let _maintenance_lease = match maintenance
+                        .acquire_writer(MaintenanceWriter::Background, None)
                         .await
-                        .is_err()
                     {
-                        return;
-                    }
+                        Ok(lease) => lease,
+                        Err(_) => return,
+                    };
                     if let Err(e) = registry.link_ready(&name).await {
                         warn!(instance = %name, error = %e, "failed to attach interface after NewLink");
                     }
@@ -335,13 +330,13 @@ async fn handle_netlink_message(
                     active,
                     authoritative,
                 ) {
-                    if maintenance
-                        .admit_writer(MaintenanceWriter::Background, None)
+                    let _maintenance_lease = match maintenance
+                        .acquire_writer(MaintenanceWriter::Background, None)
                         .await
-                        .is_err()
                     {
-                        return;
-                    }
+                        Ok(lease) => lease,
+                        Err(_) => return,
+                    };
                     info!(instance = %name, "received netlink DelLink");
                     if let Err(e) = registry.link_deleted(&name, Some(msg.header.index)).await {
                         warn!(instance = %name, error = %e, "failed to detach interface after DelLink");
