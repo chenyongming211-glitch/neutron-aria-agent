@@ -3354,6 +3354,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_maintenance_committed_exit_restores_ordinary_writers_after_restart() {
+        let store = FaultStore::new(active_records("op-exit-writer-restore"));
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            FaultGate::default(),
+            CapturingAudit::default(),
+        );
+        let request = MaintenanceExitRequest {
+            operation_id: "op-exit-writer-restore".to_string(),
+            expected_applied_generation: 41,
+            expected_applied_desired_hash: Some("sha256:host-41".to_string()),
+        };
+
+        let committed = coordinator
+            .exit(request, convergence())
+            .await
+            .expect("a fully converged exit should commit")
+            .1;
+        assert_eq!(committed.phase, MaintenancePhase::Committed);
+        assert!(
+            coordinator
+                .acquire_writer(MaintenanceWriter::Background, None)
+                .await
+                .is_ok(),
+            "committed/enforce must restore ordinary writers in the current process"
+        );
+        assert!(
+            coordinator
+                .prepare_applied_snapshot(None, 42, Some("sha256:host-42".to_string()))
+                .await
+                .expect("committed progress preparation should be an inactive no-op")
+                .is_none()
+        );
+
+        let restarted = coordinator_with_faults(
+            store,
+            FaultGate::default(),
+            CapturingAudit::default(),
+        );
+        assert!(
+            restarted
+                .acquire_writer(MaintenanceWriter::Periodic, None)
+                .await
+                .is_ok(),
+            "replayed committed/enforce must restore ordinary writers after restart"
+        );
+    }
+
+    #[tokio::test]
     async fn neutron_maintenance_exit_intent_supersedes_conservative_abort_identity_atomically() {
         let store = FaultStore::new(active_records("op-abort-to-exit"));
         let gate = FaultGate::default();
