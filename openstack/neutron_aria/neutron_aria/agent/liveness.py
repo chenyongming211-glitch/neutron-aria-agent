@@ -59,7 +59,8 @@ class ServiceLivenessPublisher(object):
             separators=(",", ":"),
             sort_keys=True,
         )
-        if len(encoded.encode("utf-8")) > MAX_LIVENESS_RECORD_BYTES:
+        payload = encoded + "\n"
+        if len(payload.encode("utf-8")) > MAX_LIVENESS_RECORD_BYTES:
             raise LivenessError("service liveness record exceeds size limit")
 
         if not os.path.isdir(self.state_dir):
@@ -71,8 +72,7 @@ class ServiceLivenessPublisher(object):
         try:
             with os.fdopen(fd, "w") as stream:
                 fd = None
-                stream.write(encoded)
-                stream.write("\n")
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.rename(temporary_path, self.path)
