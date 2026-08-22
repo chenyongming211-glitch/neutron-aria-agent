@@ -8658,6 +8658,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn neutron_acl_maintenance_gate_has_no_ovs_tc_or_qdisc_lifecycle_side_effects() {
+        let runtime = include_str!("../../core/src/ebpf_ops/runtime.rs");
+        let setter = runtime
+            .split("pub fn set_acl_maintenance_bypass(")
+            .nth(1)
+            .expect("shared ACL maintenance setter must exist")
+            .split("pub fn update_firewall_config(")
+            .next()
+            .unwrap();
+
+        assert!(setter.contains("FIREWALL_CONFIG"));
+        for forbidden in [
+            "attach_tc_",
+            "detach_tc_",
+            "ensure_fq_qdisc",
+            "setup_fq_qdisc",
+            "cleanup_root_qdisc",
+            "ovs",
+            "OVS",
+        ] {
+            assert!(!setter.contains(forbidden), "forbidden lifecycle call: {forbidden}");
+        }
+    }
+
+    #[test]
     fn tc_health_loss_is_deduplicated_and_never_auto_restores_ready() {
         let ready = RuntimeHealthState {
             acl_ready: true,

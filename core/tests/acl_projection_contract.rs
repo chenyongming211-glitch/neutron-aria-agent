@@ -18,6 +18,127 @@ use aria_core::wal::{apply_wal_entry_for_authority, WalEntry};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+fn source_function<'a>(source: &'a str, signature: &str, next_signature: &str) -> &'a str {
+    source
+        .split(signature)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing source function {signature}"))
+        .split(next_signature)
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn acl_projection_maintenance_gate_precedes_per_tap_lookup_in_both_acl_paths() {
+    let runtime = include_str!("../../ebpf/src/runtime.rs");
+    let conntrack = source_function(
+        runtime,
+        "pub fn conntrack_enabled(tap_id: u32) -> bool {",
+        "pub fn monitoring_enabled(tap_id: u32) -> bool {",
+    );
+    let acl = source_function(
+        runtime,
+        "pub fn acl_enabled(tap_id: u32) -> bool {",
+        "pub fn acl_active_bank(tap_id: u32) -> u8 {",
+    );
+
+    for body in [conntrack, acl] {
+        let gate = body
+            .find("acl_maintenance_bypass()")
+            .expect("ACL and conntrack must consult the shared maintenance gate");
+        let per_tap = body
+            .find("TAP_CONFIG_MAP")
+            .expect("normal per-tap behavior must remain available");
+        assert!(gate < per_tap, "maintenance gate must precede per-tap lookup");
+        assert!(body.contains("return false;"));
+    }
+
+    let gate = source_function(
+        runtime,
+        "fn acl_maintenance_bypass() -> bool {",
+        "pub fn conntrack_enabled(tap_id: u32) -> bool {",
+    );
+    assert!(gate.contains("cfg.acl_maintenance_bypass != 0"));
+    assert!(gate.contains(".unwrap_or(false)"));
+
+    let packet_path = include_str!("../../ebpf/src/lib.rs");
+    let egress = source_function(packet_path, "unsafe fn try_tc_egress(", "unsafe fn try_tc_egress_v4(");
+    let ingress = source_function(packet_path, "unsafe fn try_tc_ingress(", "unsafe fn try_tc_ingress_v4(");
+    assert!(egress.contains("load_feature_flags_tc(p, info)"));
+    assert!(ingress.contains("load_feature_flags_tc(p, info)"));
+}
+
+#[test]
+fn acl_projection_maintenance_gate_leaves_unrelated_feature_domains_independent() {
+    let runtime = include_str!("../../ebpf/src/runtime.rs");
+    let unrelated = [
+        source_function(
+            runtime,
+            "pub fn monitoring_enabled(tap_id: u32) -> bool {",
+            "pub fn acl_enabled(tap_id: u32) -> bool {",
+        ),
+        source_function(
+            runtime,
+            "pub fn qos_enabled(tap_id: u32) -> bool {",
+            "pub fn mirror_enabled(tap_id: u32) -> bool {",
+        ),
+        source_function(
+            runtime,
+            "pub fn mirror_enabled(tap_id: u32) -> bool {",
+            "pub fn tcprt_enabled(tap_id: u32) -> bool {",
+        ),
+        source_function(
+            runtime,
+            "pub fn tcprt_enabled(tap_id: u32) -> bool {",
+            "}",
+        ),
+    ];
+
+    for body in unrelated {
+        assert!(!body.contains("acl_maintenance_bypass"));
+    }
+}
+
+#[test]
+fn acl_projection_maintenance_setter_is_shared_key_zero_and_read_verified() {
+    let source = include_str!("../src/ebpf_ops/runtime.rs");
+    let setter = source_function(
+        source,
+        "pub fn set_acl_maintenance_bypass(",
+        "pub fn update_firewall_config(",
+    );
+
+    assert!(setter.contains("FIREWALL_CONFIG"));
+    assert_eq!(setter.matches("map.insert(&0u32").count(), 1);
+    let write = setter.find("map.insert(&0u32").unwrap();
+    let readback = setter[write..]
+        .find("map.get(&0u32")
+        .expect("setter must read key 0 after writing it");
+    assert!(readback > 0);
+    assert!(setter.contains("verify_acl_maintenance_bypass_readback"));
+
+    for forbidden in [
+        "attach_tc_",
+        "detach_tc_",
+        "ensure_fq_qdisc",
+        "setup_fq_qdisc",
+        "cleanup_root_qdisc",
+        "ovs",
+        "OVS",
+    ] {
+        assert!(!setter.contains(forbidden), "forbidden lifecycle call: {forbidden}");
+    }
+}
+
+#[test]
+fn acl_projection_replay_defaults_missing_maintenance_gate_to_enforcement_capable() {
+    let replay = include_str!("../src/ebpf_ops/replay.rs");
+    assert!(
+        replay.matches("acl_maintenance_bypass: 0").count() >= 3,
+        "all standalone and managed replay constructors must keep bypass disabled"
+    );
+}
+
 fn insert_group(state: &mut FirewallState, key: &str, id: u32, cidrs: &[&str]) {
     state.groups.insert(
         key.to_string(),

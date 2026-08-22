@@ -957,9 +957,13 @@ mod tests {
                 + 2 * core::mem::size_of::<u64>()
         );
         assert_eq!(core::mem::size_of::<SslErrorEvent>(), 32);
-        assert_eq!(core::mem::size_of::<FirewallConfig>(), 10);
+        assert_eq!(core::mem::size_of::<FirewallConfig>(), 11);
         assert_eq!(core::mem::size_of::<TcpRtValue>(), 168);
         assert_eq!(core::mem::offset_of!(FirewallConfig, acl_active_bank), 9);
+        assert_eq!(
+            core::mem::offset_of!(FirewallConfig, acl_maintenance_bypass),
+            10
+        );
         assert_eq!(core::mem::offset_of!(TcpRtValue, prev_seq), 112);
         assert_eq!(core::mem::offset_of!(TcpRtValue, last_resp_seq), 120);
         assert_eq!(core::mem::offset_of!(TcpRtValue, prev_resp_seq), 128);

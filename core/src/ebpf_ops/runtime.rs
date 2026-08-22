@@ -382,8 +382,10 @@ pub fn update_firewall_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        firewall_config_with_acl_bank, required_firewall_config, required_tap_config,
-        tap_config_with_acl_bank, tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
+        firewall_config_with_acl_bank, firewall_config_with_acl_maintenance_bypass,
+        required_firewall_config, required_tap_config, tap_config_with_acl_bank,
+        tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
+        verify_acl_maintenance_bypass_readback,
     };
     use crate::common::{
         FirewallConfig, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
@@ -576,6 +578,47 @@ mod tests {
         assert_eq!(next.tcprt_enabled, 0);
         assert_eq!(next.ssl_enabled, 1);
         assert_eq!(next.acl_active_bank, 1);
+    }
+
+    #[test]
+    fn tap_runtime_config_acl_maintenance_bypass_changes_only_the_dedicated_byte() {
+        let current = FirewallConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 1,
+            num_cpus: 8,
+            qos_enabled: 1,
+            acl_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 1,
+            ssl_enabled: 1,
+            acl_active_bank: 1,
+        };
+
+        let bypassed = firewall_config_with_acl_maintenance_bypass(current, true);
+
+        assert_eq!(bypassed.acl_maintenance_bypass, 1);
+        assert_eq!(bypassed.conntrack_enabled, current.conntrack_enabled);
+        assert_eq!(bypassed.monitoring_enabled, current.monitoring_enabled);
+        assert_eq!(bypassed.num_cpus, current.num_cpus);
+        assert_eq!(bypassed.qos_enabled, current.qos_enabled);
+        assert_eq!(bypassed.acl_enabled, current.acl_enabled);
+        assert_eq!(bypassed.mirror_enabled, current.mirror_enabled);
+        assert_eq!(bypassed.tcprt_enabled, current.tcprt_enabled);
+        assert_eq!(bypassed.ssl_enabled, current.ssl_enabled);
+        assert_eq!(bypassed.acl_active_bank, current.acl_active_bank);
+        assert!(verify_acl_maintenance_bypass_readback(bypassed, true).is_ok());
+
+        let drifted = FirewallConfig {
+            acl_maintenance_bypass: 0,
+            ..bypassed
+        };
+        assert_eq!(
+            verify_acl_maintenance_bypass_readback(drifted, true),
+            Err(
+                "FIREWALL_CONFIG ACL maintenance bypass readback mismatch: expected 1, observed 0"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
