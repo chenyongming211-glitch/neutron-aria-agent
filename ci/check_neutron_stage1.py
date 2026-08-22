@@ -714,7 +714,11 @@ def check_status_v1_contract():
     v4_scenarios = fixture_v4.get("scenarios")
     if not isinstance(v4_scenarios, list) or tuple(
         item.get("id") for item in v4_scenarios if isinstance(item, dict)
-    ) != ("maintenance-gate-unknown", "ordinary-ready-enforce"):
+    ) != (
+        "maintenance-gate-unknown",
+        "ordinary-ready-enforce",
+        "acl-schema-blocked-operator-unknown",
+    ):
         raise SystemExit("ERROR: Status V4 scenario inventory drifted")
     for scenario in v4_scenarios:
         status = scenario.get("status")
@@ -734,6 +738,26 @@ def check_status_v1_contract():
         or unknown.get("maintenance_reason") != "maintenance_gate_unknown"
     ):
         raise SystemExit("ERROR: Status V4 gate-unknown truth drifted")
+    schema_blocked = v4_scenarios[2]["status"]
+    if (
+        (
+            schema_blocked.get("transaction_state"),
+            schema_blocked.get("overall_readiness"),
+            schema_blocked.get("required_action"),
+        )
+        != ("blocked", "blocked", "operator")
+        or schema_blocked.get("acl_enforcement") != "unknown"
+        or any(
+            schema_blocked.get(field) is not None
+            for field in (
+                "maintenance_phase",
+                "maintenance_operation_id",
+                "maintenance_reason",
+                "maintenance_action",
+            )
+        )
+    ):
+        raise SystemExit("ERROR: Status V4 ACL schema blocked truth drifted")
     uds = python_client()
     for scenario in v4_scenarios:
         try:

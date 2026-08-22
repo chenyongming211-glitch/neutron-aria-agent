@@ -3202,6 +3202,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn neutron_maintenance_checkpoint_rejects_active_state_without_identity() {
+        let active = active_state("op-checkpoint-identity", 41, "sha256:host-41");
+        let mut missing_operation = active.clone();
+        missing_operation.operation_id = None;
+        let mut missing_domain = active;
+        missing_domain.active_domains.clear();
+        let mut inactive_with_identity = MaintenanceState::inactive();
+        inactive_with_identity.operation_id = Some("op-inactive-checkpoint".to_string());
+        inactive_with_identity.active_domains = vec!["acl".to_string()];
+
+        for invalid in [
+            MaintenanceWalRecord::checkpoint(
+                missing_operation,
+                None,
+                None,
+                None,
+                MaintenanceGateState::Bypass,
+                None,
+            ),
+            MaintenanceWalRecord::checkpoint(
+                missing_domain,
+                None,
+                None,
+                None,
+                MaintenanceGateState::Bypass,
+                None,
+            ),
+            MaintenanceWalRecord::checkpoint(
+                inactive_with_identity,
+                None,
+                None,
+                None,
+                MaintenanceGateState::Enforce,
+                None,
+            ),
+        ] {
+            assert!(
+                replay_maintenance_records(&[invalid]).is_err(),
+                "checkpoint state rows must carry one complete phase identity"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_conservative_abort_terminal_fences_progress_and_retry_state() {
+        let store = FaultStore::new(active_records("op-terminal-progress"));
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let request = MaintenanceAbortRequest {
+            operation_id: "op-terminal-progress".to_string(),
+            expected_phase: MaintenancePhase::MaintenanceBypass,
+            error: Some("candidate_failed".to_string()),
+        };
+        let mut incomplete = convergence();
+        incomplete.pending_generation = Some(42);
+        let terminal = coordinator
+            .abort(request.clone(), incomplete.clone())
+            .await
+            .expect("conservative abort should persist a bypass terminal result")
+            .1;
+        assert!(terminal.is_active());
+
+        let records_before = store.records();
+        let gate_before = gate.calls();
+        let writer = coordinator
+            .acquire_writer(
+                MaintenanceWriter::FullHostSnapshot,
+                Some("op-terminal-progress"),
+            )
+            .await;
+        assert!(
+            writer.is_err(),
+            "a persisted Abort terminal result must fence later progress"
+        );
+        assert!(
+            coordinator
+                .prepare_applied_snapshot(
+                    Some("op-terminal-progress"),
+                    42,
+                    Some("sha256:host-42".to_string()),
+                )
+                .await
+                .is_err(),
+            "progress preparation must not mutate a terminal Abort identity"
+        );
+
+        let retry = coordinator
+            .abort(request, incomplete)
+            .await
+            .expect("the exact lost-response Abort retry is idempotent");
+        assert_eq!(retry.0, MaintenanceDisposition::Idempotent);
+        assert_eq!(retry.1, terminal);
+        assert_eq!(store.records(), records_before);
+        assert_eq!(gate.calls(), gate_before);
+    }
+
     #[tokio::test]
     async fn neutron_maintenance_exit_intent_supersedes_conservative_abort_identity_atomically() {
         let store = FaultStore::new(active_records("op-abort-to-exit"));

@@ -70,6 +70,35 @@
         "decision": "ready",
         "mark_ready": true
       }
+    },
+    {
+      "id": "acl-schema-blocked-operator-unknown",
+      "status": {
+        "status_schema_version": 4,
+        "status_contract_hash": "v0.9-neutron-status-4",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "operator",
+        "recovery_cause": null,
+        "last_classified_generation": 0,
+        "generation": 0,
+        "accepted_generation": 0,
+        "applied_generation": 0,
+        "pending_generation": null,
+        "desired_hash": null,
+        "applied_desired_hash": null,
+        "wal_status": "acl_runtime_schema_recovery_required",
+        "wal_replay_failures": 0,
+        "authority_state": "acl_runtime_schema_recovery_required",
+        "acl_enforcement": "unknown",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_python": {
+        "decision": "operator",
+        "mark_ready": false
+      }
     }
   ],
   "invalid_scenarios": [

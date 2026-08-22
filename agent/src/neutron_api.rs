@@ -18347,6 +18347,49 @@ mod tests {
     }
 
     #[test]
+    fn neutron_maintenance_acl_schema_blocked_status_v4_reports_unknown_enforcement() {
+        let response = acl_runtime_schema_blocked_status(
+            "acl_runtime_schema_recovery_required".to_string(),
+        );
+
+        assert_eq!(response.transaction_state, NeutronStatusTransactionState::Blocked);
+        assert_eq!(response.overall_readiness, NeutronStatusOverallReadiness::Blocked);
+        assert_eq!(response.required_action, NeutronStatusRequiredAction::Operator);
+        assert_eq!(response.acl_enforcement.as_deref(), Some("unknown"));
+        assert!(response.maintenance_phase.is_none());
+        assert!(response.maintenance_operation_id.is_none());
+        assert!(response.maintenance_action.is_none());
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_corrupt_unaddressable_replay_projects_operator_unknown() {
+        let root = temp_root("maintenance-corrupt-unaddressable-status");
+        let state_dir = root.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("neutron-snapshot.wal"),
+            b"{\"type\":\"maintenance\",\"record\":\n",
+        )
+        .unwrap();
+        let state = test_neutron_state(&root);
+
+        assert!(state
+            .maintenance
+            .acquire_writer(MaintenanceWriter::Background, None)
+            .await
+            .is_err());
+        let response = build_neutron_status_response(&state, false).await;
+        assert_eq!(response.transaction_state, NeutronStatusTransactionState::Blocked);
+        assert_eq!(response.overall_readiness, NeutronStatusOverallReadiness::Blocked);
+        assert_eq!(response.required_action, NeutronStatusRequiredAction::Operator);
+        assert_eq!(response.acl_enforcement.as_deref(), Some("unknown"));
+        assert!(response.maintenance_phase.is_none());
+        assert!(response.maintenance_operation_id.is_none());
+        assert!(response.maintenance_action.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn neutron_maintenance_convergence_requires_exact_accepted_identity_and_clean_wal() {
         let healthy = healthy_maintenance_runtime();
         assert!(maintenance_convergence(&healthy).is_complete());
@@ -18655,6 +18698,139 @@ mod tests {
             1,
             "the coordinator/handler pair must emit exactly one terminal result"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_admin_extractor_failures_emit_one_attempt_and_result() {
+        #[derive(Default)]
+        struct TestStore;
+
+        impl crate::neutron_maintenance::MaintenanceStore for TestStore {
+            fn load(&self) -> crate::neutron_maintenance::MaintenanceStoreReplay {
+                crate::neutron_maintenance::MaintenanceStoreReplay {
+                    state: aria_api::MaintenanceState::inactive(),
+                    failures: 0,
+                    pending_transition: None,
+                    terminal_action: None,
+                    terminal_expected_phase: None,
+                    gate_state: crate::neutron_maintenance::MaintenanceGateState::Enforce,
+                    block_cause: None,
+                }
+            }
+
+            fn append(&self, _record: MaintenanceWalRecord) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        #[derive(Default)]
+        struct NoopGate;
+
+        impl crate::neutron_maintenance::MaintenanceGateRuntime for NoopGate {
+            fn set_bypass_verified(
+                &self,
+                _enabled: bool,
+            ) -> crate::neutron_maintenance::MaintenanceIoFuture<'_> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct AuditCapture {
+            events: Arc<std::sync::Mutex<Vec<crate::neutron_maintenance::MaintenanceAuditEvent>>>,
+        }
+
+        impl crate::neutron_maintenance::MaintenanceAuditSink for AuditCapture {
+            fn emit(&self, event: crate::neutron_maintenance::MaintenanceAuditEvent) {
+                self.events.lock().unwrap().push(event);
+            }
+        }
+
+        let root = temp_root("maintenance-admin-extractor-audit");
+        let base = test_neutron_state(&root);
+        let audit = AuditCapture::default();
+        let maintenance = Arc::new(MaintenanceCoordinator::new_with_dependencies(
+            Arc::new(TestStore),
+            Arc::new(NoopGate),
+            Arc::new(audit.clone()),
+        ));
+        let state = NeutronApiState::new_with_maintenance(
+            base.registry.clone(),
+            base.control_plane.clone(),
+            base.ovs_bridge.clone(),
+            base.wal.clone(),
+            maintenance,
+        );
+        state.mark_restore_ready();
+        let cases = [
+            (
+                crate::neutron_maintenance::MaintenanceAuditAction::Enter,
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/admin/maintenance/enter")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{not-json-secret-policy}"))
+                    .unwrap(),
+            ),
+            (
+                crate::neutron_maintenance::MaintenanceAuditAction::Exit,
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/admin/maintenance/exit")
+                    .body(Body::from(
+                        serde_json::to_vec(&MaintenanceExitRequest {
+                            operation_id: "op-extractor".to_string(),
+                            expected_applied_generation: 41,
+                            expected_applied_desired_hash: Some(
+                                "sha256:host-41".to_string(),
+                            ),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            ),
+            (
+                crate::neutron_maintenance::MaintenanceAuditAction::Abort,
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/admin/maintenance/abort")
+                    .header("content-type", "application/json")
+                    .body(Body::from(vec![
+                        b'x';
+                        NEUTRON_UDS_BODY_MAX_BYTES as usize + 1
+                    ]))
+                    .unwrap(),
+            ),
+        ];
+
+        for (expected_action, request) in cases {
+            audit.events.lock().unwrap().clear();
+            let response = build_admin_router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert!(!response.status().is_success());
+            let events = audit.events.lock().unwrap().clone();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].action, expected_action);
+            assert_eq!(
+                events[0].outcome,
+                crate::neutron_maintenance::MaintenanceAuditOutcome::Attempt
+            );
+            assert_eq!(events[1].action, expected_action);
+            assert_eq!(
+                events[1].outcome,
+                crate::neutron_maintenance::MaintenanceAuditOutcome::Failure
+            );
+            assert!(events.iter().all(|event| event.operation_id.is_none()));
+            assert!(events.iter().all(|event| {
+                event
+                    .reason
+                    .as_deref()
+                    .map_or(true, |reason| !reason.contains("secret-policy"))
+            }));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

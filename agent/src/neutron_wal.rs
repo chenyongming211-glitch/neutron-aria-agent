@@ -3328,4 +3328,53 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn neutron_maintenance_wal_reader_caps_type_first_record_at_64k() {
+        let bytes = format!(
+            "{{\"type\":\"maintenance\",\"record\":{{\"padding\":\"{}\"}}}}\n",
+            "x".repeat(MAINTENANCE_WAL_RECORD_MAX_BYTES + 1024)
+        )
+        .into_bytes();
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        let mut record = Vec::new();
+
+        let (_, oversized) = read_bounded_record(&mut reader, &mut record).unwrap();
+
+        assert!(oversized);
+        assert!(record.len() <= MAINTENANCE_WAL_RECORD_MAX_BYTES);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_reader_rejects_unclassified_record_past_64k() {
+        let bytes = format!(
+            "{{\"padding\":\"{}\",\"type\":\"maintenance\"}}\n",
+            "x".repeat(MAINTENANCE_WAL_RECORD_MAX_BYTES + 1024)
+        )
+        .into_bytes();
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        let mut record = Vec::new();
+
+        let (_, oversized) = read_bounded_record(&mut reader, &mut record).unwrap();
+
+        assert!(oversized);
+        assert!(record.len() <= MAINTENANCE_WAL_RECORD_MAX_BYTES);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_reader_retains_classified_ordinary_record_above_64k() {
+        let bytes = format!(
+            "{{\"type\":\"snapshot_commit\",\"padding\":\"{}\"}}\n",
+            "x".repeat(MAINTENANCE_WAL_RECORD_MAX_BYTES + 1024)
+        )
+        .into_bytes();
+        let expected_len = bytes.len();
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        let mut record = Vec::new();
+
+        let (_, oversized) = read_bounded_record(&mut reader, &mut record).unwrap();
+
+        assert!(!oversized);
+        assert_eq!(record.len(), expected_len);
+    }
 }
