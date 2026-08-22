@@ -6,7 +6,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
 const BPF_FS_MAGIC: u64 = 0xcafe4a11;
 static FIREWALL_CONFIG_RMW_LOCK: Mutex<()> = Mutex::new(());
 
@@ -88,7 +87,7 @@ fn firewall_config_with_acl_bank(current: FirewallConfig, bank: u8) -> FirewallC
     }
 }
 
-fn firewall_config_with_acl_maintenance_bypass(
+pub fn firewall_config_with_acl_maintenance_bypass(
     current: FirewallConfig,
     enabled: bool,
 ) -> FirewallConfig {
@@ -178,9 +177,17 @@ fn firewall_config_with_runtime_updates(
     })
 }
 
-trait FirewallConfigStore {
+pub trait FirewallConfigStore {
+    fn revalidate_current_pin(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn read_key_zero(&mut self) -> Result<Option<FirewallConfig>, String>;
     fn write_key_zero(&mut self, config: FirewallConfig) -> Result<(), String>;
+
+    fn validate_current_pin_after_readback(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 struct PinnedFirewallConfigStore {
@@ -232,6 +239,9 @@ where
             operation
         )
     })?;
+    store
+        .revalidate_current_pin()
+        .map_err(|error| format!("{}: {}", operation, error))?;
     let current = store
         .read_key_zero()
         .map_err(|error| format!("{}: {}", operation, error))?;
@@ -254,7 +264,50 @@ where
             operation, expected, observed
         ));
     }
+    store
+        .validate_current_pin_after_readback()
+        .map_err(|error| format!("{} post-readback: {}", operation, error))?;
     Ok(observed)
+}
+
+pub fn serialized_shared_firewall_config_rmw<Store, Transform>(
+    store: &mut Store,
+    operation: &str,
+    transform: Transform,
+) -> Result<FirewallConfig, String>
+where
+    Store: FirewallConfigStore,
+    Transform: FnOnce(Option<FirewallConfig>) -> Result<FirewallConfig, String>,
+{
+    serialized_firewall_config_rmw(
+        &FIREWALL_CONFIG_RMW_LOCK,
+        store,
+        operation,
+        transform,
+    )
+}
+
+fn initialize_firewall_config_serialized<Store: FirewallConfigStore>(
+    update_lock: &Mutex<()>,
+    store: &mut Store,
+    operation: &str,
+    expected: FirewallConfig,
+) -> Result<FirewallConfig, String> {
+    serialized_firewall_config_rmw(update_lock, store, operation, |_| Ok(expected))
+}
+
+pub fn initialize_pinned_firewall_config(
+    runtime: TapMapRuntime<'_>,
+    expected: FirewallConfig,
+) -> Result<(), String> {
+    let mut store = PinnedFirewallConfigStore::open(Path::new(runtime.pin_path))?;
+    initialize_firewall_config_serialized(
+        &FIREWALL_CONFIG_RMW_LOCK,
+        &mut store,
+        "pinned replay initialization",
+        expected,
+    )
+    .map(|_| ())
 }
 
 fn tap_config_with_runtime_updates(
@@ -468,61 +521,6 @@ fn required_firewall_config(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ManagedFirewallConfigProofFacts {
-    runtime_tap_id: u32,
-    absolute_path: bool,
-    path_matches_managed_namespace: bool,
-    on_bpffs: bool,
-    has_symlink_component: bool,
-    root_owned: bool,
-    trusted_permissions: bool,
-    complete_inventory: bool,
-}
-
-fn validate_managed_firewall_config_proof_facts(
-    facts: &ManagedFirewallConfigProofFacts,
-) -> Result<(), String> {
-    let prefix = "managed FIREWALL_CONFIG authority rejected";
-    if facts.runtime_tap_id != TAP_ID_UNASSIGNED {
-        return Err(format!("{}: runtime must use unassigned tap_id 0", prefix));
-    }
-    if !facts.absolute_path {
-        return Err(format!("{}: authority paths must be absolute", prefix));
-    }
-    if !facts.path_matches_managed_namespace {
-        return Err(format!(
-            "{}: runtime path must match the authority's managed namespace",
-            prefix
-        ));
-    }
-    if facts.has_symlink_component {
-        return Err(format!(
-            "{}: symlink components are not trusted",
-            prefix
-        ));
-    }
-    if !facts.trusted_permissions {
-        return Err(format!(
-            "{}: group/world-writable permissions are not trusted",
-            prefix
-        ));
-    }
-    if !facts.root_owned {
-        return Err(format!("{}: root ownership is required", prefix));
-    }
-    if !facts.on_bpffs {
-        return Err(format!("{}: runtime is not on bpffs", prefix));
-    }
-    if !facts.complete_inventory {
-        return Err(format!(
-            "{}: complete managed map inventory is required",
-            prefix
-        ));
-    }
-    Ok(())
-}
-
 fn absolute_component_paths(path: &Path) -> Vec<PathBuf> {
     let mut current = PathBuf::new();
     let mut paths = Vec::new();
@@ -552,31 +550,13 @@ fn path_is_bpffs(path: &Path) -> Result<bool, String> {
     Ok(stats.f_type as u64 == BPF_FS_MAGIC)
 }
 
-/// Proof that a root-only shared FIREWALL_CONFIG operation targets the
-/// authority-owned managed namespace. Fields stay private so callers cannot
-/// manufacture this capability from an arbitrary compatible map.
-pub struct ManagedFirewallConfigRuntime {
-    store: Mutex<PinnedFirewallConfigStore>,
-}
-
-impl core::fmt::Debug for ManagedFirewallConfigRuntime {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("ManagedFirewallConfigRuntime")
-            .field("verified_store", &"FIREWALL_CONFIG[0]")
-            .finish_non_exhaustive()
-    }
-}
-
-/// Validate the real managed bpffs authority and mint a proof-carrying handle.
-/// This is validation, not an assume-managed constructor.
-pub fn prove_managed_firewall_config_runtime(
-    runtime: TapMapRuntime<'_>,
-    authority_base_pin_path: &str,
-) -> Result<ManagedFirewallConfigRuntime, String> {
-    let runtime_path = Path::new(runtime.pin_path);
-    let authority_base = Path::new(authority_base_pin_path);
-    let expected_runtime_path = authority_base.join(MANAGED_SHARED_PIN_NAMESPACE);
+/// Validate filesystem and mode-aware BPF-map facts for the canonical path
+/// supplied by the agent-owned authority. This function deliberately does not
+/// mint a capability or accept a caller-selected authority base.
+pub fn validate_managed_pin_path_security(
+    runtime_path: &Path,
+    trace_mode: TraceMapMode,
+) -> Result<u32, String> {
     let clean_components = |path: &Path| {
         !path.components().any(|component| {
             matches!(
@@ -586,18 +566,12 @@ pub fn prove_managed_firewall_config_runtime(
         })
     };
 
-    validate_managed_firewall_config_proof_facts(&ManagedFirewallConfigProofFacts {
-        runtime_tap_id: runtime.tap_id,
-        absolute_path: runtime_path.is_absolute() && authority_base.is_absolute(),
-        path_matches_managed_namespace: runtime_path == expected_runtime_path
-            && clean_components(runtime_path)
-            && clean_components(authority_base),
-        on_bpffs: true,
-        has_symlink_component: false,
-        root_owned: true,
-        trusted_permissions: true,
-        complete_inventory: true,
-    })?;
+    if !runtime_path.is_absolute() || !clean_components(runtime_path) {
+        return Err(
+            "managed FIREWALL_CONFIG authority rejected: canonical path must be absolute and normalized"
+                .to_string(),
+        );
+    }
 
     let mut has_symlink_component = false;
     let mut root_owned = true;
@@ -616,7 +590,7 @@ pub fn prove_managed_firewall_config_runtime(
     }
 
     let mut complete_inventory = true;
-    for map_name in CRITICAL_NETWORK_MAP_NAMES {
+    for map_name in critical_network_map_names(trace_mode) {
         let map_path = runtime_path.join(map_name);
         match fs::symlink_metadata(&map_path) {
             Ok(metadata) => {
@@ -637,18 +611,32 @@ pub fn prove_managed_firewall_config_runtime(
         }
     }
 
-    validate_managed_firewall_config_proof_facts(&ManagedFirewallConfigProofFacts {
-        runtime_tap_id: runtime.tap_id,
-        absolute_path: true,
-        path_matches_managed_namespace: true,
-        on_bpffs: path_is_bpffs(runtime_path)?,
-        has_symlink_component,
-        root_owned,
-        trusted_permissions,
-        complete_inventory,
-    })?;
+    if has_symlink_component {
+        return Err(
+            "managed FIREWALL_CONFIG authority rejected: symlink components are not trusted"
+                .to_string(),
+        );
+    }
+    if !root_owned {
+        return Err("managed FIREWALL_CONFIG authority rejected: root ownership is required".to_string());
+    }
+    if !trusted_permissions {
+        return Err(
+            "managed FIREWALL_CONFIG authority rejected: group/world-writable permissions are not trusted"
+                .to_string(),
+        );
+    }
+    if !path_is_bpffs(runtime_path)? {
+        return Err("managed FIREWALL_CONFIG authority rejected: runtime is not on bpffs".to_string());
+    }
+    if !complete_inventory {
+        return Err(
+            "managed FIREWALL_CONFIG authority rejected: complete mode-aware managed map inventory is required"
+                .to_string(),
+        );
+    }
 
-    for map_name in CRITICAL_NETWORK_MAP_NAMES {
+    for map_name in critical_network_map_names(trace_mode) {
         let map_path = runtime_path.join(map_name);
         MapData::from_pin(&map_path).map_err(|error| {
             format!(
@@ -658,39 +646,28 @@ pub fn prove_managed_firewall_config_runtime(
             )
         })?;
     }
+    let firewall_map_path = runtime_path.join("FIREWALL_CONFIG");
+    let firewall_map = MapData::from_pin(&firewall_map_path).map_err(|error| {
+        format!(
+            "managed FIREWALL_CONFIG authority rejected: open current map identity: {:?}",
+            error
+        )
+    })?;
+    let firewall_map_id = firewall_map
+        .info()
+        .map_err(|error| {
+            format!(
+                "managed FIREWALL_CONFIG authority rejected: current map info: {:?}",
+                error
+            )
+        })?
+        .id();
     let mut store = PinnedFirewallConfigStore::open(runtime_path)?;
     store.read_key_zero()?.ok_or_else(|| {
         "managed FIREWALL_CONFIG authority rejected: FIREWALL_CONFIG key 0 is missing".to_string()
     })?;
 
-    Ok(ManagedFirewallConfigRuntime {
-        store: Mutex::new(store),
-    })
-}
-
-/// Toggle the shared host ACL/conntrack maintenance gate and prove the write.
-pub fn set_acl_maintenance_bypass(
-    runtime: &ManagedFirewallConfigRuntime,
-    enabled: bool,
-) -> Result<(), String> {
-    let mut store = runtime.store.lock().map_err(|_| {
-        "ACL maintenance bypass verified-map lock poisoned; refusing shared-map write".to_string()
-    })?;
-    serialized_firewall_config_rmw(
-        &FIREWALL_CONFIG_RMW_LOCK,
-        &mut *store,
-        "ACL maintenance bypass update",
-        |current| {
-            let current = current.ok_or_else(|| {
-                "ACL maintenance bypass update requires initialized FIREWALL_CONFIG key 0"
-                    .to_string()
-            })?;
-            Ok(firewall_config_with_acl_maintenance_bypass(
-                current, enabled,
-            ))
-        },
-    )
-    .map(|_| ())
+    Ok(firewall_map_id)
 }
 
 /// Update FIREWALL_CONFIG map at runtime via pinned map.
@@ -741,10 +718,8 @@ mod tests {
         firewall_config_with_acl_bank, firewall_config_with_acl_maintenance_bypass,
         firewall_config_with_runtime_updates, initialize_firewall_config_serialized,
         required_firewall_config, required_tap_config, serialized_firewall_config_rmw,
-        tap_config_with_acl_bank,
-        tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
-        validate_managed_firewall_config_proof_facts, FirewallConfigPatch,
-        FirewallConfigStore, ManagedFirewallConfigProofFacts,
+        tap_config_with_acl_bank, tap_config_with_acl_runtime_gate,
+        tap_config_with_runtime_updates, FirewallConfigPatch, FirewallConfigStore,
     };
     use crate::common::{
         FirewallConfig, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
@@ -1037,88 +1012,6 @@ mod tests {
         )
         .unwrap_err()
         .contains("requires initialized FIREWALL_CONFIG key 0"));
-    }
-
-    #[test]
-    fn acl_projection_maintenance_managed_proof_rejects_each_untrusted_authority_fact() {
-        let valid = ManagedFirewallConfigProofFacts {
-            runtime_tap_id: crate::common::TAP_ID_UNASSIGNED,
-            absolute_path: true,
-            path_matches_managed_namespace: true,
-            on_bpffs: true,
-            has_symlink_component: false,
-            root_owned: true,
-            trusted_permissions: true,
-            complete_inventory: true,
-        };
-        validate_managed_firewall_config_proof_facts(&valid).unwrap();
-
-        let mut cases = Vec::new();
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                runtime_tap_id: 17,
-                ..valid
-            },
-            "unassigned tap_id",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                absolute_path: false,
-                ..valid
-            },
-            "absolute",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                path_matches_managed_namespace: false,
-                ..valid
-            },
-            "managed namespace",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                on_bpffs: false,
-                ..valid
-            },
-            "bpffs",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                has_symlink_component: true,
-                ..valid
-            },
-            "symlink",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                root_owned: false,
-                ..valid
-            },
-            "root ownership",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                trusted_permissions: false,
-                ..valid
-            },
-            "permissions",
-        ));
-        cases.push((
-            ManagedFirewallConfigProofFacts {
-                complete_inventory: false,
-                ..valid
-            },
-            "complete managed map inventory",
-        ));
-
-        for (facts, expected) in cases {
-            let error = validate_managed_firewall_config_proof_facts(&facts)
-                .expect_err("untrusted authority evidence must be rejected");
-            assert!(
-                error.contains(expected),
-                "expected {expected:?} in {error:?}"
-            );
-        }
     }
 
     #[test]

@@ -723,15 +723,67 @@ pub enum AclCtRuntimeSource {
     GlobalOnly,
 }
 
+/// Packet-level ACL/conntrack gate sampled before any per-tap ACL, conntrack,
+/// or fragment-authority access.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PacketAclCtGate {
+    Bypass,
+    Enforce,
+}
+
+/// Production-shared access model for the monolithic TC packet path. The eBPF
+/// entry points consume this plan directly; userspace tests can therefore
+/// assert the no-read bypass contract without source-only instrumentation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AclCtPacketAccessPlan {
+    pub direction: u8,
+    pub gate_checked_first: bool,
+    pub reads_tap_config: bool,
+    pub reads_acl_active_bank: bool,
+    pub reads_fragment_epoch: bool,
+    pub reads_fragment_authority: bool,
+    pub reads_acl_state: bool,
+    pub reads_conntrack_state: bool,
+    pub runs_unrelated_pipeline: bool,
+}
+
+#[inline(always)]
+pub fn packet_acl_ct_gate(global: Option<&FirewallConfig>) -> PacketAclCtGate {
+    if global
+        .map(|config| config.acl_maintenance_bypass != 0)
+        .unwrap_or(false)
+    {
+        PacketAclCtGate::Bypass
+    } else {
+        PacketAclCtGate::Enforce
+    }
+}
+
+#[inline(always)]
+pub const fn acl_ct_packet_access_plan(
+    gate: PacketAclCtGate,
+    direction: u8,
+) -> AclCtPacketAccessPlan {
+    let enforce = matches!(gate, PacketAclCtGate::Enforce);
+    AclCtPacketAccessPlan {
+        direction,
+        gate_checked_first: true,
+        reads_tap_config: enforce,
+        reads_acl_active_bank: enforce,
+        reads_fragment_epoch: enforce,
+        reads_fragment_authority: enforce,
+        reads_acl_state: enforce,
+        reads_conntrack_state: enforce,
+        runs_unrelated_pipeline: true,
+    }
+}
+
 #[inline(always)]
 pub fn acl_ct_runtime_source(
     global: Option<&FirewallConfig>,
     tap_id: u32,
 ) -> AclCtRuntimeSource {
-    if global
-        .map(|config| config.acl_maintenance_bypass != 0)
-        .unwrap_or(false)
-    {
+    if matches!(packet_acl_ct_gate(global), PacketAclCtGate::Bypass) {
         return AclCtRuntimeSource::BypassAclAndConntrack;
     }
     if tap_id != TAP_ID_UNASSIGNED {
@@ -930,7 +982,8 @@ mod userspace_pod {
 /// are intentionally not re-exported through this module.
 pub mod userspace {
     pub use super::{
-        acl_banked_tap_id, acl_ct_runtime_source, acl_next_bank, ct_acl_family_is_current,
+        acl_banked_tap_id, acl_ct_packet_access_plan, acl_ct_runtime_source, acl_next_bank,
+        ct_acl_family_is_current,
         drop_family_is_valid, fragment_metric_index, normalize_acl_bank,
         normalize_acl_ingress_hook,
         policy_family_is_valid, CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue,
@@ -941,7 +994,8 @@ pub mod userspace {
         MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey, QosStatsValue,
         RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpValue, SslScratch, SslWriteScratch,
         TapConfig, TcpRtValue, TokenBucket, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter,
-        TraceStreamEvent, AclCtRuntimeSource, ACL_BANK_PRIMARY, ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC,
+        TraceStreamEvent, AclCtPacketAccessPlan, AclCtRuntimeSource, PacketAclCtGate,
+        ACL_BANK_PRIMARY, ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC,
         ACL_INGRESS_HOOK_XDP, CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6,
         CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED,
         CT_CONTRACT_REASON_CT_HIT, CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK,

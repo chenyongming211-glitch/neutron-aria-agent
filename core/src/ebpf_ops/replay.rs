@@ -380,11 +380,11 @@ fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
         .map_err(|e| format!("CT_CONFIG insert: {:?}", e))
 }
 
-pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String> {
+pub fn replay_state(bpf: &mut aya::Ebpf, pin_path: &str, state_path: &str) -> Result<(), String> {
     load_state_then_replay(
         state_path,
         crate::state::LegacyAclMigrationAuthority::StandaloneInfer,
-        |state| replay_state_from_snapshot(bpf, state_path, state),
+        |state| replay_state_from_snapshot(bpf, pin_path, state_path, state),
     )
 }
 
@@ -396,6 +396,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
 /// callers that intentionally load by path.
 pub fn replay_state_from_snapshot(
     bpf: &mut aya::Ebpf,
+    pin_path: &str,
     state_path: &str,
     state: &crate::state::FirewallState,
 ) -> Result<(), String> {
@@ -406,6 +407,7 @@ pub fn replay_state_from_snapshot(
     )?;
     replay_state_from_snapshot_with_mode(
         bpf,
+        pin_path,
         state_path,
         &state,
         GroupProjectionMode::StandaloneCompatibility,
@@ -434,25 +436,9 @@ fn fresh_unpinned_firewall_config(state: &crate::state::FirewallState) -> Firewa
     }
 }
 
-/// Initialize a newly loaded, not-yet-pinned object. This is deliberately a
-/// write-only startup boundary; concurrent pinned-map RMW goes through the
-/// serialized runtime helper instead.
-fn initialize_fresh_unpinned_firewall_config(
-    bpf: &mut aya::Ebpf,
-    state: &crate::state::FirewallState,
-) -> Result<(), String> {
-    let cfg = fresh_unpinned_firewall_config(state);
-    let map = bpf
-        .map_mut("FIREWALL_CONFIG")
-        .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())?;
-    let mut map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(map)
-        .map_err(|error| format!("{:?}", error))?;
-    map.insert(&0u32, &cfg, 0)
-        .map_err(|error| format!("{:?}", error))
-}
-
 fn replay_state_from_snapshot_with_mode(
     bpf: &mut aya::Ebpf,
+    pin_path: &str,
     state_path: &str,
     state: &crate::state::FirewallState,
     mode: GroupProjectionMode,
@@ -693,7 +679,10 @@ fn replay_state_from_snapshot_with_mode(
         errors.extend(mirror_errors);
     }
 
-    if let Err(error) = initialize_fresh_unpinned_firewall_config(bpf, state) {
+    if let Err(error) = initialize_pinned_firewall_config(
+        TapMapRuntime::new(pin_path, TAP_ID_UNASSIGNED),
+        fresh_unpinned_firewall_config(state),
+    ) {
         errors.push(format!("FIREWALL_CONFIG: {}", error));
     }
 

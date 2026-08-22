@@ -38,7 +38,8 @@ pub use fragment::{
 };
 pub use inventory::{
     capture_general_network_owner, capture_network_owner, classify_managed_inventory_capture,
-    classify_runtime_gate_state, critical_network_map_names, show_stats,
+    classify_runtime_gate_state, critical_network_map_names, missing_critical_network_maps,
+    show_stats,
     validate_managed_pinned_runtime_state, validate_pinned_runtime_state, NetworkOwnerPlane,
     RuntimeGateDisposition, TraceMapMode, ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES,
     NETWORK_MAP_NAMES, SSL_MAP_NAMES, STREAM_CRITICAL_NETWORK_MAP_NAMES,
@@ -69,10 +70,11 @@ pub use replay::{
 };
 pub use runtime::{
     clear_iface_ctx, delete_tap_config, lookup_iface_ctx, lookup_runtime_config,
-    prove_managed_firewall_config_runtime, read_acl_active_bank, read_firewall_config,
-    read_iface_ctx, read_runtime_config, set_acl_active_bank, set_acl_maintenance_bypass,
-    sync_iface_ctx, update_acl_runtime_gate, update_firewall_config, update_runtime_config,
-    write_tap_config, ManagedFirewallConfigRuntime,
+    firewall_config_with_acl_maintenance_bypass, initialize_pinned_firewall_config,
+    read_acl_active_bank, read_firewall_config, read_iface_ctx, read_runtime_config,
+    serialized_shared_firewall_config_rmw, set_acl_active_bank, sync_iface_ctx,
+    update_acl_runtime_gate, update_firewall_config, update_runtime_config,
+    validate_managed_pin_path_security, write_tap_config, FirewallConfigStore,
 };
 pub use scrub::{scrub_acl_bank, scrub_managed_runtime_state, scrub_standalone_runtime_state};
 pub(crate) use scrub::collect_iterated_items;

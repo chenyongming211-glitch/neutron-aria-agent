@@ -28,7 +28,8 @@ mod trace;
 
 use common::{
     acl_banked_tap_id, fragment_ct_create_point, set_fragment_resolve_drop_ids, CtKey4, CtKey6,
-    FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    AclCtPacketAccessPlan, FragmentCtCreatePoint, FragmentInstallDecision, FragmentKind,
+    PipelineCtx,
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
@@ -154,9 +155,12 @@ unsafe fn try_tc_egress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    fragment::snapshot_authority(p);
-    load_feature_flags_tc(p, info);
-    fragment::record_first_observation(info, p);
+    let acl_ct_plan = runtime::acl_ct_packet_access_plan(p.direction);
+    load_feature_flags_tc(p, info, &acl_ct_plan);
+    if acl_ct_plan.reads_fragment_authority {
+        fragment::snapshot_authority(p);
+        fragment::record_first_observation(info, p);
+    }
 
     if info.is_ipv6 {
         return Ok(try_tc_egress_v6(ctx, info, p));
@@ -356,9 +360,12 @@ unsafe fn try_tc_ingress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    fragment::snapshot_authority(p);
-    load_feature_flags_tc(p, info);
-    fragment::record_first_observation(info, p);
+    let acl_ct_plan = runtime::acl_ct_packet_access_plan(p.direction);
+    load_feature_flags_tc(p, info, &acl_ct_plan);
+    if acl_ct_plan.reads_fragment_authority {
+        fragment::snapshot_authority(p);
+        fragment::record_first_observation(info, p);
+    }
 
     if info.is_ipv6 {
         return Ok(try_tc_ingress_v6(ctx, info, p));
@@ -512,14 +519,18 @@ unsafe fn try_tc_ingress_v6(
 // --- Helpers ---
 
 #[inline(always)]
-unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) {
+unsafe fn load_feature_flags_tc(
+    p: &mut PipelineCtx,
+    info: &parser::PacketInfo,
+    acl_ct_plan: &AclCtPacketAccessPlan,
+) {
     if qos::qos_enabled(p.tap_id) {
         p.flags |= FLAG_QOS_ON;
     }
     if tcprt::tcprt_enabled(p.tap_id) {
         p.flags |= FLAG_TCPRT_ON;
     }
-    if policy::acl_enabled(p.tap_id) {
+    if acl_ct_plan.reads_acl_state && policy::acl_enabled(p.tap_id) {
         p.flags |= FLAG_ACL_ON;
     }
     if mirror::mirror_enabled(p.tap_id) {

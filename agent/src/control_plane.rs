@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,7 +9,8 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::instance::{
-    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, RuntimePinState, TcAclLinkHealth,
+    preexisting_tc_acl_runtime_is_healthy, FirewallInstance,
+    ManagedMaintenanceRuntimeIdentity, RuntimePinState, TcAclLinkHealth,
 };
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
@@ -17,7 +18,7 @@ use crate::ssl_manager::SslManager;
 use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use crate::FragmentTrackingSettings;
-use aria_core::common::{TapMapRuntime, IP_FAMILY_V4, IP_FAMILY_V6};
+use aria_core::common::{FirewallConfig, TapMapRuntime, IP_FAMILY_V4, IP_FAMILY_V6};
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
     lookup_iface_ctx, lookup_runtime_config, migrate_state_for_replay,
@@ -26,6 +27,7 @@ use aria_core::ebpf_ops::{
     GroupProjectionMode, ManagedReplayRoute, ProjectionDrift, RuntimeGateDisposition,
     RuntimeGroupMapEntries, TraceMapMode,
 };
+use aya::maps::{HashMap as BpfHashMap, Map, MapData};
 use aria_core::state::{
     FirewallState, GroupInfo, LocalProjectionRecovery, MirrorRuleInfo, QosRuleInfo, RuleInfo,
 };
@@ -1115,6 +1117,130 @@ impl PreparedManagedInstance {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ManagedMaintenanceAuthorityFacts {
+    configured_pin_path: PathBuf,
+    candidate_pin_path: PathBuf,
+    configured_mode: TraceMapMode,
+    persisted_mode: TraceMapMode,
+    expected_firewall_config_map_id: u32,
+    current_firewall_config_map_id: u32,
+    expected_owner_program_ids: Vec<u32>,
+    current_owner_program_ids: Vec<u32>,
+    live_owner_count: usize,
+    complete_mode_inventory: bool,
+}
+
+fn validate_managed_maintenance_authority_facts(
+    facts: &ManagedMaintenanceAuthorityFacts,
+) -> Result<(), String> {
+    if facts.candidate_pin_path != facts.configured_pin_path {
+        return Err("candidate does not match configured managed authority".to_string());
+    }
+    if facts.configured_mode != facts.persisted_mode {
+        return Err("persisted runtime mode does not match configured runtime mode".to_string());
+    }
+    if !facts.complete_mode_inventory {
+        return Err("mode-aware inventory is incomplete".to_string());
+    }
+    if facts.expected_firewall_config_map_id != facts.current_firewall_config_map_id {
+        return Err("FIREWALL_CONFIG map identity changed".to_string());
+    }
+    if facts.live_owner_count == 0
+        || facts.expected_owner_program_ids != facts.current_owner_program_ids
+    {
+        return Err("live Aria runtime identity changed".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) struct ManagedFirewallConfigAuthority {
+    facts: ManagedMaintenanceAuthorityFacts,
+    authority_seal: std::sync::Weak<()>,
+}
+
+struct ManagedFirewallConfigStore {
+    pin_path: PathBuf,
+    trace_mode: TraceMapMode,
+    expected_map_id: u32,
+    map: Option<BpfHashMap<MapData, u32, FirewallConfig>>,
+}
+
+impl ManagedFirewallConfigStore {
+    fn new(pin_path: PathBuf, trace_mode: TraceMapMode, expected_map_id: u32) -> Self {
+        Self {
+            pin_path,
+            trace_mode,
+            expected_map_id,
+            map: None,
+        }
+    }
+
+    fn current_firewall_config_map_id(&self) -> Result<u32, String> {
+        aria_core::ebpf_ops::validate_managed_pin_path_security(&self.pin_path, self.trace_mode)
+    }
+}
+
+impl aria_core::ebpf_ops::FirewallConfigStore for ManagedFirewallConfigStore {
+    fn revalidate_current_pin(&mut self) -> Result<(), String> {
+        let current_id = self.current_firewall_config_map_id()?;
+        if current_id != self.expected_map_id {
+            return Err(format!(
+                "FIREWALL_CONFIG map identity changed: expected {}, current {}",
+                self.expected_map_id, current_id
+            ));
+        }
+        let map_data = MapData::from_pin(self.pin_path.join("FIREWALL_CONFIG"))
+            .map_err(|error| format!("reopen canonical current FIREWALL_CONFIG: {:?}", error))?;
+        let opened_id = map_data
+            .info()
+            .map_err(|error| format!("inspect reopened current FIREWALL_CONFIG: {:?}", error))?
+            .id();
+        if opened_id != self.expected_map_id {
+            return Err(format!(
+                "FIREWALL_CONFIG map identity changed while reopening: expected {}, current {}",
+                self.expected_map_id, opened_id
+            ));
+        }
+        self.map = Some(
+            BpfHashMap::<_, u32, FirewallConfig>::try_from(Map::HashMap(map_data))
+                .map_err(|error| format!("convert current FIREWALL_CONFIG: {:?}", error))?,
+        );
+        Ok(())
+    }
+
+    fn read_key_zero(&mut self) -> Result<Option<FirewallConfig>, String> {
+        let map = self
+            .map
+            .as_mut()
+            .ok_or_else(|| "current FIREWALL_CONFIG was not revalidated".to_string())?;
+        match map.get(&0u32, 0) {
+            Ok(config) => Ok(Some(config)),
+            Err(aya::maps::MapError::KeyNotFound) => Ok(None),
+            Err(error) => Err(format!("read FIREWALL_CONFIG key 0: {}", error)),
+        }
+    }
+
+    fn write_key_zero(&mut self, config: FirewallConfig) -> Result<(), String> {
+        self.map
+            .as_mut()
+            .ok_or_else(|| "current FIREWALL_CONFIG was not revalidated".to_string())?
+            .insert(&0u32, &config, 0)
+            .map_err(|error| format!("write FIREWALL_CONFIG key 0: {:?}", error))
+    }
+
+    fn validate_current_pin_after_readback(&mut self) -> Result<(), String> {
+        let current_id = self.current_firewall_config_map_id()?;
+        if current_id != self.expected_map_id {
+            return Err(format!(
+                "FIREWALL_CONFIG current pin replaced during update: expected {}, current {}",
+                self.expected_map_id, current_id
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct ControlPlane {
     instances: RwLock<HashMap<String, Arc<tokio::sync::RwLock<InstanceState>>>>,
     neutron_authorities: RwLock<HashMap<String, NeutronPortAuthority>>,
@@ -1128,6 +1254,7 @@ pub struct ControlPlane {
     trace_manager: Arc<TraceManager>,
     fragment_tracking: FragmentTrackingSettings,
     chains: RwLock<Vec<ServiceChain>>,
+    maintenance_authority_seal: Arc<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -4264,6 +4391,7 @@ impl ControlPlane {
             trace_manager,
             fragment_tracking,
             chains: RwLock::new(chains),
+            maintenance_authority_seal: Arc::new(()),
         }
     }
 
@@ -4277,6 +4405,126 @@ impl ControlPlane {
 
     pub fn trace_map_mode(&self) -> TraceMapMode {
         self.trace_manager.map_mode()
+    }
+
+    async fn current_managed_maintenance_authority_facts(
+        &self,
+    ) -> Result<ManagedMaintenanceAuthorityFacts, String> {
+        let configured_pin_path = PathBuf::from(self.managed_pin_path());
+        let configured_mode = self.trace_map_mode();
+        let current_firewall_config_map_id =
+            aria_core::ebpf_ops::validate_managed_pin_path_security(
+                &configured_pin_path,
+                configured_mode,
+            )?;
+        let instances = self
+            .instances
+            .read()
+            .await
+            .iter()
+            .map(|(name, state)| (name.clone(), Arc::clone(state)))
+            .collect::<Vec<_>>();
+        let mut owner_program_ids = Vec::new();
+        let mut live_owner_count = 0usize;
+        let mut persisted_mode = configured_mode;
+        let mut complete_mode_inventory = true;
+        for (name, instance) in instances {
+            let state = instance.read().await;
+            if Path::new(&state.pin_path) != configured_pin_path
+                || state.tap_id == aria_core::common::TAP_ID_UNASSIGNED
+            {
+                continue;
+            }
+            let iface = Self::runtime_iface_name(&name, &state)
+                .map_err(|error| error.to_string())?;
+            if let Some(expected_ifindex) = state.ifindex {
+                if Self::resolve_ifindex(&iface)? != expected_ifindex {
+                    return Err(format!("live Aria runtime ifindex changed for {}", iface));
+                }
+            }
+            let runtime = FirewallInstance::new(
+                &iface,
+                configured_pin_path.clone(),
+                state.state_path.clone().into(),
+                true,
+                configured_mode,
+            );
+            let identity: ManagedMaintenanceRuntimeIdentity =
+                runtime.managed_maintenance_runtime_identity(&self.ebpf_path)?;
+            persisted_mode = identity.trace_map_mode;
+            complete_mode_inventory &= identity.complete_mode_inventory;
+            owner_program_ids.extend(identity.owner_program_ids);
+            live_owner_count += 1;
+        }
+        owner_program_ids.sort_unstable();
+        owner_program_ids.dedup();
+        if live_owner_count == 0 {
+            return Err("live Aria runtime identity is absent for managed authority".to_string());
+        }
+        Ok(ManagedMaintenanceAuthorityFacts {
+            configured_pin_path: configured_pin_path.clone(),
+            candidate_pin_path: configured_pin_path,
+            configured_mode,
+            persisted_mode,
+            expected_firewall_config_map_id: current_firewall_config_map_id,
+            current_firewall_config_map_id,
+            expected_owner_program_ids: owner_program_ids.clone(),
+            current_owner_program_ids: owner_program_ids,
+            live_owner_count,
+            complete_mode_inventory,
+        })
+    }
+
+    pub(crate) async fn mint_managed_maintenance_authority(
+        &self,
+    ) -> Result<ManagedFirewallConfigAuthority, String> {
+        let facts = self.current_managed_maintenance_authority_facts().await?;
+        validate_managed_maintenance_authority_facts(&facts)?;
+        Ok(ManagedFirewallConfigAuthority {
+            facts,
+            authority_seal: Arc::downgrade(&self.maintenance_authority_seal),
+        })
+    }
+
+    pub(crate) async fn set_acl_maintenance_bypass(
+        &self,
+        authority: &ManagedFirewallConfigAuthority,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let _lifecycle_guard = self.runtime_lifecycle_lock.lock().await;
+        let authority_seal = authority
+            .authority_seal
+            .upgrade()
+            .ok_or_else(|| "managed maintenance authority owner expired".to_string())?;
+        if !Arc::ptr_eq(&authority_seal, &self.maintenance_authority_seal) {
+            return Err("managed maintenance authority belongs to another control plane".to_string());
+        }
+        let mut current = self.current_managed_maintenance_authority_facts().await?;
+        current.expected_firewall_config_map_id =
+            authority.facts.expected_firewall_config_map_id;
+        current.expected_owner_program_ids = authority.facts.expected_owner_program_ids.clone();
+        current.candidate_pin_path = authority.facts.candidate_pin_path.clone();
+        validate_managed_maintenance_authority_facts(&current)?;
+
+        let mut store = ManagedFirewallConfigStore::new(
+            current.configured_pin_path,
+            current.configured_mode,
+            current.expected_firewall_config_map_id,
+        );
+        aria_core::ebpf_ops::serialized_shared_firewall_config_rmw(
+            &mut store,
+            "ACL maintenance bypass update",
+            |current| {
+                let current = current.ok_or_else(|| {
+                    "ACL maintenance bypass update requires initialized FIREWALL_CONFIG key 0"
+                        .to_string()
+                })?;
+                Ok(aria_core::ebpf_ops::firewall_config_with_acl_maintenance_bypass(
+                    current, enabled,
+                ))
+            },
+        )?;
+        Ok(())
     }
 
     pub(crate) async fn lock_runtime_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {

@@ -144,7 +144,10 @@ documented bootstrap exception:
 1. use the current proven hash-aware installer to stop the Python writer and
    quiesce/detach only exact Aria-owned managed ports;
 2. verify OVS forwarding and OVS/OVS-agent identity continuously;
-3. install the gate-capable datapath and agent from one CI release manifest;
+3. install the gate-capable datapath, authenticated control endpoint, durable
+   transaction and installer integration (Tasks 3–6) from one source commit and
+   one CI release manifest; Task 3's packet gate primitive alone must continue
+   to publish `maintenance_gate_capable=false`;
 4. run authoritative full-resync, verify the complete host generation, and
    record the node as `maintenance_gate_capable=true`;
 5. require every later incompatible or joint upgrade to use the transaction

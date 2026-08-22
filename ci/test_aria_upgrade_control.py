@@ -168,6 +168,7 @@ class AriaUpgradeControlTest(unittest.TestCase):
         current = manifest()
         current["runtime_compatibility"]["maintenance_gate_capable"] = False
         candidate = manifest("3")
+        candidate["runtime_compatibility"]["maintenance_gate_capable"] = True
         result = control.classify_upgrade(current, candidate)
         self.assertEqual("planned_maintenance", result.path)
         self.assertEqual(("maintenance_gate_capability_changed",), result.reasons)
@@ -177,6 +178,7 @@ class AriaUpgradeControlTest(unittest.TestCase):
         current = manifest()
         current["runtime_compatibility"]["maintenance_gate_capable"] = False
         candidate = manifest()
+        candidate["runtime_compatibility"]["maintenance_gate_capable"] = True
         candidate["runtime_compatibility"]["wal_schema_version"] += 1
         result = control.classify_upgrade(current, candidate)
         self.assertEqual("planned_maintenance", result.path)

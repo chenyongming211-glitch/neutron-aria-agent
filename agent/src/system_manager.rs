@@ -913,7 +913,7 @@ pub async fn system_start(
             &quiesced_desired,
         )
     } else {
-        replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)
+        replay_state_from_snapshot(&mut bpf, pin_path, state_path, &quiesced_desired)
     };
     if let Err(e) = replay_result {
         return Err(start_error_with_cleanup(

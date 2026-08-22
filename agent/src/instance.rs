@@ -500,6 +500,13 @@ enum RuntimeInventoryStatus {
     StaleOrIncomplete(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ManagedMaintenanceRuntimeIdentity {
+    pub trace_map_mode: TraceMapMode,
+    pub owner_program_ids: Vec<u32>,
+    pub complete_mode_inventory: bool,
+}
+
 fn default_persisted_live_iface_active() -> bool {
     true
 }
@@ -517,6 +524,43 @@ fn runtime_metadata_is_from_prior_boot(
 }
 
 impl FirewallInstance {
+    pub(crate) fn managed_maintenance_runtime_identity(
+        &self,
+        ebpf_path: &str,
+    ) -> Result<ManagedMaintenanceRuntimeIdentity, String> {
+        let expected = self.expected_runtime_metadata(ebpf_path)?;
+        let complete_mode_inventory =
+            matches!(self.validate_runtime_inventory(&expected), RuntimeInventoryStatus::Healthy);
+        if !complete_mode_inventory {
+            return Err("persisted runtime metadata or mode-aware inventory is stale".to_string());
+        }
+        let persisted = self.load_runtime_metadata()?;
+        let persisted_mode = if persisted
+            .critical_map_pins
+            .iter()
+            .any(|name| name == "TRACE_EVENTS")
+        {
+            TraceMapMode::Stream
+        } else {
+            TraceMapMode::Legacy
+        };
+        let health = self.tc_acl_link_health();
+        if !health.ingress || !health.egress {
+            return Err("live Aria TC owner identity is incomplete".to_string());
+        }
+        let mut owner_program_ids = vec![
+            self.pinned_tc_program_identity("tc_ingress")?.id,
+            self.pinned_tc_program_identity("tc_egress")?.id,
+        ];
+        owner_program_ids.sort_unstable();
+        owner_program_ids.dedup();
+        Ok(ManagedMaintenanceRuntimeIdentity {
+            trace_map_mode: persisted_mode,
+            owner_program_ids,
+            complete_mode_inventory,
+        })
+    }
+
     fn fq_qdisc_marker_path(&self) -> PathBuf {
         self.state_path.join(FQ_QDISC_MARKER)
     }

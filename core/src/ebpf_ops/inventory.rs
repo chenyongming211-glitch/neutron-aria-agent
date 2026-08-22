@@ -739,6 +739,17 @@ pub fn critical_network_map_names(trace_mode: TraceMapMode) -> &'static [&'stati
     }
 }
 
+pub fn missing_critical_network_maps(
+    trace_mode: TraceMapMode,
+    observed: &[&str],
+) -> Vec<&'static str> {
+    critical_network_map_names(trace_mode)
+        .iter()
+        .copied()
+        .filter(|required| !observed.contains(required))
+        .collect()
+}
+
 pub const SSL_MAP_NAMES: &[&str] = &[
     "SSL_HANDSHAKE_SCRATCH",
     "SSL_CONN_TABLE",
