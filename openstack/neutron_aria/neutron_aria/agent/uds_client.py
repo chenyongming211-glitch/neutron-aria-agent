@@ -1061,6 +1061,15 @@ def _decode_status_v4(body):
         allow_retry_snapshot=True,
     )
     maintenance_action = body.get("maintenance_action")
+    maintenance_required = (
+        decoded["required_action"] == "complete_or_repair_maintenance"
+    )
+    if maintenance_required != (
+        maintenance_action == "complete_or_repair_maintenance"
+    ):
+        raise LocalApiContractError(
+            "required_action and maintenance_action must identify one transaction"
+        )
     acl_enforcement = _strict_string(
         _required(body, "acl_enforcement"),
         "acl_enforcement",

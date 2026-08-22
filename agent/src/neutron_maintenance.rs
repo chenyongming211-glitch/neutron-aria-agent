@@ -16,12 +16,23 @@ use crate::neutron_wal::NeutronWal;
 
 pub(crate) const ADMIN_SOCKET_PATH: &str = "/run/aria/aria-admin.sock";
 pub(crate) const MAINTENANCE_WAL_RECORD_MAX_BYTES: usize = 64 * 1024;
+// WAL v1 omitted the Abort compare-and-swap phase from some records.  Readers
+// migrate only that legacy shape; every new record is v2 and must carry it.
+const MAINTENANCE_WAL_SCHEMA_VERSION_LEGACY: u32 = 1;
+const MAINTENANCE_WAL_SCHEMA_VERSION: u32 = 2;
 const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_REASON_BYTES: usize = 256;
 const MAX_HASH_BYTES: usize = 256;
 const MAX_ERROR_BYTES: usize = 512;
 const MAX_DOMAINS: usize = 4;
 const MAX_MAINTENANCE_REPLAY_RECORDS: usize = 4_096;
+
+fn supported_maintenance_wal_version(version: u32) -> bool {
+    matches!(
+        version,
+        MAINTENANCE_WAL_SCHEMA_VERSION_LEGACY | MAINTENANCE_WAL_SCHEMA_VERSION
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MaintenanceError {
@@ -680,28 +691,28 @@ impl MaintenanceWalRecord {
 
     pub(crate) fn enter_intent_state(state: MaintenanceState) -> Self {
         Self::EnterIntent {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
 
     pub(crate) fn enter_commit_state(state: MaintenanceState) -> Self {
         Self::EnterCommit {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
 
     pub(crate) fn exit_intent_state(state: MaintenanceState) -> Self {
         Self::ExitIntent {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
 
     pub(crate) fn exit_commit_state(state: MaintenanceState) -> Self {
         Self::ExitCommit {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
@@ -711,7 +722,7 @@ impl MaintenanceWalRecord {
         expected_phase: MaintenancePhase,
     ) -> Self {
         Self::AbortIntent {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
             expected_phase: Some(expected_phase),
         }
@@ -719,14 +730,14 @@ impl MaintenanceWalRecord {
 
     pub(crate) fn abort_commit_state(state: MaintenanceState) -> Self {
         Self::AbortCommit {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
 
     pub(crate) fn progress_commit_state(state: MaintenanceState) -> Self {
         Self::ProgressCommit {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
@@ -740,7 +751,7 @@ impl MaintenanceWalRecord {
         block_cause: Option<String>,
     ) -> Self {
         Self::Checkpoint {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
             pending_transition,
             terminal_action,
@@ -756,7 +767,7 @@ impl MaintenanceWalRecord {
         block_cause: impl AsRef<str>,
     ) -> Self {
         Self::RecoveryCommit {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
             gate_state,
             block_cause: bounded_error(block_cause),
@@ -774,7 +785,7 @@ impl MaintenanceWalRecord {
             .next_state
             .expect("mutating enter plan carries state");
         Ok(Self::EnterIntent {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         })
     }
@@ -782,7 +793,7 @@ impl MaintenanceWalRecord {
     #[cfg(test)]
     fn abort_commit(state: MaintenanceState) -> Self {
         Self::AbortCommit {
-            schema_version: MAINTENANCE_SCHEMA_VERSION,
+            schema_version: MAINTENANCE_WAL_SCHEMA_VERSION,
             state,
         }
     }
@@ -798,7 +809,7 @@ pub(crate) fn decode_maintenance_record(raw: &[u8]) -> Result<MaintenanceWalReco
     let record: MaintenanceWalRecord = serde_json::from_slice(raw)
         .map_err(|error| format!("unknown or malformed maintenance WAL record: {}", error))?;
     let (version, state) = record.version_and_state();
-    if version != MAINTENANCE_SCHEMA_VERSION {
+    if !supported_maintenance_wal_version(version) {
         return Err(format!(
             "unsupported maintenance WAL schema version {}",
             version
@@ -864,12 +875,13 @@ pub(crate) fn replay_maintenance_records(
             return Err("duplicate maintenance WAL record".to_string());
         }
         let (version, next) = record.version_and_state();
-        if version != MAINTENANCE_SCHEMA_VERSION {
+        if !supported_maintenance_wal_version(version) {
             return Err(format!("unsupported maintenance WAL version {}", version));
         }
         validate_state(next)?;
         match record {
             MaintenanceWalRecord::Checkpoint {
+                schema_version,
                 pending_transition,
                 terminal_action: checkpoint_terminal,
                 terminal_expected_phase: checkpoint_expected_phase,
@@ -883,7 +895,24 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 pending = *pending_transition;
                 terminal_action = *checkpoint_terminal;
-                terminal_expected_phase = checkpoint_expected_phase.clone();
+                terminal_expected_phase = checkpoint_expected_phase.clone().or_else(|| {
+                    // A v1 terminal Abort was only retryable from the active
+                    // bypass CAS.  Preserve that narrow lost-response case
+                    // without making a missing phase legal in v2.
+                    if *schema_version == MAINTENANCE_WAL_SCHEMA_VERSION_LEGACY
+                        && (pending == Some(MaintenancePendingTransition::Abort)
+                            || terminal_action == Some(MaintenanceTerminalAction::Abort))
+                    {
+                        Some(match &state.phase {
+                            MaintenancePhase::Committed => {
+                                MaintenancePhase::MaintenanceBypass
+                            }
+                            phase => phase.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                });
                 if let Some(cause) = checkpoint_cause.as_deref() {
                     bounded_text(cause, "block_cause", MAX_ERROR_BYTES)
                         .map_err(|error| error.details)?;
@@ -1009,6 +1038,7 @@ pub(crate) fn replay_maintenance_records(
                 state.phase = MaintenancePhase::MaintenanceBypass;
                 state.last_error = Some("recovered_dangling_exit_intent".to_string());
                 pending = Some(MaintenancePendingTransition::Exit);
+                terminal_action = None;
                 terminal_expected_phase = None;
             }
             MaintenanceWalRecord::ExitCommit { .. } => {
@@ -1028,11 +1058,28 @@ pub(crate) fn replay_maintenance_records(
                 gate_state = MaintenanceGateState::Enforce;
                 block_cause = None;
             }
-            MaintenanceWalRecord::AbortIntent { expected_phase, .. } => {
+            MaintenanceWalRecord::AbortIntent {
+                schema_version,
+                expected_phase,
+                ..
+            } => {
                 if !state.is_active() || pending.is_some() {
                     return Err("maintenance abort intent without active operation".to_string());
                 }
-                if expected_phase.as_ref() != Some(&state.phase) {
+                let expected_phase = match expected_phase {
+                    Some(expected_phase) => expected_phase.clone(),
+                    // Before v2, AbortIntent identity was the immediately
+                    // preceding durable active phase.
+                    None if *schema_version == MAINTENANCE_WAL_SCHEMA_VERSION_LEGACY => {
+                        state.phase.clone()
+                    }
+                    None => {
+                        return Err(
+                            "maintenance abort intent is missing expected phase".to_string()
+                        );
+                    }
+                };
+                if expected_phase != state.phase {
                     return Err("maintenance abort intent expected phase changed".to_string());
                 }
                 if !same_transaction_identity(&state, next)
@@ -1046,7 +1093,7 @@ pub(crate) fn replay_maintenance_records(
                 state = next.clone();
                 state.phase = MaintenancePhase::MaintenanceBypass;
                 pending = Some(MaintenancePendingTransition::Abort);
-                terminal_expected_phase = expected_phase.clone();
+                terminal_expected_phase = Some(expected_phase);
             }
             MaintenanceWalRecord::AbortCommit { .. } => {
                 if pending != Some(MaintenancePendingTransition::Abort)
@@ -1098,10 +1145,26 @@ pub(crate) fn replay_maintenance_records(
                 }
                 bounded_text(next_cause, "block_cause", MAX_ERROR_BYTES)
                     .map_err(|error| error.details)?;
-                if *next_gate == MaintenanceGateState::Unknown
-                    && next.phase != MaintenancePhase::GateUnknown
-                {
-                    return Err("gate-unknown recovery must use gate_unknown phase".to_string());
+                let recovery_identity_valid = match next_gate {
+                    MaintenanceGateState::Unknown => {
+                        next.phase == MaintenancePhase::GateUnknown
+                            && next_cause == "maintenance_gate_unknown"
+                    }
+                    MaintenanceGateState::Bypass => {
+                        next.phase == MaintenancePhase::MaintenanceBypass
+                            && matches!(
+                                next_cause.as_str(),
+                                "maintenance_gate_reverified"
+                                    | "maintenance_terminal_retry_required"
+                            )
+                    }
+                    MaintenanceGateState::Enforce => false,
+                };
+                if !recovery_identity_valid {
+                    return Err(
+                        "maintenance recovery gate, phase, and cause are inconsistent"
+                            .to_string(),
+                    );
                 }
                 state = next.clone();
                 gate_state = *next_gate;
@@ -1728,6 +1791,8 @@ impl MaintenanceCoordinator {
                 .map_err(|error| {
                     MaintenanceError::internal("maintenance_wal_intent_failed", error)
                 })?;
+            *self.terminal_action.write().await = None;
+            *self.terminal_expected_phase.write().await = None;
             *self.pending_transition.write().await = Some(MaintenancePendingTransition::Exit);
         }
         *self.state.write().await = verifying.clone();
@@ -1838,6 +1903,12 @@ impl MaintenanceCoordinator {
             request.error.as_deref(),
         );
         let current = self.state.read().await.clone();
+        if *self.pending_transition.read().await == Some(MaintenancePendingTransition::Exit) {
+            return Err(MaintenanceError::conflict(
+                "maintenance_phase_conflict",
+                "abort cannot overtake a persisted exit transition",
+            ));
+        }
         let terminal_action = *self.terminal_action.read().await;
         let terminal_expected_phase = self.terminal_expected_phase.read().await.clone();
         if terminal_action.is_some() {
