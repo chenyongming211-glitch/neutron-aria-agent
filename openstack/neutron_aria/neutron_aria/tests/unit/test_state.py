@@ -433,6 +433,61 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
             state["last_cleared_pending_reason"],
         )
 
+    def test_maintenance_completion_seam_is_bounded_and_operation_bound(self):
+        store = SnapshotStateStore(self.state_dir)
+        snapshot = self._snapshot("p1")
+        snapshot["maintenance_operation_id"] = "op-joint-7"
+        desired_hash = desired_snapshot_hash(snapshot)
+        store.record_maintenance_progress("op-joint-7", 2, desired_hash)
+        prepared = store.prepare_snapshot(snapshot)
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+
+        record_completion = getattr(store, "record_maintenance_completion", None)
+        self.assertTrue(callable(record_completion),
+                        "missing operation-bound maintenance completion seam")
+        completion = record_completion(
+            "op-joint-7",
+            prepared["generation"],
+            prepared["desired_hash"],
+            ["p1"],
+        )
+        restarted = SnapshotStateStore(self.state_dir)
+
+        maintenance_progress = getattr(restarted, "maintenance_progress", None)
+        self.assertTrue(callable(maintenance_progress),
+                        "missing bounded maintenance progress reader")
+        self.assertEqual(completion, maintenance_progress("op-joint-7"))
+        self.assertEqual({
+            "schema_version", "operation_id", "stable_read_attempts",
+            "stable_desired_hash", "last_progress_at", "completed_generation",
+            "completed_desired_hash", "completed_managed_port_ids", "complete",
+        }, set(completion))
+        self.assertTrue(completion["complete"])
+        self.assertEqual(["p1"], completion["completed_managed_port_ids"])
+        self.assertLess(len(json.dumps(completion)), 4096)
+        with self.assertRaises(ValueError):
+            maintenance_progress("foreign-operation")
+
+    def test_maintenance_completion_seam_allows_authoritative_empty_host(self):
+        store = SnapshotStateStore(self.state_dir)
+        snapshot = {"host": "compute-1", "ports": [],
+                    "maintenance_operation_id": "op-empty-host"}
+        desired_hash = desired_snapshot_hash(snapshot)
+        store.record_maintenance_progress("op-empty-host", 1, desired_hash)
+        prepared = store.prepare_snapshot(snapshot)
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+
+        record_completion = getattr(store, "record_maintenance_completion", None)
+        self.assertTrue(callable(record_completion),
+                        "missing operation-bound maintenance completion seam")
+        completion = record_completion(
+            "op-empty-host", prepared["generation"],
+            prepared["desired_hash"], [],
+        )
+
+        self.assertTrue(completion["complete"])
+        self.assertEqual([], completion["completed_managed_port_ids"])
+
 
 class StatusContractStateRedTestCase(unittest.TestCase):
     def setUp(self):

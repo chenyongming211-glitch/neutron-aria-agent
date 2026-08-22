@@ -127,6 +127,9 @@ case "$args" in
   *" inspect -f {{.Image}} aria_datapath "*) if [ -f "$DP_IMAGE_STATE" ]; then cat "$DP_IMAGE_STATE"; else printf '%s\n' "$OLD_DP"; fi ;;
   *" inspect -f {{.Image}} neutron_aria_agent "*) if [ -f "$AGENT_IMAGE_STATE" ]; then cat "$AGENT_IMAGE_STATE"; else printf '%s\n' "$OLD_AGENT"; fi ;;
   *" exec neutron_openvswitch_agent ovs-vsctl --no-wait get bridge br-int _uuid"*) printf 'br-int-test\n' ;;
+  *" exec neutron_openvswitch_agent ovs-appctl -t ovs-vswitchd version"*)
+    [ "${FAIL_AT:-}" != ovs_canary ] || exit 71
+    printf 'ovs-vswitchd (Open vSwitch) 2.17.9\n' ;;
   *" inspect -f {{.Id}} neutron_openvswitch_agent "*) printf 'ovs-agent-id\n' ;;
   *" inspect -f {{.State.StartedAt}} neutron_openvswitch_agent "*) printf '2026-08-22T00:00:00Z\n' ;;
   *" inspect -f {{.State.Health.Status}} "*) printf 'healthy\n' ;;
@@ -183,6 +186,140 @@ else
 fi
 ''',
         )
+        # Override the legacy hybrid-status fake above with the exact production
+        # V4 Neutron/admin wire contracts.  The legacy block is removed in GREEN.
+        self.write_executable(
+            "curl",
+            r'''#!/usr/bin/env python3
+import json, os, sys
+
+args = sys.argv[1:]
+text = " ".join(args)
+with open(os.environ["TRACE_FILE"], "a") as stream:
+    stream.write("curl %s\n" % text)
+
+def env(name, default=None):
+    return os.environ.get(name, default)
+
+def api_state():
+    try:
+        with open(os.environ["API_STATE"]) as stream:
+            return stream.read().strip()
+    except IOError:
+        return "baseline"
+
+def set_api_state(value):
+    with open(os.environ["API_STATE"], "w") as stream:
+        stream.write(value)
+
+def emit(body):
+    sys.stdout.write(json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n")
+
+def maintenance_state(phase, generation, desired_hash, active):
+    return {
+        "schema_version": 1,
+        "operation_id": env("ADMIN_OPERATION_ID", env("OPERATION_ID")) if active else None,
+        "phase": env("ADMIN_PHASE", phase),
+        "active_domains": [env("ADMIN_DOMAIN", "acl")] if active else [],
+        "expected_generation": int(env("ADMIN_EXPECTED_GENERATION", "41")) if active else 0,
+        "expected_desired_hash": env("OLD_HASH") if active else None,
+        "applied_generation": generation,
+        "applied_desired_hash": desired_hash,
+        "bypass_started_at_ms": 1 if active else None,
+        "last_progress_at_ms": 2,
+        "last_error": None,
+    }
+
+if "/maintenance/enter" in text:
+    if env("FAIL_AT") == "enter":
+        raise SystemExit(40)
+    if "same_operation_rollback" in text:
+        for required in (
+            '"expected_applied_generation":41',
+            '"expected_desired_hash":"%s"' % env("OLD_HASH"),
+        ):
+            if required not in text:
+                raise SystemExit(94)
+        set_api_state("resynced")
+    else:
+        set_api_state("bypass")
+    emit({"status": "accepted", "accepted": True,
+          "state": maintenance_state("maintenance_bypass", 41, env("OLD_HASH"), True)})
+elif "/maintenance/exit" in text:
+    if env("FAIL_AT") == "activation":
+        raise SystemExit(43)
+    for required in (
+        '"operation_id":"%s"' % env("OPERATION_ID"),
+        '"expected_applied_generation":42',
+        '"expected_applied_desired_hash":"%s"' % env("NEW_HASH"),
+    ):
+        if required not in text:
+            raise SystemExit(91)
+    set_api_state("active")
+    terminal = maintenance_state("committed", 42, env("NEW_HASH"), True)
+    terminal["active_domains"] = []
+    emit({"status": "committed", "accepted": True, "state": terminal})
+elif "/api/v1/livez" in text or text.endswith("/livez"):
+    emit({"service_liveness": "alive"})
+elif text.endswith("/readyz"):
+    emit({"overall_readiness": "ready"})
+elif "/api/v1/admin/maintenance" in text:
+    current = api_state()
+    if current in ("bypass", "resynced"):
+        generation = 42 if current == "resynced" else 41
+        desired = env("NEW_HASH") if current == "resynced" else env("OLD_HASH")
+        emit({"status": "active", "accepted": False,
+              "state": maintenance_state("maintenance_bypass", generation, desired, True)})
+    else:
+        emit({"status": "ready", "accepted": False,
+              "state": maintenance_state("ready", 42, env("NEW_HASH"), False)})
+elif "/api/v1/neutron/status" in text:
+    current = api_state()
+    if current == "bypass" and env("FAIL_AT") == "after_bypass":
+        raise SystemExit(41)
+    resynced = current in ("resynced", "hot-resynced", "active")
+    generation = int(env("SYNC_ACCEPTED", "42")) if resynced else 41
+    applied = int(env("SYNC_APPLIED", str(generation))) if resynced else 41
+    desired = env("SYNC_HASH", env("NEW_HASH")) if resynced else env("OLD_HASH")
+    pending_text = env("SYNC_PENDING", "null") if resynced else env("BYPASS_PENDING", "null")
+    pending = None if pending_text == "null" else int(pending_text)
+    port_ids = [] if env("ZERO_PORTS", "false") == "true" else env(
+        "SYNC_PORTS" if resynced else "BASELINE_PORTS", "tap-a,tap-b"
+    ).split(",")
+    port_ids = [item for item in port_ids if item]
+    managed = [{"port_id": item, "ifname": item, "ifindex": index + 10,
+                "managed_domains": ["acl"], "domain_desired_hashes": {"acl": desired}}
+               for index, item in enumerate(port_ids)]
+    port_status = env("SYNC_PORT_STATUS", "ready") if resynced else "ready"
+    rows = [{"port_id": item, "ifname": item, "generation": applied,
+             "desired_hash": desired, "status": port_status, "reason": None,
+             "managed_domains": ["acl"], "domains": [{"domain": "acl",
+             "status": port_status, "reason": None, "effective_action": "enforce",
+             "support_disposition": env("SYNC_SUPPORT", "supported")}]}
+            for item in port_ids]
+    maintenance = current in ("bypass", "resynced")
+    emit({"status_schema_version": 4,
+          "status_contract_hash": "v0.9-neutron-status-4",
+          "transaction_state": "blocked" if maintenance else "ready",
+          "overall_readiness": "degraded" if maintenance else "ready",
+          "required_action": "complete_or_repair_maintenance" if maintenance else "none",
+          "recovery_cause": None, "last_classified_generation": applied,
+          "generation": generation, "accepted_generation": generation,
+          "applied_generation": applied, "pending_generation": pending,
+          "desired_hash": desired, "applied_desired_hash": desired,
+          "wal_status": "committed", "wal_replay_failures": 0,
+          "authority_state": "ready",
+          "maintenance_phase": "maintenance_bypass" if maintenance else None,
+          "maintenance_operation_id": env("STATUS_OPERATION_ID", env("OPERATION_ID")) if maintenance else None,
+          "maintenance_reason": "planned_upgrade_bypass" if maintenance else None,
+          "maintenance_action": "complete_or_repair_maintenance" if maintenance else None,
+          "acl_enforcement": env("BYPASS_ACL_ENFORCEMENT", "bypass") if maintenance else "enforce",
+          "managed_ports": managed, "port_statuses": rows,
+          "active_instances": [item[0:15] for item in port_ids]})
+else:
+    raise SystemExit(88)
+''',
+        )
         self.write_executable(
             "pgrep",
             "#!/usr/bin/env bash\nprintf 'pgrep %s\\n' \"$*\" >>\"$TRACE_FILE\"\nprintf '9001\\n'\n",
@@ -192,7 +329,6 @@ fi
             "#!/usr/bin/env bash\nprintf 'df %s\\n' \"$*\" >>\"$TRACE_FILE\"\nif [ \"${REALISTIC_DF:-false}\" = true ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/test 9999999 1000 %s 1%% /var/lib\\n' \"${DF_AVAILABLE:-1048576}\"; else printf '%s\\n' \"${DF_AVAILABLE:-1048576}\"; fi\n",
         )
         self.write_executable("flock", "#!/usr/bin/env bash\nprintf 'flock %s\\n' \"$*\" >>\"$TRACE_FILE\"\nexit 0\n")
-        self.write_executable("ovs-canary", "#!/usr/bin/env bash\nprintf 'ovs-canary %s\\n' \"$*\" >>\"$TRACE_FILE\"\nif [ \"${FAIL_AT:-}\" = ovs_canary ] && [ -f \"$API_STATE\" ] && [ \"$(cat \"$API_STATE\")\" = bypass ]; then exit 1; fi\n")
         self.control_entrypoint = self.write_executable(
             "upgrade-control",
             '#!/usr/bin/env bash\nexec python3 "%s" "$@"\n' % UPGRADE_CONTROL,
@@ -207,6 +343,15 @@ printf '%s %s\n' "$component" "$action" >>"$TRACE_FILE"
 if [ "$component" = agent ] && [ "$action" = verify ]; then
   [ "${FAIL_AT:-}" != resync ] || exit 42
   if [ "${HOT_AGENT:-false}" = true ]; then printf hot-resynced >"$API_STATE"; else printf resynced >"$API_STATE"; fi
+fi
+if [ "$component" = agent ] && [ "$action" = resync-status ]; then
+  ports=${SYNC_COMPLETION_PORTS:-${SYNC_PORTS:-tap-a,tap-b}}
+  [ "${ZERO_PORTS:-false}" != true ] || ports=
+  python3 - "$ports" <<'PY'
+import json,os,sys
+ports=[item for item in sys.argv[1].split(',') if item]
+print(json.dumps({"schema_version":1,"operation_id":os.environ.get("SYNC_OPERATION_ID",os.environ["OPERATION_ID"]),"stable_read_attempts":int(os.environ.get("SYNC_STABLE_READS","2")),"stable_desired_hash":os.environ.get("SYNC_STABLE_HASH",os.environ["NEW_HASH"]),"completed_generation":int(os.environ.get("SYNC_APPLIED","42")),"completed_desired_hash":os.environ.get("SYNC_HASH",os.environ["NEW_HASH"]),"completed_managed_port_ids":ports,"buffer_overflow":os.environ.get("SYNC_BUFFER_OVERFLOW","false")=="true","foreign_host_ambiguity":os.environ.get("SYNC_FOREIGN","[]")!="[]","complete":True},sort_keys=True,separators=(",",":")))
+PY
 fi
 if [ "$component" = datapath ] && [ "$action" = replace ]; then printf '%s\n' "$NEW_DP" >"$DP_IMAGE_STATE"; fi
 if [ "$component" = agent ] && [ "$action" = replace ]; then printf '%s\n' "$NEW_AGENT" >"$AGENT_IMAGE_STATE"; fi
@@ -235,7 +380,6 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
                 "AGENT_INSTALLER": str(self.agent_fake),
                 "JOINT_STATE_DIR": str(self.root / "release-state"),
                 "JOINT_LOCK_PATH": str(self.root / "joint.lock"),
-                "OVS_CANARY_COMMAND": str(self.bin / "ovs-canary"),
                 "CURRENT_ARTIFACT_ROOT": str(self.current_artifacts),
                 "CANDIDATE_ARTIFACT_ROOT": str(self.candidate_artifacts),
                 "DATAPATH_IMAGE_REF": "registry/datapath:task7",
@@ -277,6 +421,8 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
         return env
 
     def phase_value(self):
+        if not self.phase.exists():
+            return "<missing-ledger>"
         return json.loads(self.phase.read_text(encoding="utf-8"))["phase"]
 
     def reset_operation(self):
@@ -286,13 +432,90 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
         (self.root / "agent-image-state").unlink(missing_ok=True)
         self.trace.unlink(missing_ok=True)
 
+    @staticmethod
+    def _config_pair_hash(*paths):
+        digest = hashlib.sha256()
+        for path in paths:
+            digest.update(Path(path).read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def seed_ledger_phase(
+        self, phase, classification="planned_maintenance",
+        live_datapath=None, live_agent=None, api_state="baseline",
+    ):
+        env = self.environment(classification)
+        candidate_datapath = OLD_DP if classification == "hot_agent" else NEW_DP
+        evidence = {
+            "affected_domains": ["acl"],
+            "old_image_ids": {"aria-datapath": OLD_DP,
+                              "neutron-aria-agent": OLD_AGENT},
+            "candidate_image_ids": {"aria-datapath": candidate_datapath,
+                                    "neutron-aria-agent": NEW_AGENT},
+            "old_manifest_hash": hashlib.sha256(
+                self.current_manifest.read_bytes()).hexdigest(),
+            "candidate_manifest_hash": hashlib.sha256(
+                self.candidate_manifest.read_bytes()).hexdigest(),
+            "old_config_hash": self._config_pair_hash(
+                env["ROLLBACK_DATAPATH_CONFIG"], env["ROLLBACK_AGENT_CONFIG"]),
+            "candidate_config_hash": self._config_pair_hash(
+                env["CANDIDATE_DATAPATH_CONFIG"], env["CANDIDATE_AGENT_CONFIG"]),
+            "pre_accepted_generation": 41,
+            "pre_applied_generation": 41,
+            "pre_desired_hash": OLD_HASH,
+            "pre_managed_port_ids": ["tap-a", "tap-b"],
+            "ovs_vswitchd_pid": 9001,
+            "ovs_agent_container_id": "ovs-agent-id",
+            "ovs_agent_started_at": "2026-08-22T00:00:00Z",
+            "br_int_uuid": "br-int-test",
+        }
+        env.update({
+            "ARIA_RELEASE_OPERATIONS_DIR": str(
+                self.root / "release-state/operations"),
+            "ARIA_RELEASE_LOCK_PATH": str(self.root / "joint.lock.ledger"),
+        })
+        begin = [str(self.control_entrypoint), "ledger", "begin", "task7-op",
+                 "compute-1", classification, json.dumps(evidence)]
+        subprocess.run(begin, env=env, check=True, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True)
+        paths = {
+            "planned_maintenance": [
+                "preflight", "quiescing", "bypass_preparing",
+                "bypass_confirmed", "datapath_upgrading", "datapath_live",
+                "agent_upgrading", "agent_buffering", "full_resync",
+                "shadow_apply", "activating", "verifying", "committed",
+            ],
+            "hot_agent": [
+                "preflight", "agent_upgrading", "agent_buffering",
+                "full_resync", "shadow_apply", "activating", "verifying",
+                "committed",
+            ],
+        }[classification]
+        self.assertIn(phase, paths)
+        for old_phase, next_phase in zip(paths, paths[1:]):
+            if old_phase == phase:
+                break
+            transition = [str(self.control_entrypoint), "ledger", "transition",
+                          old_phase, next_phase, "task7-op", "{}"]
+            subprocess.run(transition, env=env, check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True)
+            if next_phase == phase:
+                break
+        if live_datapath is not None:
+            (self.root / "dp-image-state").write_text(live_datapath,
+                                                       encoding="utf-8")
+        if live_agent is not None:
+            (self.root / "agent-image-state").write_text(live_agent,
+                                                          encoding="utf-8")
+        if api_state != "baseline":
+            self.api_state.write_text(api_state, encoding="utf-8")
+
     def run_joint(
         self, action, classification="planned_maintenance", fail_at="", expected=0,
         extra=None,
     ):
         self.assertTrue(INSTALLER.is_file(), "joint installer is absent")
-        if action == "resume" and self.api_state.exists():
-            self.api_state.write_text("resynced", encoding="utf-8")
         result = subprocess.run(
             ["bash", str(INSTALLER), action],
             cwd=str(ROOT),
@@ -321,6 +544,9 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             component_source = path.read_text(encoding="utf-8")
             for action in ("prepare", "replace", "verify", "restore"):
                 self.assertIn(action, component_source)
+        self.assertIn(
+            "resync-status", AGENT_INSTALLER.read_text(encoding="utf-8")
+        )
 
     def test_planned_upgrade_orders_bypass_replacements_resync_and_one_activation(self):
         self.run_joint("install")
@@ -330,11 +556,12 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             "agent prepare",
             "/maintenance/enter",
             "/api/v1/admin/maintenance",
-            "ovs-canary",
+            "ovs-appctl -t ovs-vswitchd version",
             "datapath replace",
             "datapath verify",
             "agent replace",
             "agent verify",
+            "agent resync-status",
             "/maintenance/exit",
         )
         offset = -1
@@ -344,6 +571,8 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             offset = next_offset
         self.assertEqual(1, trace.count("/maintenance/exit"), trace)
         self.assertNotIn("/api/v1/admin/full-resync", trace)
+        self.assertNotIn("http://localhost/status", trace)
+        self.assertIn("http://localhost/api/v1/neutron/status", trace)
         self.assertIn('"expected_applied_generation":42', trace)
         self.assertIn('"expected_applied_desired_hash":"%s"' % NEW_HASH, trace)
         self.assertIn("docker inspect -f {{.State.Health.Status}} aria_datapath", trace)
@@ -378,12 +607,10 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             ("admin-operation", {"ADMIN_OPERATION_ID": "foreign-op"}),
             ("admin-domain", {"ADMIN_DOMAIN": "qos"}),
             ("admin-phase", {"ADMIN_PHASE": "gate_unknown"}),
+            ("admin-generation", {"ADMIN_EXPECTED_GENERATION": "40"}),
             ("status-operation", {"STATUS_OPERATION_ID": "foreign-op"}),
             ("enforcement", {"BYPASS_ACL_ENFORCEMENT": "unknown"}),
             ("pending", {"BYPASS_PENDING": "43"}),
-            ("ingress", {"BYPASS_INGRESS": "false"}),
-            ("egress", {"BYPASS_EGRESS": "false"}),
-            ("conntrack", {"BYPASS_CONNTRACK": "enforce"}),
             ("canary", {"FAIL_AT": "ovs_canary"}),
         )
         for label, extra in cases:
@@ -405,11 +632,11 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             ("stable-hash", {"SYNC_STABLE_HASH": OLD_HASH}),
             ("stable-double-read", {"SYNC_STABLE_READS": "1"}),
             ("buffer-overflow", {"SYNC_BUFFER_OVERFLOW": "true"}),
-            ("unsupported", {"SYNC_UNSUPPORTED": '["tap-x"]'}),
+            ("unsupported", {"SYNC_SUPPORT": "unsupported"}),
             ("foreign-host", {"SYNC_FOREIGN": '["tap-y"]'}),
             ("port-incomplete", {"SYNC_PORT_STATUS": "pending"}),
-            ("ingress", {"SYNC_INGRESS": "false"}),
-            ("egress", {"SYNC_EGRESS": "false"}),
+            ("completion-port-mismatch", {"SYNC_PORTS": "tap-a,tap-c",
+                                           "SYNC_COMPLETION_PORTS": "tap-a"}),
         )
         for label, extra in cases:
             with self.subTest(boundary=label):
@@ -422,6 +649,8 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
 
     def test_real_ledger_preserves_upgrade_class_and_bound_artifacts(self):
         self.run_joint("install", fail_at="resync", expected=1)
+        self.assertTrue(self.phase.exists(),
+                        "real-contract preflight never created the ledger")
         state = json.loads(self.phase.read_text(encoding="utf-8"))
         self.assertEqual("planned_maintenance", state["upgrade_class"])
         self.assertEqual(OLD_DP, state["old_image_ids"]["aria-datapath"])
@@ -448,14 +677,71 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
         self.run_joint("install", fail_at="resync", expected=1)
         before = self.read_trace()
         self.trace.write_text("", encoding="utf-8")
+        self.api_state.write_text("resynced", encoding="utf-8")
         self.run_joint("resume")
         resumed = self.read_trace()
-        self.assertGreaterEqual(resumed.count("http://localhost/status"), 2)
+        self.assertGreaterEqual(
+            resumed.count("http://localhost/api/v1/neutron/status"), 2
+        )
         self.assertNotIn("/api/v1/admin/full-resync", resumed)
         self.assertIn("/maintenance/exit", resumed)
         self.assertNotIn(" replace", resumed)
         self.assertEqual("committed", self.phase_value())
         self.assertNotIn("/maintenance/exit", before)
+
+    def test_resume_branches_on_exact_durable_phase_class_and_live_state(self):
+        cases = (
+            ("planned_maintenance", "quiescing", OLD_DP, OLD_AGENT,
+             "baseline", "datapath replace"),
+            ("planned_maintenance", "agent_buffering", NEW_DP, NEW_AGENT,
+             "resynced", None),
+            ("hot_agent", "agent_upgrading", OLD_DP, OLD_AGENT,
+             "baseline", "agent replace"),
+            ("hot_agent", "agent_buffering", OLD_DP, NEW_AGENT,
+             "hot-resynced", None),
+        )
+        for upgrade_class, phase, live_dp, live_agent, api_state, replacement in cases:
+            with self.subTest(upgrade_class=upgrade_class, phase=phase):
+                self.reset_operation()
+                self.seed_ledger_phase(
+                    phase, classification=upgrade_class,
+                    live_datapath=live_dp, live_agent=live_agent,
+                    api_state=api_state,
+                )
+                self.trace.write_text("", encoding="utf-8")
+                self.run_joint("resume", classification=upgrade_class)
+                trace = self.read_trace()
+                if replacement is None:
+                    self.assertNotIn(" replace", trace)
+                else:
+                    self.assertIn(replacement, trace)
+                if upgrade_class == "hot_agent":
+                    self.assertNotIn("/maintenance/enter", trace)
+                    self.assertNotIn("/maintenance/exit", trace)
+                self.assertEqual("committed", self.phase_value())
+
+    def test_convergence_uses_current_authoritative_ports_and_allows_empty_host(self):
+        for label, extra in (
+            ("added-and-migrated", {"SYNC_PORTS": "tap-b,tap-c"}),
+            ("empty-host", {"ZERO_PORTS": "true"}),
+        ):
+            with self.subTest(case=label):
+                self.reset_operation()
+                self.run_joint("install", extra=extra)
+                self.assertEqual("committed", self.phase_value())
+
+    def test_ovs_identity_probe_is_fixed_bounded_and_not_caller_executable(self):
+        source = INSTALLER.read_text(encoding="utf-8")
+        self.assertNotIn("OVS_CANARY_COMMAND", source)
+        self.assertNotIn("/bin/true", source)
+        self.run_joint("install")
+        trace = self.read_trace()
+        probe = (
+            "docker exec neutron_openvswitch_agent "
+            "ovs-appctl -t ovs-vswitchd version"
+        )
+        self.assertGreaterEqual(trace.count(probe), 10, trace)
+        self.assertNotIn("ovs-canary", trace)
 
     def test_core_rollback_restores_both_components_then_rebuilds_current_policy(self):
         self.run_joint("install", fail_at="resync", expected=1)
@@ -466,7 +752,7 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             "/maintenance/enter",
             "datapath restore",
             "agent restore",
-            "/status",
+            "/api/v1/neutron/status",
             "/maintenance/exit",
         )
         offset = -1
@@ -475,6 +761,39 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
             self.assertGreater(next_offset, offset, trace)
             offset = next_offset
         self.assertEqual("committed", self.phase_value())
+
+    def test_core_rollback_accepts_each_ledger_bound_live_image_combination(self):
+        cases = (
+            ("both-auto-restored", "datapath_replace", OLD_DP, OLD_AGENT,
+             False, False),
+            ("agent-auto-restored", "agent_replace", NEW_DP, OLD_AGENT,
+             True, False),
+            ("datapath-auto-restored", "resync", OLD_DP, NEW_AGENT,
+             False, True),
+            ("both-candidates", "resync", NEW_DP, NEW_AGENT, True, True),
+        )
+        for label, fail_at, live_dp, live_agent, restore_dp, restore_agent in cases:
+            with self.subTest(case=label):
+                self.reset_operation()
+                self.run_joint("install", fail_at=fail_at, expected=1)
+                (self.root / "dp-image-state").write_text(live_dp, encoding="utf-8")
+                (self.root / "agent-image-state").write_text(live_agent,
+                                                               encoding="utf-8")
+                self.trace.write_text("", encoding="utf-8")
+                self.run_joint("rollback")
+                trace = self.read_trace()
+                self.assertEqual(restore_dp, "datapath restore" in trace)
+                self.assertEqual(restore_agent, "agent restore" in trace)
+                self.assertIn('"expected_applied_generation":41', trace)
+                self.assertIn(
+                    '"expected_desired_hash":"%s"' % OLD_HASH, trace
+                )
+                self.assertLess(
+                    trace.index("/api/v1/admin/maintenance"),
+                    trace.index(" restore") if " restore" in trace
+                    else trace.index("/api/v1/neutron/status"),
+                )
+                self.assertEqual("committed", self.phase_value())
 
     def test_rollback_failure_stays_in_explicit_maintenance_bypass(self):
         self.run_joint("install", fail_at="resync", expected=1)
@@ -489,7 +808,9 @@ if [ "$component" = agent ] && [ "$action" = restore ]; then printf resynced >"$
         self.assertIn("agent prepare", trace)
         self.assertIn("agent replace", trace)
         self.assertIn("agent verify", trace)
-        self.assertGreaterEqual(trace.count("http://localhost/status"), 3)
+        self.assertGreaterEqual(
+            trace.count("http://localhost/api/v1/neutron/status"), 3
+        )
         self.assertNotIn("/api/v1/admin/full-resync", trace)
         self.assertNotIn("datapath replace", trace)
         self.assertNotIn("/maintenance/enter", trace)

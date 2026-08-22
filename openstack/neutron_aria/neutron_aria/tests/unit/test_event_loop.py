@@ -1013,6 +1013,18 @@ class EventLoopTestCase(unittest.TestCase):
         progress = state_store.to_dict()
         self.assertEqual("op-maint-1", progress["maintenance_operation_id"])
         self.assertEqual(1, progress["stable_read_attempts"])
+        maintenance_progress = getattr(state_store, "maintenance_progress", None)
+        self.assertTrue(callable(maintenance_progress),
+                        "missing bounded Task5 maintenance progress seam")
+        completion = maintenance_progress("op-maint-1")
+        self.assertTrue(completion["complete"])
+        self.assertEqual(result["snapshot"]["generation"], completion[
+            "completed_generation"
+        ])
+        self.assertEqual(
+            sorted(port["port_id"] for port in result["snapshot"]["ports"]),
+            completion["completed_managed_port_ids"],
+        )
 
     def test_stable_maintenance_resync_discards_changed_pair_before_submit(self):
         port_a = self._maintenance_port(
