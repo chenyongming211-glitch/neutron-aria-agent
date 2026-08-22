@@ -1192,3 +1192,37 @@ mod family_migration_startup_tests {
         let _ = fs::remove_dir_all(path);
     }
 }
+
+#[cfg(test)]
+mod maintenance_replay_tests {
+    use super::fresh_unpinned_firewall_config;
+    use crate::common::{ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED};
+    use crate::state::FirewallState;
+
+    #[test]
+    fn acl_projection_maintenance_fresh_unpinned_replay_is_default_only_and_enforcing() {
+        let state = FirewallState {
+            tap_id: TAP_ID_UNASSIGNED,
+            conntrack_enabled: true,
+            monitoring_enabled: true,
+            acl_enabled: true,
+            qos_enabled: true,
+            mirror_enabled: true,
+            tcprt_enabled: true,
+            ssl_enabled: true,
+            ..FirewallState::default()
+        };
+
+        let config = fresh_unpinned_firewall_config(&state);
+        assert_eq!(config.conntrack_enabled, 1);
+        assert_eq!(config.monitoring_enabled, 1);
+        assert_eq!(config.acl_enabled, 1);
+        assert_eq!(config.qos_enabled, 1);
+        assert_eq!(config.mirror_enabled, 1);
+        assert_eq!(config.tcprt_enabled, 1);
+        assert_eq!(config.ssl_enabled, 1);
+        assert_eq!(config.acl_active_bank, ACL_BANK_PRIMARY);
+        assert_eq!(config.acl_maintenance_bypass, 0);
+        assert_eq!(config._pad, 0);
+    }
+}

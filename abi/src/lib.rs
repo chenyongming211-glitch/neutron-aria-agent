@@ -976,6 +976,56 @@ mod tests {
         assert_eq!(core::mem::offset_of!(TcpRtValue, fin_ts), 144);
     }
 
+    fn maintenance_test_config(bypass: u8) -> FirewallConfig {
+        FirewallConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 1,
+            num_cpus: 8,
+            qos_enabled: 1,
+            acl_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 1,
+            ssl_enabled: 1,
+            acl_active_bank: ACL_BANK_SHADOW,
+            acl_maintenance_bypass: bypass,
+            _pad: 0,
+        }
+    }
+
+    #[test]
+    fn acl_maintenance_runtime_source_bypasses_acl_and_conntrack_before_per_tap_lookup() {
+        let bypassed = maintenance_test_config(1);
+        assert_eq!(
+            acl_ct_runtime_source(Some(&bypassed), FIRST_MANAGED_TAP_ID),
+            AclCtRuntimeSource::BypassAclAndConntrack,
+        );
+        assert_eq!(
+            acl_ct_runtime_source(Some(&bypassed), TAP_ID_UNASSIGNED),
+            AclCtRuntimeSource::BypassAclAndConntrack,
+        );
+    }
+
+    #[test]
+    fn acl_maintenance_runtime_source_gate_off_and_missing_remain_enforcement_capable() {
+        let enforcing = maintenance_test_config(0);
+        assert_eq!(
+            acl_ct_runtime_source(Some(&enforcing), FIRST_MANAGED_TAP_ID),
+            AclCtRuntimeSource::PerTapThenGlobal,
+        );
+        assert_eq!(
+            acl_ct_runtime_source(None, FIRST_MANAGED_TAP_ID),
+            AclCtRuntimeSource::PerTapThenGlobal,
+        );
+        assert_eq!(
+            acl_ct_runtime_source(Some(&enforcing), TAP_ID_UNASSIGNED),
+            AclCtRuntimeSource::GlobalOnly,
+        );
+        assert_eq!(
+            acl_ct_runtime_source(None, TAP_ID_UNASSIGNED),
+            AclCtRuntimeSource::GlobalOnly,
+        );
+    }
+
     #[test]
     fn fragment_map_layouts_are_stable() {
         assert_eq!(core::mem::size_of::<FragmentKind>(), 1);

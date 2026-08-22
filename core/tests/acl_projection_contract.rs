@@ -2,21 +2,26 @@ use aria_core::ebpf_ops::{
     build_runtime_group_map_entries, classify_managed_inventory_capture,
     classify_runtime_gate_state, collect_standalone_runtime_group_map_entries,
     compile_managed_group_projection, plan_projection_drift,
-    replay_standalone_state_to_pinned_maps, validate_general_group_overlap_transition,
-    CanonicalNetwork, CapturedProjection, FragmentRuntimeIdentity, GeneralGroupScope,
-    GeneralProjectionDisposition, GeneralProjectionExclusionReason, GroupProjectionMode,
-    ManagedGroupProjection, ManagedReplayRoute, ProjectionDirection, ProjectionDrift,
-    ProjectionEntry, ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry,
-    StandaloneReplayRoute,
+    prove_managed_firewall_config_runtime, replay_standalone_state_to_pinned_maps,
+    validate_general_group_overlap_transition, CanonicalNetwork, CapturedProjection,
+    FragmentRuntimeIdentity, GeneralGroupScope, GeneralProjectionDisposition,
+    GeneralProjectionExclusionReason, GroupProjectionMode, ManagedGroupProjection,
+    ManagedReplayRoute, ProjectionDirection, ProjectionDrift, ProjectionEntry,
+    ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry, StandaloneReplayRoute,
 };
-use aria_core::common::{IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6};
+use aria_core::common::{
+    TapMapRuntime, IP_FAMILY_UNSPECIFIED, IP_FAMILY_V4, IP_FAMILY_V6, TAP_ID_UNASSIGNED,
+};
 use aria_core::state::{
     migrate_legacy_rule_families, FirewallState, GroupInfo, LegacyAclMigrationAuthority,
     MirrorRuleInfo, QosRuleInfo, RuleInfo,
 };
 use aria_core::wal::{apply_wal_entry_for_authority, WalEntry};
 use std::collections::BTreeSet;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::unix::fs::{symlink, PermissionsExt};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn source_function<'a>(source: &'a str, signature: &str, next_signature: &str) -> &'a str {
     source
@@ -116,14 +121,9 @@ fn acl_projection_maintenance_setter_is_shared_key_zero_and_read_verified() {
         "pub fn update_firewall_config(",
     );
 
-    assert!(setter.contains("FIREWALL_CONFIG"));
-    assert_eq!(setter.matches("map.insert(&0u32").count(), 1);
-    let write = setter.find("map.insert(&0u32").unwrap();
-    let readback = setter[write..]
-        .find("map.get(&0u32")
-        .expect("setter must read key 0 after writing it");
-    assert!(readback > 0);
-    assert!(setter.contains("verify_acl_maintenance_bypass_readback"));
+    assert!(setter.contains("ManagedFirewallConfigRuntime"));
+    assert!(setter.contains("serialized_firewall_config_rmw"));
+    assert!(!setter.contains("TapMapRuntime"));
 
     for forbidden in [
         "attach_tc_",
@@ -139,6 +139,111 @@ fn acl_projection_maintenance_setter_is_shared_key_zero_and_read_verified() {
             "forbidden lifecycle call: {forbidden}"
         );
     }
+
+    let active_bank = source_function(
+        source,
+        "pub fn set_acl_active_bank(",
+        "pub fn read_acl_active_bank(",
+    );
+    let global_update = source_function(
+        source,
+        "pub fn update_firewall_config(",
+        "#[cfg(test)]",
+    );
+    assert!(active_bank.contains("serialized_firewall_config_rmw"));
+    assert!(global_update.contains("serialized_firewall_config_rmw"));
+    assert!(source.contains("static FIREWALL_CONFIG_RMW_LOCK"));
+    assert_eq!(source.matches("fn serialized_firewall_config_rmw").count(), 1);
+
+    let common = include_str!("../src/ebpf_ops/runtime.rs");
+    let proof_type = source_function(
+        common,
+        "pub struct ManagedFirewallConfigRuntime",
+        "pub fn prove_managed_firewall_config_runtime(",
+    );
+    assert!(!proof_type.contains("pub pin_path"));
+    assert!(!common.contains("assume_managed"));
+}
+
+fn maintenance_unique_temp_dir(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "aria-task3-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[test]
+fn acl_projection_maintenance_managed_proof_rejects_assigned_tap_runtime() {
+    let error = prove_managed_firewall_config_runtime(
+        TapMapRuntime::new("/sys/fs/bpf/aria/global-v2", 17),
+        "/sys/fs/bpf/aria",
+    )
+    .expect_err("assigned tap runtime must never mint a shared-map proof");
+    assert!(error.contains("unassigned tap_id"));
+}
+
+#[test]
+fn acl_projection_maintenance_managed_proof_rejects_arbitrary_temporary_map_shape() {
+    let base = maintenance_unique_temp_dir("untrusted-temp");
+    let managed = base.join("global-v2");
+    fs::create_dir_all(&managed).unwrap();
+    for name in aria_core::ebpf_ops::critical_network_map_names(
+        aria_core::ebpf_ops::TraceMapMode::Legacy,
+    ) {
+        fs::write(managed.join(name), b"compatible-name-only").unwrap();
+    }
+
+    let managed_string = managed.to_string_lossy().into_owned();
+    let base_string = base.to_string_lossy().into_owned();
+    let error = prove_managed_firewall_config_runtime(
+        TapMapRuntime::new(&managed_string, TAP_ID_UNASSIGNED),
+        &base_string,
+    )
+    .expect_err("temporary map shape must not mint managed authority");
+    assert!(error.contains("managed FIREWALL_CONFIG authority rejected"));
+    assert!(error.contains("root ownership") || error.contains("bpffs"));
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn acl_projection_maintenance_managed_proof_rejects_symlinked_namespace() {
+    let base = maintenance_unique_temp_dir("symlink");
+    let actual = base.join("actual-global-v2");
+    let managed = base.join("global-v2");
+    fs::create_dir_all(&actual).unwrap();
+    symlink(&actual, &managed).unwrap();
+
+    let managed_string = managed.to_string_lossy().into_owned();
+    let base_string = base.to_string_lossy().into_owned();
+    let error = prove_managed_firewall_config_runtime(
+        TapMapRuntime::new(&managed_string, TAP_ID_UNASSIGNED),
+        &base_string,
+    )
+    .expect_err("symlinked namespace must not mint managed authority");
+    assert!(error.contains("symlink"));
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn acl_projection_maintenance_managed_proof_rejects_untrusted_permissions() {
+    let base = maintenance_unique_temp_dir("permissions");
+    let managed = base.join("global-v2");
+    fs::create_dir_all(&managed).unwrap();
+    fs::set_permissions(&managed, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let managed_string = managed.to_string_lossy().into_owned();
+    let base_string = base.to_string_lossy().into_owned();
+    let error = prove_managed_firewall_config_runtime(
+        TapMapRuntime::new(&managed_string, TAP_ID_UNASSIGNED),
+        &base_string,
+    )
+    .expect_err("group/world-writable namespace must not mint managed authority");
+    assert!(error.contains("permissions"));
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -148,6 +253,14 @@ fn acl_projection_replay_defaults_missing_maintenance_gate_to_enforcement_capabl
         replay.contains("acl_maintenance_bypass: 0"),
         "fresh replay must default the maintenance bypass to disabled"
     );
+    let fresh = source_function(
+        replay,
+        "fn initialize_fresh_unpinned_firewall_config(",
+        "fn replay_state_from_snapshot_with_mode(",
+    );
+    assert!(fresh.contains("map_mut(\"FIREWALL_CONFIG\")"));
+    assert!(fresh.contains("insert(&0u32"));
+    assert!(!fresh.contains("get(&0u32"));
 }
 
 fn insert_group(state: &mut FirewallState, key: &str, id: u32, cidrs: &[&str]) {

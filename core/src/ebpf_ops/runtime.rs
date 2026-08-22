@@ -440,14 +440,366 @@ pub fn update_firewall_config(
 mod tests {
     use super::{
         firewall_config_with_acl_bank, firewall_config_with_acl_maintenance_bypass,
-        required_firewall_config, required_tap_config, tap_config_with_acl_bank,
+        firewall_config_with_runtime_updates, required_firewall_config, required_tap_config,
+        serialized_firewall_config_rmw, tap_config_with_acl_bank,
         tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
-        verify_acl_maintenance_bypass_readback,
+        validate_managed_firewall_config_proof_facts, FirewallConfigPatch,
+        FirewallConfigStore, ManagedFirewallConfigProofFacts,
     };
     use crate::common::{
         FirewallConfig, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
     };
     use aya::maps::MapError;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::thread;
+    use std::time::Duration;
+
+    #[derive(Clone)]
+    struct TestFirewallConfigStore {
+        state: Arc<StdMutex<Option<FirewallConfig>>>,
+        reads: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+        active_rmw: Arc<AtomicBool>,
+        overlap_observed: Arc<AtomicBool>,
+        delay_first_read: bool,
+        corrupt_full_readback: bool,
+        local_reads: usize,
+    }
+
+    impl TestFirewallConfigStore {
+        fn new(initial: Option<FirewallConfig>) -> Self {
+            Self {
+                state: Arc::new(StdMutex::new(initial)),
+                reads: Arc::new(AtomicUsize::new(0)),
+                writes: Arc::new(AtomicUsize::new(0)),
+                active_rmw: Arc::new(AtomicBool::new(false)),
+                overlap_observed: Arc::new(AtomicBool::new(false)),
+                delay_first_read: false,
+                corrupt_full_readback: false,
+                local_reads: 0,
+            }
+        }
+
+        fn concurrent_clone(&self) -> Self {
+            let mut cloned = self.clone();
+            cloned.delay_first_read = true;
+            cloned.local_reads = 0;
+            cloned
+        }
+
+        fn corrupting_clone(&self) -> Self {
+            let mut cloned = self.clone();
+            cloned.corrupt_full_readback = true;
+            cloned.local_reads = 0;
+            cloned
+        }
+    }
+
+    impl FirewallConfigStore for TestFirewallConfigStore {
+        fn read_key_zero(&mut self) -> Result<Option<FirewallConfig>, String> {
+            self.local_reads += 1;
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.local_reads == 1 && self.delay_first_read {
+                if self.active_rmw.swap(true, Ordering::SeqCst) {
+                    self.overlap_observed.store(true, Ordering::SeqCst);
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+
+            let mut observed = *self.state.lock().unwrap();
+            if self.local_reads == 2 {
+                self.active_rmw.store(false, Ordering::SeqCst);
+                if self.corrupt_full_readback {
+                    observed = observed.map(|config| FirewallConfig {
+                        ssl_enabled: config.ssl_enabled ^ 1,
+                        ..config
+                    });
+                }
+            }
+            Ok(observed)
+        }
+
+        fn write_key_zero(&mut self, config: FirewallConfig) -> Result<(), String> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            *self.state.lock().unwrap() = Some(config);
+            Ok(())
+        }
+    }
+
+    fn maintenance_test_firewall_config() -> FirewallConfig {
+        FirewallConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 1,
+            num_cpus: 8,
+            qos_enabled: 1,
+            acl_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 1,
+            ssl_enabled: 0,
+            acl_active_bank: 0,
+            acl_maintenance_bypass: 0,
+            _pad: 0,
+        }
+    }
+
+    #[test]
+    fn acl_projection_maintenance_shared_rmw_serializes_interleaved_gate_ssl_and_bank_updates() {
+        let store = TestFirewallConfigStore::new(Some(maintenance_test_firewall_config()));
+        let update_lock = Arc::new(StdMutex::new(()));
+
+        let mut gate_store = store.concurrent_clone();
+        let gate_lock = Arc::clone(&update_lock);
+        let gate = thread::spawn(move || {
+            serialized_firewall_config_rmw(
+                &gate_lock,
+                &mut gate_store,
+                "maintenance gate update",
+                |current| {
+                    Ok(firewall_config_with_acl_maintenance_bypass(
+                        current.expect("gate update requires current config"),
+                        true,
+                    ))
+                },
+            )
+        });
+
+        let mut ssl_store = store.concurrent_clone();
+        let ssl_lock = Arc::clone(&update_lock);
+        let ssl = thread::spawn(move || {
+            serialized_firewall_config_rmw(
+                &ssl_lock,
+                &mut ssl_store,
+                "SSL update",
+                |current| {
+                    Ok(FirewallConfig {
+                        ssl_enabled: 1,
+                        ..current.expect("SSL update requires current config")
+                    })
+                },
+            )
+        });
+
+        let mut bank_store = store.concurrent_clone();
+        let bank_lock = Arc::clone(&update_lock);
+        let bank = thread::spawn(move || {
+            serialized_firewall_config_rmw(
+                &bank_lock,
+                &mut bank_store,
+                "active bank update",
+                |current| {
+                    Ok(firewall_config_with_acl_bank(
+                        current.expect("bank update requires current config"),
+                        1,
+                    ))
+                },
+            )
+        });
+
+        gate.join().unwrap().unwrap();
+        ssl.join().unwrap().unwrap();
+        bank.join().unwrap().unwrap();
+
+        let final_config = store.state.lock().unwrap().unwrap();
+        assert_eq!(final_config.acl_maintenance_bypass, 1);
+        assert_eq!(final_config.ssl_enabled, 1);
+        assert_eq!(final_config.acl_active_bank, 1);
+        assert_eq!(final_config.monitoring_enabled, 1);
+        assert_eq!(final_config.qos_enabled, 1);
+        assert_eq!(final_config.mirror_enabled, 1);
+        assert!(!store.overlap_observed.load(Ordering::SeqCst));
+        assert_eq!(store.writes.load(Ordering::SeqCst), 3);
+        assert_eq!(store.reads.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn acl_projection_maintenance_shared_rmw_poison_fails_closed_before_store_access() {
+        let update_lock = Arc::new(StdMutex::new(()));
+        let poisoned = Arc::clone(&update_lock);
+        let _ = thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison shared FIREWALL_CONFIG lock");
+        })
+        .join();
+
+        let mut store = TestFirewallConfigStore::new(Some(maintenance_test_firewall_config()));
+        let error = serialized_firewall_config_rmw(
+            &update_lock,
+            &mut store,
+            "maintenance gate update",
+            |current| Ok(current.unwrap()),
+        )
+        .expect_err("poisoned serialization must fail closed");
+
+        assert!(error.contains("serialization lock poisoned"));
+        assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn acl_projection_maintenance_shared_rmw_rejects_full_struct_readback_drift() {
+        let base = TestFirewallConfigStore::new(Some(maintenance_test_firewall_config()));
+        let mut store = base.corrupting_clone();
+        let update_lock = StdMutex::new(());
+        let error = serialized_firewall_config_rmw(
+            &update_lock,
+            &mut store,
+            "maintenance gate update",
+            |current| {
+                Ok(firewall_config_with_acl_maintenance_bypass(
+                    current.unwrap(),
+                    true,
+                ))
+            },
+        )
+        .expect_err("unrelated readback drift must fail the whole update");
+
+        assert!(error.contains("full readback mismatch"));
+        assert!(error.contains("ssl_enabled"));
+        assert_eq!(base.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(base.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn acl_projection_maintenance_global_transform_preserves_or_defaults_gate_and_unrelated_flags()
+    {
+        let current = FirewallConfig {
+            acl_maintenance_bypass: 1,
+            acl_active_bank: 1,
+            ssl_enabled: 1,
+            ..maintenance_test_firewall_config()
+        };
+        let partial = firewall_config_with_runtime_updates(
+            Some(current),
+            FirewallConfigPatch {
+                monitoring_enabled: Some(false),
+                ..FirewallConfigPatch::default()
+            },
+            16,
+        )
+        .unwrap();
+        assert_eq!(partial.monitoring_enabled, 0);
+        assert_eq!(partial.acl_maintenance_bypass, 1);
+        assert_eq!(partial.acl_active_bank, 1);
+        assert_eq!(partial.ssl_enabled, 1);
+        assert_eq!(partial.conntrack_enabled, 1);
+        assert_eq!(partial.acl_enabled, 1);
+        assert_eq!(partial.qos_enabled, 1);
+        assert_eq!(partial.mirror_enabled, 1);
+        assert_eq!(partial.tcprt_enabled, 1);
+
+        let fresh = firewall_config_with_runtime_updates(
+            None,
+            FirewallConfigPatch {
+                conntrack_enabled: Some(true),
+                monitoring_enabled: Some(true),
+                acl_enabled: Some(true),
+                qos_enabled: Some(false),
+                mirror_enabled: Some(false),
+                tcprt_enabled: Some(false),
+                ssl_enabled: Some(false),
+            },
+            16,
+        )
+        .unwrap();
+        assert_eq!(fresh.num_cpus, 16);
+        assert_eq!(fresh.acl_maintenance_bypass, 0);
+        assert_eq!(fresh.acl_active_bank, 0);
+        assert_eq!(fresh._pad, 0);
+
+        assert!(firewall_config_with_runtime_updates(
+            None,
+            FirewallConfigPatch {
+                ssl_enabled: Some(true),
+                ..FirewallConfigPatch::default()
+            },
+            16,
+        )
+        .unwrap_err()
+        .contains("requires initialized FIREWALL_CONFIG key 0"));
+    }
+
+    #[test]
+    fn acl_projection_maintenance_managed_proof_rejects_each_untrusted_authority_fact() {
+        let valid = ManagedFirewallConfigProofFacts {
+            runtime_tap_id: crate::common::TAP_ID_UNASSIGNED,
+            absolute_path: true,
+            path_matches_managed_namespace: true,
+            on_bpffs: true,
+            has_symlink_component: false,
+            root_owned: true,
+            trusted_permissions: true,
+            complete_inventory: true,
+        };
+        validate_managed_firewall_config_proof_facts(&valid).unwrap();
+
+        let mut cases = Vec::new();
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                runtime_tap_id: 17,
+                ..valid
+            },
+            "unassigned tap_id",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                absolute_path: false,
+                ..valid
+            },
+            "absolute",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                path_matches_managed_namespace: false,
+                ..valid
+            },
+            "managed namespace",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                on_bpffs: false,
+                ..valid
+            },
+            "bpffs",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                has_symlink_component: true,
+                ..valid
+            },
+            "symlink",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                root_owned: false,
+                ..valid
+            },
+            "root ownership",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                trusted_permissions: false,
+                ..valid
+            },
+            "permissions",
+        ));
+        cases.push((
+            ManagedFirewallConfigProofFacts {
+                complete_inventory: false,
+                ..valid
+            },
+            "complete managed map inventory",
+        ));
+
+        for (facts, expected) in cases {
+            let error = validate_managed_firewall_config_proof_facts(&facts)
+                .expect_err("untrusted authority evidence must be rejected");
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn acl_ingress_hook_active_bank_update_preserves_tc_mode() {
@@ -670,19 +1022,7 @@ mod tests {
         assert_eq!(bypassed.tcprt_enabled, current.tcprt_enabled);
         assert_eq!(bypassed.ssl_enabled, current.ssl_enabled);
         assert_eq!(bypassed.acl_active_bank, current.acl_active_bank);
-        assert!(verify_acl_maintenance_bypass_readback(bypassed, true).is_ok());
-
-        let drifted = FirewallConfig {
-            acl_maintenance_bypass: 0,
-            ..bypassed
-        };
-        assert_eq!(
-            verify_acl_maintenance_bypass_readback(drifted, true),
-            Err(
-                "FIREWALL_CONFIG ACL maintenance bypass readback mismatch: expected 1, observed 0"
-                    .to_string()
-            )
-        );
+        assert_eq!(bypassed._pad, current._pad);
     }
 
     #[test]
