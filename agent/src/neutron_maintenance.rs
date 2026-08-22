@@ -1548,13 +1548,15 @@ impl MaintenanceCoordinator {
                 "exit or abort transition fences all writers",
             ));
         }
-        if self.terminal_action.read().await.is_some() {
+        let state = self.state.read().await;
+        if *self.terminal_action.read().await == Some(MaintenanceTerminalAction::Abort)
+            && state.is_active()
+        {
             return Err(MaintenanceError::conflict(
                 "maintenance_terminal_result_persisted",
-                "a persisted terminal result fences all ordinary writers",
+                "an active persisted Abort result fences all ordinary writers",
             ));
         }
-        let state = self.state.read().await;
         admit_maintenance_writer(&*state, writer, operation_id)?;
         Ok(MaintenanceWriterLease { _guard: guard })
     }
@@ -1755,12 +1757,12 @@ impl MaintenanceCoordinator {
         generation: u64,
         desired_hash: Option<String>,
     ) -> Result<Option<MaintenanceState>, String> {
-        if self.terminal_action.read().await.is_some() {
-            return Err("maintenance terminal result fences snapshot progress".to_string());
-        }
         let mut state = self.state.read().await.clone();
         if !state.is_active() {
             return Ok(None);
+        }
+        if *self.terminal_action.read().await == Some(MaintenanceTerminalAction::Abort) {
+            return Err("active maintenance Abort result fences snapshot progress".to_string());
         }
         if state.operation_id.as_deref() != operation_id {
             return Err("maintenance snapshot completion operation identity changed".to_string());
