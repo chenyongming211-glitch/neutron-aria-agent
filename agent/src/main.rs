@@ -2292,4 +2292,24 @@ ipv6_timeout_seconds = 43
         let mut byte = [0u8; 1];
         assert_eq!(queued_client.read(&mut byte).await.unwrap(), 0);
     }
+
+    #[test]
+    fn neutron_maintenance_admin_peercred_authorizes_root_uid_independent_of_gid() {
+        let auth = AdminPeerAuth::production();
+
+        assert!(auth
+            .authorize(Some(UnixPeerCred {
+                pid: 3,
+                uid: 0,
+                gid: 4242,
+            }))
+            .allowed);
+        assert!(!auth
+            .authorize(Some(UnixPeerCred {
+                pid: 4,
+                uid: 4242,
+                gid: 0,
+            }))
+            .allowed);
+    }
 }

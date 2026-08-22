@@ -2810,4 +2810,163 @@ mod tests {
         assert_eq!(events[0].outcome, MaintenanceAuditOutcome::Attempt);
         assert_eq!(events[1].outcome, MaintenanceAuditOutcome::Success);
     }
+
+    #[tokio::test]
+    async fn neutron_maintenance_abort_terminal_retry_requires_original_active_phase() {
+        let store = FaultStore::new(active_records("op-abort-terminal-cas"));
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store.clone(),
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+        let original = MaintenanceAbortRequest {
+            operation_id: "op-abort-terminal-cas".to_string(),
+            expected_phase: MaintenancePhase::MaintenanceBypass,
+            error: Some("candidate_failed".to_string()),
+        };
+
+        let first = coordinator
+            .abort(original.clone(), convergence())
+            .await
+            .expect("the original active-phase abort should commit");
+        assert_eq!(first.0, MaintenanceDisposition::Mutate);
+        assert_eq!(first.1.phase, MaintenancePhase::Committed);
+        let retry = coordinator
+            .abort(original, convergence())
+            .await
+            .expect("the exact lost-response retry should be idempotent");
+        assert_eq!(retry.0, MaintenanceDisposition::Idempotent);
+
+        let records_before = store.records();
+        let gate_calls_before = gate.calls();
+        let state_before = coordinator.status().await;
+        let impossible = MaintenanceAbortRequest {
+            operation_id: "op-abort-terminal-cas".to_string(),
+            expected_phase: MaintenancePhase::Committed,
+            error: Some("candidate_failed".to_string()),
+        };
+        let error = coordinator
+            .abort(impossible, convergence())
+            .await
+            .expect_err("a terminal phase was never a valid original abort CAS");
+
+        assert_eq!(error.http_status, 409);
+        assert_eq!(error.code, "maintenance_phase_conflict");
+        assert_eq!(store.records(), records_before);
+        assert_eq!(gate.calls(), gate_calls_before);
+        assert_eq!(coordinator.status().await, state_before);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_checkpoint_unknown_requires_live_startup_proof() {
+        let replay = MaintenanceStoreReplay {
+            state: MaintenanceState::inactive(),
+            failures: 0,
+            pending_transition: None,
+            terminal_action: None,
+            gate_state: MaintenanceGateState::Unknown,
+            block_cause: Some("maintenance_gate_unknown".to_string()),
+        };
+        let store = FaultStore::with_replay(replay);
+        let gate = FaultGate::default();
+        gate.push_result(Err("live_gate_proof_unavailable"));
+        let coordinator = coordinator_with_faults(
+            store,
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+
+        assert!(coordinator.recover_before_reconciliation().await.is_err());
+        assert_eq!(gate.calls(), vec![true]);
+        let snapshot = coordinator.snapshot().await;
+        assert!(snapshot.blocked);
+        assert_eq!(snapshot.gate_state, MaintenanceGateState::Unknown);
+        assert_eq!(
+            snapshot.block_cause.as_deref(),
+            Some("maintenance_gate_unknown")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_enter_commit_failure_keeps_verified_bypass_truth() {
+        let store = FaultStore::new(Vec::new());
+        store.push_append_result(Ok(()));
+        store.push_append_result(Err("enter_commit_disk_failure"));
+        let gate = FaultGate::default();
+        let coordinator = coordinator_with_faults(
+            store,
+            gate.clone(),
+            CapturingAudit::default(),
+        );
+
+        let error = coordinator
+            .enter(enter_request("op-enter-commit-failure"), convergence())
+            .await
+            .expect_err("terminal enter WAL failure must not report success");
+        assert_eq!(error.code, "maintenance_wal_commit_failed");
+        assert_eq!(gate.calls(), vec![true]);
+        let snapshot = coordinator.snapshot().await;
+        assert!(snapshot.blocked);
+        assert_eq!(snapshot.gate_state, MaintenanceGateState::Bypass);
+        assert_eq!(snapshot.state.phase, MaintenancePhase::MaintenanceBypass);
+    }
+
+    #[test]
+    fn neutron_maintenance_checkpoint_gate_and_cause_combinations_are_strict_and_bounded() {
+        let active = active_state("op-checkpoint-semantics", 41, "sha256:host-41");
+        let mut unknown = active.clone();
+        unknown.phase = MaintenancePhase::GateUnknown;
+        let oversized = "x".repeat(MAX_ERROR_BYTES + 1);
+
+        for invalid in [
+            MaintenanceWalRecord::checkpoint(
+                MaintenanceState::inactive(),
+                None,
+                None,
+                MaintenanceGateState::Unknown,
+                Some("maintenance_gate_unknown".to_string()),
+            ),
+            MaintenanceWalRecord::checkpoint(
+                active.clone(),
+                None,
+                None,
+                MaintenanceGateState::Enforce,
+                None,
+            ),
+            MaintenanceWalRecord::checkpoint(
+                unknown.clone(),
+                None,
+                None,
+                MaintenanceGateState::Unknown,
+                None,
+            ),
+            MaintenanceWalRecord::checkpoint(
+                unknown.clone(),
+                None,
+                None,
+                MaintenanceGateState::Unknown,
+                Some(oversized.clone()),
+            ),
+        ] {
+            assert!(
+                replay_maintenance_records(&[invalid]).is_err(),
+                "invalid checkpoint gate/cause combination must fail closed"
+            );
+        }
+
+        let valid = MaintenanceWalRecord::checkpoint(
+            unknown,
+            None,
+            None,
+            MaintenanceGateState::Unknown,
+            Some("maintenance_gate_unknown".to_string()),
+        );
+        let replay = replay_maintenance_records(&[valid]).unwrap();
+        assert_eq!(replay.gate_state, MaintenanceGateState::Unknown);
+        assert_eq!(
+            replay.block_cause.as_deref(),
+            Some("maintenance_gate_unknown")
+        );
+    }
 }

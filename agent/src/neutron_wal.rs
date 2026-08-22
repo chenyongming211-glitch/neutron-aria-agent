@@ -3099,6 +3099,15 @@ mod tests {
             .unwrap();
 
         let runtime = neutron_wal_baseline_state(42);
+        wal.append_snapshot_intent(
+            42,
+            Some("hash-42".to_string()),
+            vec!["p1".to_string()],
+            vec!["acl".to_string()],
+            vec![managed("p1", "tap-p1")],
+            None,
+        )
+        .unwrap();
         active.applied_generation = 42;
         active.applied_desired_hash = Some("hash-42".to_string());
         wal.append_snapshot_commit_with_maintenance_progress(runtime.clone(), active.clone())
@@ -3115,6 +3124,116 @@ mod tests {
         );
         assert!(replay.maintenance.pending_transition.is_none());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_maintenance_wal_composite_replay_rejects_orphan_wrong_type_and_identity_drift() {
+        fn seed_active(wal: &NeutronWal, operation_id: &str) -> MaintenanceState {
+            let preparing = maintenance_state(operation_id);
+            let mut active = preparing.clone();
+            active.phase = MaintenancePhase::MaintenanceBypass;
+            wal.append_maintenance_record(MaintenanceWalRecord::enter_intent_state(preparing))
+                .unwrap();
+            wal.append_maintenance_record(MaintenanceWalRecord::enter_commit_state(active.clone()))
+                .unwrap();
+            active
+        }
+
+        fn append_intent(wal: &NeutronWal) {
+            wal.append_snapshot_intent(
+                42,
+                Some("hash-42".to_string()),
+                vec!["p1".to_string()],
+                vec!["acl".to_string()],
+                vec![managed("p1", "tap-p1")],
+                None,
+            )
+            .unwrap();
+        }
+
+        let orphan_root = temp_state_path().join("composite-orphan");
+        let orphan_wal = NeutronWal::new(&orphan_root);
+        let mut orphan_progress = seed_active(&orphan_wal, "op-composite-orphan");
+        orphan_progress.applied_generation = 42;
+        orphan_progress.applied_desired_hash = Some("hash-42".to_string());
+        orphan_wal
+            .append_snapshot_commit_with_maintenance_progress(
+                neutron_wal_baseline_state(42),
+                orphan_progress,
+            )
+            .unwrap();
+        assert!(orphan_wal.replay().failures > 0);
+
+        let wrong_type_root = temp_state_path().join("composite-wrong-type");
+        let wrong_type_wal = NeutronWal::new(&wrong_type_root);
+        let mut wrong_type_state = seed_active(&wrong_type_wal, "op-composite-wrong-type");
+        append_intent(&wrong_type_wal);
+        wrong_type_state.applied_generation = 42;
+        wrong_type_state.applied_desired_hash = Some("hash-42".to_string());
+        wrong_type_wal
+            .append(&NeutronWalEntry::SnapshotMaintenanceCommit {
+                state: neutron_wal_baseline_state(42).with_status_hash().unwrap(),
+                maintenance: MaintenanceWalRecord::recovery_commit_state(
+                    wrong_type_state,
+                    crate::neutron_maintenance::MaintenanceGateState::Bypass,
+                    "not_progress_commit",
+                ),
+            })
+            .unwrap();
+        assert!(wrong_type_wal.replay().failures > 0);
+
+        let runtime_drift_root = temp_state_path().join("composite-runtime-drift");
+        let runtime_drift_wal = NeutronWal::new(&runtime_drift_root);
+        let mut runtime_drift = seed_active(&runtime_drift_wal, "op-composite-runtime-drift");
+        append_intent(&runtime_drift_wal);
+        runtime_drift.applied_generation = 43;
+        runtime_drift.applied_desired_hash = Some("hash-43".to_string());
+        runtime_drift_wal
+            .append_snapshot_commit_with_maintenance_progress(
+                neutron_wal_baseline_state(43),
+                runtime_drift,
+            )
+            .unwrap();
+        assert!(runtime_drift_wal.replay().failures > 0);
+
+        let invalid_commit_root = temp_state_path().join("composite-invalid-commit");
+        let invalid_commit_wal = NeutronWal::new(&invalid_commit_root);
+        let mut invalid_progress = seed_active(&invalid_commit_wal, "op-composite-invalid-commit");
+        append_intent(&invalid_commit_wal);
+        invalid_progress.applied_generation = 42;
+        invalid_progress.applied_desired_hash = Some("hash-42".to_string());
+        let mut invalid_runtime = neutron_wal_baseline_state(42);
+        invalid_runtime.pending_generation = Some(42);
+        invalid_runtime.authority_state = "applying".to_string();
+        invalid_commit_wal
+            .append_snapshot_commit_with_maintenance_progress(invalid_runtime, invalid_progress)
+            .unwrap();
+        assert!(invalid_commit_wal.replay().failures > 0);
+
+        let maintenance_drift_root = temp_state_path().join("composite-maintenance-drift");
+        let maintenance_drift_wal = NeutronWal::new(&maintenance_drift_root);
+        let mut maintenance_drift =
+            seed_active(&maintenance_drift_wal, "op-composite-maintenance-drift");
+        append_intent(&maintenance_drift_wal);
+        maintenance_drift.applied_generation = 43;
+        maintenance_drift.applied_desired_hash = Some("hash-43".to_string());
+        maintenance_drift_wal
+            .append_snapshot_commit_with_maintenance_progress(
+                neutron_wal_baseline_state(42),
+                maintenance_drift,
+            )
+            .unwrap();
+        assert!(maintenance_drift_wal.replay().failures > 0);
+
+        for root in [
+            orphan_root,
+            wrong_type_root,
+            runtime_drift_root,
+            invalid_commit_root,
+            maintenance_drift_root,
+        ] {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]

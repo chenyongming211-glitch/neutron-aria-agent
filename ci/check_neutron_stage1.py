@@ -605,8 +605,8 @@ def check_status_v1_contract():
     fixture_v2 = read_json(STATUS_V2_FIXTURE_PATH)
     fixture_v3 = read_json(STATUS_V3_FIXTURE_PATH)
     expected_contract = {
-        "status_schema_version_min": 2, "status_schema_version_max": 3,
-        "status_contract_hash": "v0.9-neutron-status-3", "status_contract_scenarios_path": STATUS_V3_FIXTURE_PATH,
+        "status_schema_version_min": 2, "status_schema_version_max": 4,
+        "status_contract_hash": "v0.9-neutron-status-4", "status_contract_scenarios_path": "docs/neutron-status-contract-v4-scenarios.json",
         "status_v1_compatibility_scenarios_path": STATUS_FIXTURE_PATH,
     }
     for field, value in expected_contract.items():
@@ -634,7 +634,7 @@ def check_status_v1_contract():
         if isinstance(status, dict) and status.get("status_schema_version") not in (None, 1):
             raise SystemExit("ERROR: Status V1 scenario status schema drifted")
     api = read_text(RUST_API_PATH)
-    for constant, expected in (("NEUTRON_STATUS_SCHEMA_VERSION_MIN", "2"), ("NEUTRON_STATUS_SCHEMA_VERSION_MAX", "3"), ("NEUTRON_STATUS_CONTRACT_HASH", "v0.9-neutron-status-3")):
+    for constant, expected in (("NEUTRON_STATUS_SCHEMA_VERSION_MIN", "2"), ("NEUTRON_STATUS_SCHEMA_VERSION_MAX", "4"), ("NEUTRON_STATUS_CONTRACT_HASH", "v0.9-neutron-status-4"), ("NEUTRON_UDS_ERROR_CODES_HASH", "v0.9-neutron-errors-4")):
         if rust_const(api, constant) != expected:
             raise SystemExit("ERROR: public Rust Status constant %s drifted" % constant)
     schema_v2 = fixture_v2.get("status_contract")

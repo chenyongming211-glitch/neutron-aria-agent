@@ -3100,4 +3100,60 @@ mod tests {
         assert!(encoded.get("maintenance_token").is_none());
         assert!(encoded.get("policy").is_none());
     }
+
+    #[test]
+    fn neutron_maintenance_public_status_contract_versions_gate_unknown_and_errors() {
+        assert_eq!(NEUTRON_STATUS_SCHEMA_VERSION_MIN, 2);
+        assert_eq!(NEUTRON_STATUS_SCHEMA_VERSION_MAX, 4);
+        assert_eq!(NEUTRON_STATUS_CONTRACT_HASH, "v0.9-neutron-status-4");
+        assert_eq!(NEUTRON_UDS_ERROR_CODES_HASH, "v0.9-neutron-errors-4");
+        assert_eq!(
+            serde_json::to_value(MaintenancePhase::GateUnknown).unwrap(),
+            "gate_unknown"
+        );
+
+        let contract: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/neutron-uds-contract.json"
+        )))
+        .unwrap();
+        assert_eq!(contract["status_schema_version_max"], 4);
+        assert_eq!(contract["status_contract_hash"], "v0.9-neutron-status-4");
+        assert_eq!(contract["error_codes_hash"], "v0.9-neutron-errors-4");
+        assert_eq!(
+            contract["status_contract_scenarios_path"],
+            "docs/neutron-status-contract-v4-scenarios.json"
+        );
+        let phase_values = contract["maintenance"]["phase_values"]
+            .as_array()
+            .expect("maintenance phase vocabulary must be authoritative");
+        assert!(phase_values.iter().any(|value| value == "gate_unknown"));
+        let status_fields = contract["maintenance"]["status_fields"]
+            .as_array()
+            .expect("maintenance status fields must be versioned");
+        for field in [
+            "maintenance_phase",
+            "maintenance_operation_id",
+            "maintenance_reason",
+            "maintenance_action",
+            "acl_enforcement",
+        ] {
+            assert!(status_fields.iter().any(|value| value == field));
+        }
+        let maintenance_codes = contract["maintenance"]["error_codes"]
+            .as_array()
+            .expect("maintenance error codes must be authoritative");
+        for code in [
+            "maintenance_phase_conflict",
+            "maintenance_gate_unknown",
+            "maintenance_wal_commit_failed",
+            "maintenance_terminal_transition_pending",
+        ] {
+            assert!(maintenance_codes.iter().any(|value| value == code));
+        }
+        assert_eq!(
+            contract["maintenance"]["compatibility"],
+            "status schemas 2-3 remain readable; schema 4 adds maintenance transaction truth"
+        );
+    }
 }

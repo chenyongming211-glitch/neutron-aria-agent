@@ -18439,4 +18439,160 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn neutron_maintenance_background_failure_marker_retains_admitted_writer_lease() {
+        let root = temp_root("maintenance-background-marker-lease");
+        seed_active_maintenance(&root, "op-background-marker");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.pending_generation = Some(42);
+            runtime.desired_hash = Some("hash-42".to_string());
+        }
+        let lease = state
+            .maintenance
+            .acquire_writer(
+                MaintenanceWriter::FullHostSnapshot,
+                Some("op-background-marker"),
+            )
+            .await
+            .unwrap();
+        let runtime_guard = state.runtime.write().await;
+        let marker_state = state.clone();
+        let marker = tokio::spawn(async move {
+            mark_snapshot_background_error(
+                &marker_state,
+                lease,
+                42,
+                Some("hash-42".to_string()),
+                "fault_injection",
+                "forced background failure".to_string(),
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        let transition_coordinator = state.maintenance.clone();
+        let mut transition = tokio::spawn(async move {
+            transition_coordinator.begin_transaction().await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut transition)
+                .await
+                .is_err(),
+            "enter/exit/abort must not overtake a background failure marker admitted by the writer"
+        );
+
+        drop(runtime_guard);
+        marker.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut transition)
+            .await
+            .expect("transition should proceed after the marker releases its writer lease")
+            .unwrap();
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.authority_state, "degraded");
+        assert_eq!(runtime.wal_status, "background_apply_failed:fault_injection");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_maintenance_admin_enter_failure_emits_one_result_event() {
+        #[derive(Default)]
+        struct TestStore;
+
+        impl crate::neutron_maintenance::MaintenanceStore for TestStore {
+            fn load(&self) -> crate::neutron_maintenance::MaintenanceStoreReplay {
+                crate::neutron_maintenance::MaintenanceStoreReplay {
+                    state: aria_api::MaintenanceState::inactive(),
+                    failures: 0,
+                    pending_transition: None,
+                    terminal_action: None,
+                    gate_state: crate::neutron_maintenance::MaintenanceGateState::Enforce,
+                    block_cause: None,
+                }
+            }
+
+            fn append(&self, _record: MaintenanceWalRecord) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        #[derive(Default)]
+        struct FailingGate;
+
+        impl crate::neutron_maintenance::MaintenanceGateRuntime for FailingGate {
+            fn set_bypass_verified(
+                &self,
+                _enabled: bool,
+            ) -> crate::neutron_maintenance::MaintenanceIoFuture<'_> {
+                Box::pin(async { Err("gate_readback_failed".to_string()) })
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct AuditCapture {
+            events: Arc<std::sync::Mutex<Vec<crate::neutron_maintenance::MaintenanceAuditEvent>>>,
+        }
+
+        impl crate::neutron_maintenance::MaintenanceAuditSink for AuditCapture {
+            fn emit(&self, event: crate::neutron_maintenance::MaintenanceAuditEvent) {
+                self.events.lock().unwrap().push(event);
+            }
+        }
+
+        let root = temp_root("maintenance-enter-single-failure-audit");
+        let base = test_neutron_state(&root);
+        let audit = AuditCapture::default();
+        let maintenance = Arc::new(MaintenanceCoordinator::new_with_dependencies(
+            Arc::new(TestStore),
+            Arc::new(FailingGate),
+            Arc::new(audit.clone()),
+        ));
+        let state = NeutronApiState::new_with_maintenance(
+            base.registry.clone(),
+            base.control_plane.clone(),
+            base.ovs_bridge.clone(),
+            base.wal.clone(),
+            maintenance,
+        );
+        state.mark_restore_ready();
+        let response = build_admin_router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/admin/maintenance/enter")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&MaintenanceEnterRequest {
+                            operation_id: "op-single-failure-audit".to_string(),
+                            domains: vec!["acl".to_string()],
+                            reason: "planned_upgrade".to_string(),
+                            expected_applied_generation: 0,
+                            expected_desired_hash: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let events = audit.events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.action
+                        == crate::neutron_maintenance::MaintenanceAuditAction::Enter
+                        && event.outcome
+                            != crate::neutron_maintenance::MaintenanceAuditOutcome::Attempt
+                })
+                .count(),
+            1,
+            "the coordinator/handler pair must emit exactly one terminal result"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 }
